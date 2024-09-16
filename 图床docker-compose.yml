@@ -15,11 +15,11 @@ services:
       # 数据库用户名（一般使用本镜像数据库无需修改，如果使用外部三方数据库自行修改自己的用户名）
       MYSQL_USERNAME: root
       # 自定设置一个MySQL的密码，请保证与下方 POSTGRES_PASSWORD 的变量值一致
-      MYSQL_PASS: winter3818
+      MYSQL_PASS: 123456
       # 前端域名(反代10089端口的域名)
-      HELLOHAO_WEB_HOST: http://imghub.irisz.net
+      HELLOHAO_WEB_HOST: https://
       # 后端域名(反代10088端口的域名)
-      HELLOHAO_SERVER_HOST: http://api.irisz.net
+      HELLOHAO_SERVER_HOST: https://
       # 用户连续访问最高阀值(可默认)
       LIMIT_NUMBER: 500
       # 用户访问最小安全时间(可默认)
@@ -41,6 +41,6 @@ services:
       - /HellohaoData/mysql_core:/var/lib/mysql
     environment:
       # MySQL的密码
-      MYSQL_ROOT_PASSWORD: winter3818
+      MYSQL_ROOT_PASSWORD: 123456
 networks:
   hellohao_core_network:
