@@ -1,0 +1,46 @@
+version: "3"
+services:
+  tbed-core:
+    # 通过以上镜像地址查看版本，确保是当前的最新版本
+    image: hellohao/tbed-core:7.56
+    networks:
+      hellohao_core_network:
+    ports:
+      - "10088:10088"
+      - "10089:10089"
+    volumes:
+      - /HellohaoData/:/HellohaoData/
+    environment:
+      MYSQL_URL: jdbc:mysql://hellohao-core-db/tbed_core?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
+      # 数据库用户名（一般使用本镜像数据库无需修改，如果使用外部三方数据库自行修改自己的用户名）
+      MYSQL_USERNAME: root
+      # 自定设置一个MySQL的密码，请保证与下方 POSTGRES_PASSWORD 的变量值一致
+      MYSQL_PASS: winter3818
+      # 前端域名(反代10089端口的域名)
+      HELLOHAO_WEB_HOST: http://imghub.irisz.net
+      # 后端域名(反代10088端口的域名)
+      HELLOHAO_SERVER_HOST: http://api.irisz.net
+      # 用户连续访问最高阀值(可默认)
+      LIMIT_NUMBER: 500
+      # 用户访问最小安全时间(可默认)
+      MIN_SAFE_TIME: 30000
+      # 默认限制时间(可默认)
+      LIMITED_TIME_MILLIS: 600000
+  hellohao-core-db:
+    image: hellohao/mysql-core:1.0
+    networks:
+      hellohao_core_network:
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+      - --explicit_defaults_for_timestamp=true
+    ports:
+      - "3307:3306"
+    volumes:
+      - /HellohaoData/mysql_core:/var/lib/mysql
+    environment:
+      # MySQL的密码
+      MYSQL_ROOT_PASSWORD: winter3818
+networks:
+  hellohao_core_network:
