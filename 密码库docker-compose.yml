@@ -14,4 +14,4 @@ services:
       WEBSOCKET_ENABLED: "true" #是否开启WebSocket
       SIGNUPS_ALLOWED: "true"   #是否开启注册，自用的话自己搭建好注册后改成false
       WEB_VAULT_ENABLED: "true" #是否开启Web客户端
-      ADMIN_TOKEN: "zq7lE2mQc4x4N1KbBxyZlK1Gbl0hNCrxH+Tpgb5BzU9Qtj4ABz3nVf1sFV8bqLgh"
+      ADMIN_TOKEN: "pass"
