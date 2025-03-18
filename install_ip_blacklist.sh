@@ -2,68 +2,100 @@
 
 # 检查是否以root运行
 if [[ $EUID -ne 0 ]]; then
-    echo "错误：此脚本必须以root权限运行！"
+    echo -e "\033[31m错误：此脚本必须以root权限运行！\033[0m"
     echo "请使用 'sudo bash $0'"
     exit 1
 fi
 
-# 安装基础依赖
-echo "正在安装依赖：iproute2 iptables ipset"
-apt-get update -qq > /dev/null
-apt-get install -y -qq iproute2 iptables ipset > /dev/null
+#---------- 依赖安装部分 ----------#
+echo -e "\n\033[36m[1/4] 正在更新软件包列表...\033[0m"
+apt-get update
+if [ $? -ne 0 ]; then
+    echo -e "\033[31m更新失败，请检查网络连接！\033[0m"
+    exit 1
+fi
 
-# 创建 /root/ip_blacklist.sh
-echo "正在生成主脚本：/root/ip_blacklist.sh"
+echo -e "\n\033[36m[2/4] 正在安装核心依赖\033[0m"
+for pkg in iproute2 iptables ipset; do
+    if ! dpkg -l | grep -q "^ii  $pkg "; then
+        echo -e "正在安装 \033[34m$pkg\033[0m..."
+        apt-get install -y $pkg
+        if [ $? -ne 0 ]; then
+            echo -e "\033[31m$pkg 安装失败！\033[0m"
+            exit 1
+        fi
+    else
+        echo -e "\033[32m$pkg 已安装，跳过\033[0m"
+    fi
+done
+
+#---------- 生成主脚本 ----------#
+echo -e "\n\033[36m[3/4] 生成主脚本到 /root/ip_blacklist.sh\033[0m"
 cat > /root/ip_blacklist.sh <<'EOF'
 #!/bin/bash
 
-# 检查是否以root运行
+# 彩色输出定义
+RED='\033[31m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+BLUE='\033[34m'
+CYAN='\033[36m'
+NC='\033[0m'
+
+# 检查root权限
 if [[ $EUID -ne 0 ]]; then
-    echo "错误：此脚本必须以root权限运行！" 
+    echo -e "${RED}错误：此脚本必须以root权限运行！${NC}"
     echo "请使用 'sudo bash $0'"
     exit 1
 fi
 
-# 依赖列表（Debian/Ubuntu包名）
-REQUIRED_PKGS=("iproute2" "iptables" "ipset")
-
-# 安装缺失的依赖
+# 依赖检查与安装
 install_dependencies() {
-    echo "正在更新软件包列表..."
-    apt-get update -qq > /dev/null
-
+    echo -e "\n${CYAN}[1/3] 检查系统依赖...${NC}"
+    local REQUIRED_PKGS=("iproute2" "iptables" "ipset")
+    
     for pkg in "${REQUIRED_PKGS[@]}"; do
         if ! dpkg -l | grep -q "^ii  $pkg "; then
-            echo "正在安装依赖：$pkg"
-            apt-get install -y -qq $pkg > /dev/null
+            echo -e "${RED}未找到 $pkg，正在安装...${NC}"
+            apt-get update
+            apt-get install -y $pkg || {
+                echo -e "${RED}$pkg 安装失败！${NC}"
+                exit 1
+            }
         fi
     done
 }
 
-# 检查内核模块是否加载
+# 内核模块检查
 check_kernel_modules() {
-    MODULES=("ip_tables" "ip_set")
+    echo -e "\n${CYAN}[2/3] 检查内核模块...${NC}"
+    local MODULES=("ip_tables" "ip_set")
+    
     for mod in "${MODULES[@]}"; do
         if ! lsmod | grep -q "$mod"; then
-            echo "正在加载内核模块：$mod"
-            modprobe $mod
+            echo -e "加载模块 ${YELLOW}$mod${NC}"
+            modprobe $mod || {
+                echo -e "${RED}无法加载模块 $mod${NC}"
+                exit 1
+            }
         fi
     done
 }
 
-# 创建日志文件并配置logrotate
+# 初始化日志系统
 init_logfile() {
-    LOG_FILE="/var/log/iptables_ban.log"
-    LOGROTATE_CONF="/etc/logrotate.d/iptables_ban"
-
+    echo -e "\n${CYAN}[3/3] 初始化日志系统...${NC}"
+    local LOG_FILE="/var/log/iptables_ban.log"
+    
     if [ ! -f "$LOG_FILE" ]; then
+        echo -e "创建日志文件 ${BLUE}$LOG_FILE${NC}"
         touch "$LOG_FILE"
         chmod 644 "$LOG_FILE"
-        echo "已创建日志文件：$LOG_FILE"
     fi
 
-    if [ ! -f "$LOGROTATE_CONF" ]; then
-        cat > "$LOGROTATE_CONF" <<LOGR
+    # 配置 logrotate
+    if [ ! -f "/etc/logrotate.d/iptables_ban" ]; then
+        cat > /etc/logrotate.d/iptables_ban <<LOGR
 $LOG_FILE {
     daily
     missingok
@@ -74,126 +106,127 @@ $LOG_FILE {
     create 644 root root
 }
 LOGR
-        echo "已配置logrotate策略：$LOGROTATE_CONF"
+        echo -e "已配置 ${BLUE}logrotate 策略${NC}"
     fi
 }
 
-#----- 主流程 -----
+#---------- 主流程 ----------#
+echo -e "\n${GREEN}=== 初始化流量监控系统 ===${NC}"
 install_dependencies
 check_kernel_modules
 init_logfile
 
-# 自动获取第一个状态为UP的非lo网卡
+# 获取活动网卡
 INTERFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -v lo | xargs -I {} sh -c 'if ip link show {} | grep -q "state UP"; then echo {}; fi' | head -n 1)
-
 if [ -z "$INTERFACE" ]; then
-    echo "未找到有效的网卡接口，脚本退出"
+    echo -e "${RED}未找到有效的网卡接口！${NC}"
     exit 1
-else
-    echo "监控网卡: $INTERFACE"
 fi
+echo -e "监控网卡: ${GREEN}$INTERFACE${NC}"
 
-LIMIT=40
-DURATION=1
-UNBAN_TIME=86400
-SSH_PORT=22
-declare -A ip_first_seen
+#---------- 配置防火墙规则 ----------#
+LIMIT=40  # 流量阈值(MB/s)
+UNBAN_TIME=86400  # 封禁时长(秒)
 
 if ! ipset list banlist &>/dev/null; then
+    echo -e "创建 ipset 黑名单..."
     ipset create banlist hash:ip timeout $UNBAN_TIME
 fi
+
+echo -e "配置 iptables 规则..."
 iptables -N TRAFFIC_BLOCK 2>/dev/null
 iptables -C INPUT -j TRAFFIC_BLOCK 2>/dev/null || iptables -I INPUT -j TRAFFIC_BLOCK
 iptables -A TRAFFIC_BLOCK -m set --match-set banlist src -j DROP
 
+#---------- 流量监控循环 ----------#
+echo -e "\n${GREEN}=== 启动流量监控（阈值 ${LIMIT}MB/s）===${NC}"
+declare -A ip_first_seen
+
 while true; do
+    # 流量计算
     RX_BYTES_1=$(cat /sys/class/net/$INTERFACE/statistics/rx_bytes)
     TX_BYTES_1=$(cat /sys/class/net/$INTERFACE/statistics/tx_bytes)
-    sleep $DURATION
+    sleep 1
     RX_BYTES_2=$(cat /sys/class/net/$INTERFACE/statistics/rx_bytes)
     TX_BYTES_2=$(cat /sys/class/net/$INTERFACE/statistics/tx_bytes)
 
-    RX_RATE=$(( ($RX_BYTES_2 - $RX_BYTES_1) / 1024 / 1024 / $DURATION ))
-    TX_RATE=$(( ($TX_BYTES_2 - $TX_BYTES_1) / 1024 / 1024 / $DURATION ))
+    RX_RATE=$(( ($RX_BYTES_2 - $RX_BYTES_1) / 1024 / 1024 ))
+    TX_RATE=$(( ($TX_BYTES_2 - $TX_BYTES_1) / 1024 / 1024 ))
 
-    echo "[流量监控] 接收: ${RX_RATE}MB/s 发送: ${TX_RATE}MB/s"
-
+    # 实时流量显示
+    echo -e "[$(date +%H:%M:%S)] 接收: ${BLUE}${RX_RATE}MB/s${NC} 发送: ${CYAN}${TX_RATE}MB/s${NC}"
+    
+    # 流量超限处理
     if [[ $RX_RATE -gt $LIMIT || $TX_RATE -gt $LIMIT ]]; then
-        echo "== 检测到流量超限 =="
-        IP_LIST=$(ss -ntu state established | awk -v port="$SSH_PORT" '
+        echo -e "\n${YELLOW}⚠️  检测到流量超限！正在分析连接...${NC}"
+        
+        # 获取可疑IP（排除SSH连接）
+        IP_LIST=$(ss -ntu state established | awk -v port=22 '
             NR > 1 {
-                remote = $5;
-                sub(/:[0-9]+$/, "", remote);
-                gsub(/[\[\]]/, "", remote);
-                sub(/^::ffff:/, "", remote);
-                if ($5 !~ ":"port"$" && remote != "") {
-                    print remote;
+                split($5, arr, ":");
+                ip = arr[1];
+                gsub(/[\[\]]/, "", ip);
+                if (arr[2] != port && ip != "0.0.0.0") {
+                    print ip;
                 }
             }' | sort | uniq -c | sort -nr)
-        BAN_IP=$(echo "$IP_LIST" | awk '$2 != "" {print $2}' | head -n 1)
-      
-        if [[ -n "$BAN_IP" && "$BAN_IP" != "0.0.0.0" && "$BAN_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$|^([a-fA-F0-9]{1,4}:){1,7}(:[a-fA-F0-9]{1,4}){1,7}$ ]]; then
+        
+        BAN_IP=$(echo "$IP_LIST" | awk 'NR==1 && $2 != "" {print $2}')
+        
+        if [[ $BAN_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
             current_time=$(date +%s)
+            
+            # 首次检测记录时间
             if [[ -z "${ip_first_seen[$BAN_IP]}" ]]; then
                 ip_first_seen[$BAN_IP]=$current_time
-                echo "首次检测到 $BAN_IP 超速，时间: $(date -d @$current_time '+%H:%M:%S')"
+                echo -e "首次发现 ${RED}$BAN_IP${NC} 超速于 $(date -d @$current_time '+%H:%M:%S')"
             else
                 duration=$(( current_time - ip_first_seen[$BAN_IP] ))
+                
+                # 持续超速60秒触发封禁
                 if (( duration >= 60 )); then
-                    echo "== 正在封禁异常IP: $BAN_IP（持续超速 ${duration}秒）==="
+                    echo -e "${RED}🚫 封禁 $BAN_IP（持续超速 ${duration}秒）${NC}"
                     ipset add banlist "$BAN_IP" timeout $UNBAN_TIME
-                    echo "$(date '+%Y-%m-%d %H:%M:%S') 封禁IP: $BAN_IP RX:${RX_RATE}MB/s TX:${TX_RATE}MB/s 持续:${duration}秒" >> /var/log/iptables_ban.log
+                    echo "$(date '+%Y-%m-%d %H:%M:%S') 封禁 $BAN_IP RX:${RX_RATE}MB/s TX:${TX_RATE}MB/s 持续:${duration}秒" >> /var/log/iptables_ban.log
                     unset ip_first_seen[$BAN_IP]
                 else
-                    echo "IP $BAN_IP 已超速 ${duration}秒（需满60秒触发封禁）"
+                    echo -e "IP ${YELLOW}$BAN_IP${NC} 已超速 ${duration}秒（需满60秒触发封禁）"
                 fi
             fi
         else
-            echo "!! 未找到有效封禁目标（无效IP：${BAN_IP:-空}）"
+            echo -e "${YELLOW}⚠️  未找到有效封禁目标${NC}"
         fi
     else
         ip_first_seen=()
     fi
-
-    current_time=$(date +%s)
-    for ip in "${!ip_first_seen[@]}"; do
-        if (( current_time - ip_first_seen[$ip] > 60 )); then
-            unset ip_first_seen[$ip]
-            echo "清理过期IP记录: $ip"
-        fi
-    done
 done
 EOF
 
-# 赋予执行权限
+#---------- 配置系统服务 ----------#
+echo -e "\n\033[36m[4/4] 配置系统服务\033[0m"
 chmod +x /root/ip_blacklist.sh
 
-# 创建 systemd 服务文件
-echo "正在配置 systemd 服务"
 cat > /etc/systemd/system/ip_blacklist.service <<EOF
 [Unit]
-Description=IP Blacklist Script
+Description=IP Traffic Blacklist Service
 After=network.target
 
 [Service]
 ExecStart=/bin/bash /root/ip_blacklist.sh
 Restart=always
 User=root
-WorkingDirectory=/root
-StandardOutput=syslog
-StandardError=syslog
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# 重载并启动服务
 systemctl daemon-reload
-systemctl enable ip_blacklist.service --now
+systemctl enable --now ip_blacklist.service
 
-# 输出提示
-echo "============================================="
-echo "安装完成！服务已启动并设为开机自启。"
-echo "查看实时日志命令："
-echo "sudo journalctl -u ip_blacklist.service -f"
-echo "============================================="
+# 安装完成提示
+echo -e "\n\033[42m\033[30m 安装完成！\033[0m\033[32m 服务已启动\033[0m"
+echo -e "查看状态:   systemctl status ip_blacklist.service"
+echo -e "查看日志:   journalctl -u ip_blacklist.service -f"
+echo -e "卸载方法:   systemctl disable --now ip_blacklist.service; rm /etc/systemd/system/ip_blacklist.service"
