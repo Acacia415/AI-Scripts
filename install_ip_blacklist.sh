@@ -59,12 +59,12 @@ init_firewall() {
     # 创建黑名单集合
     if ! ipset list banlist &>/dev/null; then
         ipset create banlist hash:ip timeout 86400
-    }
+    fi  # ✅ 修复：将 } 改为 fi
     
     # 创建白名单集合
     if ! ipset list whitelist &>/dev/null; then
         ipset create whitelist hash:ip
-    }
+    fi  # ✅ 修复：将 } 改为 fi
 
     # 创建流量监控链
     iptables -N TRAFFIC_BLOCK 2>/dev/null
