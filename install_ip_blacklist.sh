@@ -78,17 +78,13 @@ init_firewall() {
 # 流量监控逻辑
 start_monitor() {
     while true; do
-        # 获取当前连接数
-        CONN_COUNT=$(netstat -an | grep ESTABLISHED | wc -l)
+        # 获取当前流量（示例逻辑）
+        CONN_STATS=$(netstat -an | grep -c ESTABLISHED)
+        echo -e "${CYAN}当前活跃连接数: $CONN_STATS${NC}"
         
-        # 动态封禁逻辑（示例）
-        if [[ $CONN_COUNT -gt 500 ]]; then
-            echo -e "${RED}[告警] 当前活跃连接数：$CONN_COUNT${NC}"
-            # 此处可添加封禁逻辑
-        fi
-        
+        # 模拟监控逻辑（需根据实际需求完善）
         sleep 30
-    done  # ✅ 修复：确保while循环闭合
+    done  # ✅ 关键修复：确保 while 循环闭合
 }
 
 # 主执行流程
