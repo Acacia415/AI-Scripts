@@ -43,52 +43,95 @@ BLUE='\033[34m'
 CYAN='\033[36m'
 NC='\033[0m'
 
+# 日志文件配置
+LOG_FILE="/var/log/ip_defense.log"
+NGINX_ACCESS_LOG="/var/log/nginx/access.log"
+
 # 检查root权限
 if [[ $EUID -ne 0 ]]; then
     echo -e "${RED}错误：此脚本必须以root权限运行！${NC}"
     exit 1
 fi
 
+# 日志记录函数
+log() {
+    local event_type=$1
+    local message=$2
+    echo -e "${CYAN}[$(date +'%F %T')] [$event_type] ${message}${NC}" | tee -a $LOG_FILE
+    sync
+}
+
 # 加载白名单规则
-if [ -f /etc/ipset.conf ]; then
-    ipset restore -! < /etc/ipset.conf
-fi
+load_rules() {
+    if [ -f /etc/ipset.conf ]; then
+        ipset restore -! < /etc/ipset.conf
+        log "规则加载" "白名单规则已加载"
+    fi
+}
 
 # 初始化防火墙规则
 init_firewall() {
     # 创建黑名单集合
     if ! ipset list banlist &>/dev/null; then
         ipset create banlist hash:ip timeout 86400
+        log "防火墙" "创建黑名单集合"
     fi
     
     # 创建白名单集合
     if ! ipset list whitelist &>/dev/null; then
         ipset create whitelist hash:ip
+        log "防火墙" "创建白名单集合"
     fi
 
     # 创建流量监控链
     iptables -N TRAFFIC_BLOCK 2>/dev/null
-    iptables -C INPUT -j TRAFFIC_BLOCK 2>/dev/null || iptables -I INPUT -j TRAFFIC_BLOCK
+    if ! iptables -C INPUT -j TRAFFIC_BLOCK 2>/dev/null; then
+        iptables -I INPUT -j TRAFFIC_BLOCK
+        log "防火墙" "创建TRAFFIC_BLOCK链"
+    fi
     
-    # 白名单优先规则
+    # 设置规则
     iptables -A TRAFFIC_BLOCK -m set --match-set whitelist src -j ACCEPT
     iptables -A TRAFFIC_BLOCK -m set --match-set banlist src -j DROP
 }
 
-# 流量监控逻辑
-start_monitor() {
-    # 示例监控逻辑（可根据需要自定义）
-    while true; do
-        # 监控异常流量（此处需要根据实际需求实现检测逻辑）
-        # 例如：检测每秒请求超过100次的IP
-        # tail -n 100 /var/log/nginx/access.log | awk '{print $1}' | sort | uniq -c | sort -nr | awk '$1 > 100 {print $2}' | xargs -I{} ipset add banlist {}
-        sleep 10
+# 实时日志分析
+analyze_traffic() {
+    log "监控启动" "开始实时分析Nginx日志"
+    
+    stdbuf -oL tail -Fn0 $NGINX_ACCESS_LOG | while read line; do
+        {
+            ip=$(echo "$line" | awk '{print $1}')
+            path=$(echo "$line" | awk '{print $7}')
+            status=$(echo "$line" | awk '{print $9}')
+            timestamp=$(date +%s)
+            
+            echo -e "${CYAN}[实时处理] 正在分析 $ip 的请求：$path${NC}" | tee -a $LOG_FILE
+
+            # 异常请求检测
+            if [[ "$path" =~ \.php$ ]] && [[ "$status" == "404" ]]; then
+                if ! ipset test whitelist $ip 2>/dev/null; then
+                    ipset add banlist $ip 2>/dev/null
+                    log "异常请求" "已封禁 $ip (原因：PHP探测)"
+                fi
+            fi
+
+            # 高频请求检测
+            req_count=$(grep $ip $NGINX_ACCESS_LOG | wc -l)
+            if (( req_count > 100 )); then
+                if ! ipset test whitelist $ip 2>/dev/null; then
+                    ipset add banlist $ip 2>/dev/null
+                    log "高频请求" "已封禁 $ip (请求次数：$req_count)"
+                fi
+            fi
+        }
     done
 }
 
-# 主执行流程
+# 主流程
+load_rules
 init_firewall
-start_monitor
+analyze_traffic
 EOF
 
 #---------- 白名单交互配置 ----------#
@@ -99,15 +142,15 @@ function validate_ip() {
     [[ $ip =~ $pattern ]] && return 0 || return 1
 }
 
-# 创建白名单集合
 ipset create whitelist hash:ip 2>/dev/null || true
 
-# 交互式配置
 read -p $'\033[33m是否要配置白名单IP？(y/[n]) \033[0m' -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo -e "\n\033[36m请输入IP地址（支持格式示例）："
-    echo -e "  • 单个IP: 192.168.1.1\n  • IP段: 10.0.0.0/24\n  • 多个IP用空格分隔\033[0m"
+    echo -e "\n\033[36m支持格式示例："
+    echo -e "  单个IP: 192.168.1.1"
+    echo -e "  IP段: 10.0.0.0/24"
+    echo -e "  多个IP用空格分隔\033[0m"
     
     while :; do
         read -p $'\033[33m请输入IP（输入 done 结束）: \033[0m' input
@@ -128,12 +171,10 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     done
 fi
 
-# 永久保存配置
+#---------- 永久保存配置 ----------#
 echo -e "\n\033[36m保存防火墙规则...\033[0m"
 mkdir -p /etc/ipset
-ipset save -f /etc/ipset.conf 2>/dev/null || {
-    echo -e "\033[31m无法保存ipset配置，请手动执行：ipset save > /etc/ipset.conf\033[0m"
-}
+ipset save -f /etc/ipset.conf
 
 #---------- 系统服务配置 ----------#
 echo -e "\n\033[36m[5/5] 配置系统服务\033[0m"
@@ -159,9 +200,10 @@ systemctl enable --now ip_blacklist.service
 
 # 完成提示
 echo -e "\n\033[42m\033[30m 部署完成！\033[0m\033[32m"
-echo -e "已添加白名单IP："
+echo -e "白名单IP列表："
 ipset list whitelist -output save | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?' | sed 's/^/  ➤ /'
 echo -e "\n管理命令："
-echo -e "  实时日志: journalctl -u ip_blacklist.service -f"
-echo -e "  临时解封: ipset del banlist <IP地址>"
-echo -e "  添加白名单: ipset add whitelist <IP地址>\033[0m"
+echo -e "  实时日志: tail -f ${LOG_FILE}"
+echo -e "  服务状态: systemctl status ip_blacklist"
+echo -e "  解封IP: ipset del banlist <IP>"
+echo -e "  添加白名单: ipset add whitelist <IP>\033[0m"
