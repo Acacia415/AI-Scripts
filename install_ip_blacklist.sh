@@ -33,7 +33,13 @@ done
 #---------- 生成主监控脚本 ----------#
 echo -e "\n\033[36m[3/4] 生成主脚本到 /root/ip_blacklist.sh\033[0m"
 cat > /root/ip_blacklist.sh <<'EOF'
-#!/bin/bash
+#!/bin/bash -e
+
+# 强制实时输出日志
+exec > >(systemd-cat -t ip_blacklist) 2>&1
+export SYSTEMD_LOG_TARGET=journal
+export SYSTEMD_LOG_LEVEL=debug
+
 # 彩色输出定义
 RED='\033[31m'
 GREEN='\033[32m'
@@ -41,16 +47,19 @@ YELLOW='\033[33m'
 BLUE='\033[34m'
 CYAN='\033[36m'
 NC='\033[0m'
+
 # 检查root权限
 if [[ $EUID -ne 0 ]]; then
     echo -e "${RED}错误：此脚本必须以root权限运行！${NC}"
     exit 1
 fi
+
 # 加载白名单规则
 if [ -f /etc/ipset.conf ]; then
     echo -e "${CYAN}[+] 加载白名单规则...${NC}"
     ipset restore -! < /etc/ipset.conf
 fi
+
 # 初始化防火墙规则
 init_firewall() {
     echo -e "${CYAN}[+] 初始化防火墙规则...${NC}"
@@ -66,12 +75,14 @@ init_firewall() {
         ipset create whitelist hash:ip
         echo -e "${GREEN} ✓ 创建白名单集合 whitelist${NC}"
     fi
+
     # 创建流量监控链
     if ! iptables -nL TRAFFIC_BLOCK &>/dev/null; then
         iptables -N TRAFFIC_BLOCK
         iptables -I INPUT -j TRAFFIC_BLOCK
         echo -e "${GREEN} ✓ 创建流量监控链 TRAFFIC_BLOCK${NC}"
     fi
+
     # 清空旧规则
     iptables -F TRAFFIC_BLOCK
     
@@ -80,6 +91,7 @@ init_firewall() {
     iptables -A TRAFFIC_BLOCK -m set --match-set banlist src -j DROP
     echo -e "${GREEN} ✓ 设置白名单优先规则${NC}"
 }
+
 # 流量监控逻辑
 start_monitor() {
     echo -e "${CYAN}[+] 启动流量监控...${NC}"
@@ -112,6 +124,7 @@ start_monitor() {
         sleep 10  # 检测间隔改为10秒
     done
 }
+
 # 主执行流程
 init_firewall
 start_monitor
@@ -165,16 +178,21 @@ ipset save -file /etc/ipset.conf 2>/dev/null || {
 echo -e "\n\033[36m[5/5] 配置系统服务\033[0m"
 chmod +x /root/ip_blacklist.sh
 
-cat > /etc/systemd/system/ip_blacklist.service <<EOF
+cat > /etc/systemd/system/ip_blacklist.service <<'EOF'
 [Unit]
 Description=IP流量监控与封禁服务
 After=network.target
 
 [Service]
-ExecStart=/bin/bash /root/ip_blacklist.sh
+Environment=SYSTEMD_LOG_TARGET=journal
+Environment=SYSTEMD_LOG_LEVEL=debug
+ExecStart=/bin/bash -e /root/ip_blacklist.sh
 Restart=always
 RestartSec=3
 User=root
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target
@@ -188,6 +206,6 @@ echo -e "\n\033[42m\033[30m 部署完成！\033[0m\033[32m"
 echo -e "已添加白名单IP："
 ipset list whitelist -output save | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?' | sed 's/^/  ➤ /'
 echo -e "\n管理命令："
-echo -e "  实时日志: journalctl -u ip_blacklist.service -f"
+echo -e "  实时日志: journalctl -u ip_blacklist.service -f --output cat"
 echo -e "  临时解封: ipset del banlist <IP地址>"
 echo -e "  添加白名单: ipset add whitelist <IP地址>\033[0m"
