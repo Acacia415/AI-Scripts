@@ -1,211 +1,115 @@
 #!/bin/bash
 
-#---------- 初始化检查 ----------#
 # 检查root权限
 if [[ $EUID -ne 0 ]]; then
     echo -e "\033[31m错误：此脚本必须以root权限运行！\033[0m"
-    echo "请使用 'sudo bash $0'"
     exit 1
 fi
 
-#---------- 依赖安装部分 ----------#
-echo -e "\n\033[36m[1/4] 正在更新软件包列表...\033[0m"
-apt-get update || {
-    echo -e "\033[31m更新失败，请检查网络连接！\033[0m"
-    exit 1
-}
-
-echo -e "\n\033[36m[2/4] 安装核心依赖\033[0m"
-for pkg in iproute2 iptables ipset; do
-    if ! dpkg -l | grep -q "^ii  $pkg "; then
-        echo -e "正在安装 \033[34m$pkg\033[0m..."
-        if apt-get install -y $pkg; then
-            echo -e "\033[32m$pkg 安装成功\033[0m"
-        else
-            echo -e "\033[31m$pkg 安装失败！\033[0m"
-            exit 1
-        fi
+#---------- 交互式配置 ----------#
+echo -e "\n\033[36m[1/4] 配置白名单IP（输入空行结束）\033[0m"
+WHITELIST=()
+while true; do
+    read -p "请输入白名单IP/CIDR (例: 192.168.1.0/24): " ip
+    [[ -z $ip ]] && break
+    
+    if [[ $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
+        WHITELIST+=("$ip")
+        echo -e "\033[32m已添加：$ip\033[0m"
     else
-        echo -e "\033[32m$pkg 已安装，跳过\033[0m"
+        echo -e "\033[31m错误格式，请重新输入\033[0m"
     fi
 done
 
-#---------- 生成主监控脚本 ----------#
-echo -e "\n\033[36m[3/4] 生成主脚本到 /root/ip_blacklist.sh\033[0m"
-cat > /root/ip_blacklist.sh <<'EOF'
-#!/bin/bash -e
+#---------- 固定配置 ----------#
+SPEED_LIMIT=20    # 限速阈值(MB/s)
+CHECK_INTERVAL=10 # 检查间隔(秒)
+BAN_HOURS=24      # 封禁时长(小时)
 
-# 强制实时输出日志
-exec > >(systemd-cat -t ip_blacklist) 2>&1
-export SYSTEMD_LOG_TARGET=journal
-export SYSTEMD_LOG_LEVEL=debug
+#---------- 单位转换 ----------#
+LIMIT_BYTES=$(( SPEED_LIMIT * 1048576 * CHECK_INTERVAL ))
 
-# 彩色输出定义
-RED='\033[31m'
-GREEN='\033[32m'
-YELLOW='\033[33m'
-BLUE='\033[34m'
-CYAN='\033[36m'
-NC='\033[0m'
+#---------- 依赖安装 ----------#
+echo -e "\n\033[36m[2/4] 安装系统依赖...\033[0m"
+apt-get update >/dev/null
+apt-get install -y ipset >/dev/null
 
-# 检查root权限
-if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}错误：此脚本必须以root权限运行！${NC}"
-    exit 1
-fi
+#---------- 初始化防火墙 ----------#
+echo -e "\n\033[36m[3/4] 配置流量监控规则...\033[0m"
 
-# 加载白名单规则
-if [ -f /etc/ipset.conf ]; then
-    echo -e "${CYAN}[+] 加载白名单规则...${NC}"
-    ipset restore -! < /etc/ipset.conf
-fi
+# 创建ipset集合
+ipset create speed_ban hash:ip timeout $(( BAN_HOURS * 3600 )) 2>/dev/null || true
 
-# 初始化防火墙规则
-init_firewall() {
-    echo -e "${CYAN}[+] 初始化防火墙规则...${NC}"
-    
-    # 创建黑名单集合
-    if ! ipset list banlist &>/dev/null; then
-        ipset create banlist hash:ip timeout 86400
-        echo -e "${GREEN} ✓ 创建黑名单集合 banlist${NC}"
-    fi
-    
-    # 创建白名单集合
-    if ! ipset list whitelist &>/dev/null; then
-        ipset create whitelist hash:ip
-        echo -e "${GREEN} ✓ 创建白名单集合 whitelist${NC}"
-    fi
+# 重建iptables链
+iptables -t mangle -F 2>/dev/null
+iptables -t mangle -X SPEED_MONITOR 2>/dev/null || true
+iptables -t mangle -N SPEED_MONITOR
 
-    # 创建流量监控链
-    if ! iptables -nL TRAFFIC_BLOCK &>/dev/null; then
-        iptables -N TRAFFIC_BLOCK
-        iptables -I INPUT -j TRAFFIC_BLOCK
-        echo -e "${GREEN} ✓ 创建流量监控链 TRAFFIC_BLOCK${NC}"
-    fi
+# 设置白名单规则
+for ip in "${WHITELIST[@]}"; do
+    iptables -t mangle -A SPEED_MONITOR -s $ip -j RETURN
+    iptables -t mangle -A SPEED_MONITOR -d $ip -j RETURN
+done
 
-    # 清空旧规则
-    iptables -F TRAFFIC_BLOCK
-    
-    # 白名单优先规则
-    iptables -A TRAFFIC_BLOCK -m set --match-set whitelist src -j ACCEPT
-    iptables -A TRAFFIC_BLOCK -m set --match-set banlist src -j DROP
-    echo -e "${GREEN} ✓ 设置白名单优先规则${NC}"
-}
+# 设置监控规则
+iptables -t mangle -A SPEED_MONITOR -m set --match-set speed_ban src -j RETURN
+iptables -t mangle -A SPEED_MONITOR -m set --match-set speed_ban dst -j RETURN
+iptables -t mangle -A SPEED_MONITOR -j MARK --set-mark 0x1
+iptables -t mangle -I FORWARD -j SPEED_MONITOR
 
-# 流量监控逻辑
-start_monitor() {
-    echo -e "${CYAN}[+] 启动流量监控...${NC}"
-    while true; do
-        # 获取当前时间
-        timestamp=$(date "+%Y-%m-%d %T")
-        
-        # 监控流量异常的IP（示例条件：60秒内超过100个连接）
-        offenders=$(netstat -ntu | awk '{print $5}' | cut -d: -f1 | sort | uniq -c | sort -n | awk '$1 > 100')
-        
-        if [ -n "$offenders" ]; then
-            echo -e "${YELLOW}[$timestamp] 检测到以下异常连接：${NC}"
-            printf "%-8s %s\n" "连接数" "IP地址"
-            echo "----------------------"
-            while read -r line; do
-                count=$(echo $line | awk '{print $1}')
-                ip=$(echo $line | awk '{print $2}')
-                # 检查白名单
-                if ipset test whitelist "$ip" 2>/dev/null; then
-                    echo -e "${GREEN} ✓ $count\t$ip (白名单)${NC}"
-                else
-                    echo -e "${RED} ⚠️ $count\t$ip 加入黑名单${NC}"
-                    ipset add banlist "$ip" 2>/dev/null
-                fi
-            done <<< "$offenders"
-        else
-            echo -e "${CYAN}[$timestamp] 未检测到异常连接${NC}"
-        fi
-        
-        sleep 10  # 检测间隔改为10秒
+#---------- 部署监控服务 ----------#
+echo -e "\n\033[36m[4/4] 部署监控服务...\033[0m"
+
+# 创建监控脚本
+cat > /usr/local/sbin/speed_monitor <<EOF
+#!/bin/bash
+# 初始化计数
+declare -A prev_count
+
+while true; do
+    # 获取当前所有连接IP（排除内网）
+    current_ips=\$(ss -ntu | awk '\$6!~/^(10|127|192.168|172.(1[6-9]|2[0-9]|3[0-1])|169.254)/{split(\$6,ip,":");print ip[1]}' | sort -u)
+
+    # 获取每个IP的流量计数
+    declare -A curr_count
+    for ip in \$current_ips; do
+        curr_count[\$ip]=\$(iptables -t mangle -L SPEED_MONITOR -v -x 2>/dev/null | awk -v ip=\$ip '\$8 == ip {sum += \$2} END {print sum}')
     done
-}
 
-# 主执行流程
-init_firewall
-start_monitor
+    # 计算速率并封禁
+    for ip in "\${!curr_count[@]}"; do
+        delta=\$(( \${curr_count[\$ip]} - \${prev_count[\$ip]:-0} ))
+        
+        if [[ \$delta -gt $LIMIT_BYTES ]]; then
+            echo "\$(date "+%F %T") 封禁 \$ip 流量: \$(( delta/1048576 ))MB/10s" >> /var/log/speed_monitor.log
+            ipset add speed_ban \$ip 2>/dev/null
+        fi
+        prev_count[\$ip]=\${curr_count[\$ip]}
+    done
+
+    sleep $CHECK_INTERVAL
+done
 EOF
 
-#---------- 白名单交互配置 ----------#
-echo -e "\n\033[36m[4/4] 白名单配置\033[0m"
-function validate_ip() {
-    local ip=$1
-    local pattern='^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$'
-    [[ $ip =~ $pattern ]] && return 0 || return 1
-}
+# 设置权限
+chmod 755 /usr/local/sbin/speed_monitor
 
-# 创建白名单集合
-ipset create whitelist hash:ip 2>/dev/null || true
-
-# 交互式配置
-read -p $'\033[33m是否要配置白名单IP？(y/[n]) \033[0m' -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo -e "\n\033[36m请输入IP地址（支持格式示例）："
-    echo -e "  • 单个IP: 192.168.1.1\n  • IP段: 10.0.0.0/24\n  • 多个IP用空格分隔\033[0m"
-    
-    while :; do
-        read -p $'\033[33m请输入IP（输入 done 结束）: \033[0m' input
-        [[ "$input" == "done" ]] && break
-        
-        IFS=' ' read -ra ips <<< "$input"
-        for ip in "${ips[@]}"; do
-            if validate_ip "$ip"; then
-                if ipset add whitelist "$ip" 2>/dev/null; then
-                    echo -e "\033[32m ✓ 成功添加：$ip\033[0m"
-                else
-                    echo -e "\033[33m ⚠️  已存在：$ip\033[0m"
-                fi
-            else
-                echo -e "\033[31m ✗ 无效格式：$ip\033[0m"
-            fi
-        done
-    done
-fi
-
-# 永久保存配置
-echo -e "\n\033[36m保存防火墙规则...\033[0m"
-mkdir -p /etc/ipset
-ipset save -file /etc/ipset.conf 2>/dev/null || {
-    echo -e "\033[31m无法保存ipset配置，请手动执行：ipset save > /etc/ipset.conf\033[0m"
-}
-
-#---------- 系统服务配置 ----------#
-echo -e "\n\033[36m[5/5] 配置系统服务\033[0m"
-chmod +x /root/ip_blacklist.sh
-
-cat > /etc/systemd/system/ip_blacklist.service <<'EOF'
+# 创建系统服务
+cat > /etc/systemd/system/speed-monitor.service <<EOF
 [Unit]
-Description=IP流量监控与封禁服务
+Description=Real-time Speed Monitor
 After=network.target
 
 [Service]
-Environment=SYSTEMD_LOG_TARGET=journal
-Environment=SYSTEMD_LOG_LEVEL=debug
-ExecStart=/bin/bash -e /root/ip_blacklist.sh
+ExecStart=/usr/local/sbin/speed_monitor
 Restart=always
-RestartSec=3
-User=root
-StandardOutput=journal
-StandardError=journal
-LogRateLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+# 启动服务
 systemctl daemon-reload
-systemctl enable --now ip_blacklist.service
+systemctl enable --now speed-monitor >/dev/null
 
-# 完成提示
-echo -e "\n\033[42m\033[30m 部署完成！\033[0m\033[32m"
-echo -e "已添加白名单IP："
-ipset list whitelist -output save | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?' | sed 's/^/  ➤ /'
-echo -e "\n管理命令："
-echo -e "  实时日志: journalctl -u ip_blacklist.service -f --output cat"
-echo -e "  临时解封: ipset del banlist <IP地址>"
-echo -e "  添加白名单: ipset add whitelist <IP地址>\033[0m"
+echo -e "\n\033[32m部署完成！\n封禁记录：tail -f /var/log/speed_monitor.log\n当前黑名单：ipset list speed_ban\033[0m"
