@@ -34,7 +34,6 @@ done
 echo -e "\n\033[36m[3/4] 生成主脚本到 /root/ip_blacklist.sh\033[0m"
 cat > /root/ip_blacklist.sh <<'EOF'
 #!/bin/bash
-
 # 彩色输出定义
 RED='\033[31m'
 GREEN='\033[32m'
@@ -42,56 +41,77 @@ YELLOW='\033[33m'
 BLUE='\033[34m'
 CYAN='\033[36m'
 NC='\033[0m'
-
 # 检查root权限
 if [[ $EUID -ne 0 ]]; then
     echo -e "${RED}错误：此脚本必须以root权限运行！${NC}"
     exit 1
 fi
-
 # 加载白名单规则
 if [ -f /etc/ipset.conf ]; then
+    echo -e "${CYAN}[+] 加载白名单规则...${NC}"
     ipset restore -! < /etc/ipset.conf
 fi
-
 # 初始化防火墙规则
 init_firewall() {
+    echo -e "${CYAN}[+] 初始化防火墙规则...${NC}"
+    
     # 创建黑名单集合
     if ! ipset list banlist &>/dev/null; then
         ipset create banlist hash:ip timeout 86400
+        echo -e "${GREEN} ✓ 创建黑名单集合 banlist${NC}"
     fi
     
     # 创建白名单集合
     if ! ipset list whitelist &>/dev/null; then
         ipset create whitelist hash:ip
+        echo -e "${GREEN} ✓ 创建白名单集合 whitelist${NC}"
     fi
-
     # 创建流量监控链
-    iptables -N TRAFFIC_BLOCK 2>/dev/null
-    iptables -C INPUT -j TRAFFIC_BLOCK 2>/dev/null || iptables -I INPUT -j TRAFFIC_BLOCK
+    if ! iptables -nL TRAFFIC_BLOCK &>/dev/null; then
+        iptables -N TRAFFIC_BLOCK
+        iptables -I INPUT -j TRAFFIC_BLOCK
+        echo -e "${GREEN} ✓ 创建流量监控链 TRAFFIC_BLOCK${NC}"
+    fi
+    # 清空旧规则
+    iptables -F TRAFFIC_BLOCK
     
     # 白名单优先规则
     iptables -A TRAFFIC_BLOCK -m set --match-set whitelist src -j ACCEPT
     iptables -A TRAFFIC_BLOCK -m set --match-set banlist src -j DROP
+    echo -e "${GREEN} ✓ 设置白名单优先规则${NC}"
 }
-
 # 流量监控逻辑
 start_monitor() {
+    echo -e "${CYAN}[+] 启动流量监控...${NC}"
     while true; do
-        # 监控流量异常的IP（示例条件：60秒内超过100个连接）
-        ip=$(netstat -ntu | awk '{print $5}' | cut -d: -f1 | sort | uniq -c | sort -n | awk '$1 > 100 {print $2}' | tail -n 1)
+        # 获取当前时间
+        timestamp=$(date "+%Y-%m-%d %T")
         
-        if [ -n "$ip" ]; then
-            # 检查白名单
-            if ! ipset test whitelist "$ip" 2>/dev/null; then
-                echo -e "${RED}检测到异常IP：$ip 加入黑名单${NC}"
-                ipset add banlist "$ip" 2>/dev/null
-            fi
+        # 监控流量异常的IP（示例条件：60秒内超过100个连接）
+        offenders=$(netstat -ntu | awk '{print $5}' | cut -d: -f1 | sort | uniq -c | sort -n | awk '$1 > 100')
+        
+        if [ -n "$offenders" ]; then
+            echo -e "${YELLOW}[$timestamp] 检测到以下异常连接：${NC}"
+            printf "%-8s %s\n" "连接数" "IP地址"
+            echo "----------------------"
+            while read -r line; do
+                count=$(echo $line | awk '{print $1}')
+                ip=$(echo $line | awk '{print $2}')
+                # 检查白名单
+                if ipset test whitelist "$ip" 2>/dev/null; then
+                    echo -e "${GREEN} ✓ $count\t$ip (白名单)${NC}"
+                else
+                    echo -e "${RED} ⚠️ $count\t$ip 加入黑名单${NC}"
+                    ipset add banlist "$ip" 2>/dev/null
+                fi
+            done <<< "$offenders"
+        else
+            echo -e "${CYAN}[$timestamp] 未检测到异常连接${NC}"
         fi
-        sleep 60
+        
+        sleep 10  # 检测间隔改为10秒
     done
 }
-
 # 主执行流程
 init_firewall
 start_monitor
