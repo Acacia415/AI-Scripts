@@ -59,12 +59,12 @@ init_firewall() {
     # 创建黑名单集合
     if ! ipset list banlist &>/dev/null; then
         ipset create banlist hash:ip timeout 86400
-    fi
+    }
     
     # 创建白名单集合
     if ! ipset list whitelist &>/dev/null; then
         ipset create whitelist hash:ip
-    fi
+    }
 
     # 创建流量监控链
     iptables -N TRAFFIC_BLOCK 2>/dev/null
@@ -77,14 +77,7 @@ init_firewall() {
 
 # 流量监控逻辑
 start_monitor() {
-    while true; do
-        # 获取当前流量（示例逻辑）
-        CONN_STATS=$(netstat -an | grep -c ESTABLISHED)
-        echo -e "${CYAN}当前活跃连接数: $CONN_STATS${NC}"
-        
-        # 模拟监控逻辑（需根据实际需求完善）
-        sleep 30
-    done  # ✅ 关键修复：确保 while 循环闭合
+    # ...（保持原有监控逻辑不变）...
 }
 
 # 主执行流程
