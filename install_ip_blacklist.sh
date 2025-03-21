@@ -59,12 +59,12 @@ init_firewall() {
     # 创建黑名单集合
     if ! ipset list banlist &>/dev/null; then
         ipset create banlist hash:ip timeout 86400
-    }
+    fi
     
     # 创建白名单集合
     if ! ipset list whitelist &>/dev/null; then
         ipset create whitelist hash:ip
-    }
+    fi
 
     # 创建流量监控链
     iptables -N TRAFFIC_BLOCK 2>/dev/null
@@ -77,7 +77,13 @@ init_firewall() {
 
 # 流量监控逻辑
 start_monitor() {
-    # ...（保持原有监控逻辑不变）...
+    # 示例监控逻辑（可根据需要自定义）
+    while true; do
+        # 监控异常流量（此处需要根据实际需求实现检测逻辑）
+        # 例如：检测每秒请求超过100次的IP
+        # tail -n 100 /var/log/nginx/access.log | awk '{print $1}' | sort | uniq -c | sort -nr | awk '$1 > 100 {print $2}' | xargs -I{} ipset add banlist {}
+        sleep 10
+    done
 }
 
 # 主执行流程
@@ -125,7 +131,7 @@ fi
 # 永久保存配置
 echo -e "\n\033[36m保存防火墙规则...\033[0m"
 mkdir -p /etc/ipset
-ipset save -file /etc/ipset.conf 2>/dev/null || {
+ipset save -f /etc/ipset.conf 2>/dev/null || {
     echo -e "\033[31m无法保存ipset配置，请手动执行：ipset save > /etc/ipset.conf\033[0m"
 }
 
