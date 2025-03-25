@@ -2,7 +2,6 @@
 
 # ==========================================
 # IRIS自用工具箱 - GitHub一键版
-# 功能：1.开启root登录 2.安装流量监控 3.卸载流量监控
 # 项目地址：https://github.com/Acacia415/GPT-Scripts
 # ==========================================
 
@@ -353,6 +352,221 @@ install_hysteria2() {
     read -n 1 -s -r -p "安装完成，按任意键返回主菜单..."
 }
 
+# ======================= 安装SS协议 =======================
+install_ss_rust() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/shadowsocks/shadowsocks-rust${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    if wget -O ss-rust.sh --no-check-certificate https://git.io/Shadowsocks-Rust.sh; then
+        chmod +x ss-rust.sh
+        ./ss-rust.sh
+        rm -f ss-rust.sh  # 清理安装脚本
+    else
+        echo -e "${RED}下载 SS-Rust 安装脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+    
+    read -n 1 -s -r -p "安装完成，按任意键返回主菜单..."
+}
+
+# ======================= 安装3X-UI面板 =======================
+install_3x_ui() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/mhsanaei/3x-ui${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/3x-ui_install.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载 3X-UI 安装脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+    
+    read -n 1 -s -r -p "安装完成，按任意键返回主菜单..."
+}
+
+# ======================= 流媒体检测 =======================
+install_media_check() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：ip.check.place${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/media_check.sh"
+    if curl -L -s -o "$install_script" ip.check.place; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载流媒体检测脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+    
+    read -n 1 -s -r -p "检测完成，按任意键返回主菜单..."
+}
+
+# ======================= Speedtest测速 =======================
+install_speedtest() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}Speedtest测速组件安装${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    # 下载packagecloud安装脚本
+    local install_script="/tmp/speedtest_install.sh"
+    echo -e "${CYAN}下载Speedtest安装脚本...${NC}"
+    if ! curl -s -o "$install_script" https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh; then
+        echo -e "${RED}下载Speedtest安装脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+    
+    # 执行安装脚本
+    echo -e "${CYAN}添加Speedtest仓库...${NC}"
+    if ! sudo bash "$install_script"; then
+        echo -e "${RED}添加仓库失败！${NC}"
+        rm -f "$install_script"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+    rm -f "$install_script"
+    
+    # 更新软件源并安装
+    echo -e "${CYAN}安装Speedtest...${NC}"
+    if ! sudo apt-get update || ! sudo apt-get install -y speedtest; then
+        echo -e "${RED}安装Speedtest失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+    
+    # 自动执行测速
+    echo -e "${CYAN}开始网络测速...${NC}"
+    speedtest --accept-license --accept-gdpr
+    
+    read -n 1 -s -r -p "测速完成，按任意键返回主菜单..."
+}
+
+# ======================= 开放所有端口 =======================
+open_all_ports() {
+    clear
+    echo -e "${RED}════════════ 安全警告 ════════════${NC}"
+    echo -e "${YELLOW}此操作将：${NC}"
+    echo -e "1. 清空所有防火墙规则"
+    echo -e "2. 设置默认策略为全部允许"
+    echo -e "3. 完全开放所有网络端口"
+    echo -e "${RED}═════════════════════════════════${NC}"
+    read -p "确认继续操作？[y/N] " confirm
+    
+    if [[ $confirm =~ ^[Yy]$ ]]; then
+        echo -e "${CYAN}正在重置防火墙规则...${NC}"
+        
+        # 设置默认策略
+        sudo iptables -P INPUT ACCEPT    # 修正缺少的ACCEPT
+        sudo iptables -P FORWARD ACCEPT
+        sudo iptables -P OUTPUT ACCEPT
+        
+        # 清空所有规则
+        sudo iptables -F
+        sudo iptables -X
+        sudo iptables -Z
+        
+        echo -e "${GREEN}所有端口已开放！${NC}"
+        echo -e "${YELLOW}当前防火墙规则：${NC}"
+        sudo iptables -L -n --line-numbers
+    else
+        echo -e "${BLUE}已取消操作${NC}"
+    fi
+    
+    read -n 1 -s -r -p "按任意键返回主菜单..."
+}
+
+# ======================= Caddy反向代理 =======================
+install_caddy() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}正在配置Caddy反向代理...${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    # 安装检测与自动修复
+    if ! command -v caddy &> /dev/null; then
+        echo -e "${RED}未检测到Caddy，开始安装...${NC}"
+        if ! bash <(curl -L -s https://raw.githubusercontent.com/qiuxiuya/qiuxiuya/main/VPS/caddy.sh); then
+            echo -e "${RED}Caddy安装失败！${NC}"
+            return 1
+        fi
+        # 创建systemd服务（关键改进）
+        sudo tee /etc/systemd/system/caddy.service >/dev/null <<EOF
+[Unit]
+Description=Caddy HTTP/2 web server
+Documentation=https://caddyserver.com/docs/
+After=network.target
+[Service]
+User=root
+ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+EOF
+        sudo systemctl daemon-reload
+    fi
+    # 配置文件初始化
+    sudo mkdir -p /etc/caddy
+    [ ! -f /etc/caddy/Caddyfile ] && sudo touch /etc/caddy/Caddyfile
+    # 配置循环
+    while true; do
+        # 域名输入与验证（保持不变）
+        read -p "请输入要绑定的域名（不要带https://）：" domain
+        domain=$(echo "$domain" | sed 's/https\?:\/\///g')
+        if [[ ! "$domain" =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]]; then
+            echo -e "${RED}域名格式无效！${NC}"
+            continue
+        fi
+        if grep -q "^$domain {" /etc/caddy/Caddyfile; then
+            echo -e "${YELLOW}该域名配置已存在${NC}"
+            continue
+        fi
+        # 端口输入与验证（保持不变）
+        read -p "请输入要代理的本地端口（1-65535）：" port
+        if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
+            echo -e "${RED}端口号无效！${NC}"
+            continue
+        fi
+        # 追加配置并格式化
+        echo -e "\n${domain} {\n    reverse_proxy http://localhost:${port}\n}" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
+        sudo caddy fmt --overwrite /etc/caddy/Caddyfile  # 关键改进：格式化配置文件
+        # 服务管理（关键改进）
+        if systemctl is-active --quiet caddy; then
+            echo -e "${CYAN}检测到运行中的Caddy服务，正在平滑重启...${NC}"
+            sudo caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || {
+                echo -e "${YELLOW}配置重载失败，执行完全重启...${NC}"
+                sudo systemctl restart caddy
+            }
+        else
+            echo -e "${CYAN}启动Caddy服务...${NC}"
+            sudo systemctl start caddy
+            sudo systemctl enable caddy >/dev/null 2>&1
+        fi
+        # 结果验证
+        if sudo systemctl is-active --quiet caddy; then
+            echo -e "${GREEN}反向代理配置成功！${NC}"
+            echo -e "访问地址：${BLUE}https://${domain}${NC}"
+        else
+            echo -e "${RED}服务启动异常，请检查日志：journalctl -u caddy${NC}"
+        fi
+        read -p "是否继续添加其他域名？[y/N] " choice
+        [[ ! "$choice" =~ ^[Yy]$ ]] && break
+    done
+    read -n 1 -s -r -p "按任意键返回主菜单..."
+}
 
 # ======================= 主菜单 =======================
 main_menu() {
@@ -365,6 +579,12 @@ main_menu() {
     echo -e "3. 完全卸载流量监控"
     echo -e "4. 安装 Snell 协议服务"
     echo -e "5. 安装 Hysteria2 协议服务"
+    echo -e "6. 安装 SS-Rust 协议服务"
+    echo -e "7. 安装 3X-UI 管理面板"
+    echo -e "8. 流媒体解锁检测"
+    echo -e "9. Speedtest网络测速"
+    echo -e "10. 开放所有端口"
+    echo -e "11. 安装Caddy反代"
     echo -e "0. 退出脚本"
     echo -e "========================"
 
@@ -390,6 +610,30 @@ main_menu() {
         install_hysteria2 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
+      6)  
+        install_ss_rust 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      7)  
+        install_3x_ui 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      8)  
+        install_media_check 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      9)  
+        install_speedtest 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      10)  
+        open_all_ports 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      11)
+        install_caddy
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
       0) 
         echo -e "${GREEN}已退出${NC}"
         exit 0
@@ -401,6 +645,7 @@ main_menu() {
     esac
   done
 }
+
 
 # ======================= 执行入口 =======================
 if [[ $EUID -ne 0 ]]; then
