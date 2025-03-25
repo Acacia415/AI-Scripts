@@ -159,15 +159,16 @@ function validate_ip() {
 ipset create whitelist hash:ip 2>/dev/null || true
 
 # 交互式配置
-read -p $'\033[33m是否要配置白名单IP？(y/[n]) \033[0m' -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
+read -p $'\033[33m是否要配置白名单IP？(y/N) \033[0m' REPLY
+if [[ "${REPLY,,}" == "y" ]]; then
     echo -e "\n\033[36m请输入IP地址（支持格式示例）："
-    echo -e "  • 单个IP: 192.168.1.1\n  • IP段: 10.0.0.0/24\n  • 多个IP用空格分隔\033[0m"
+    echo -e "  • 单个IP: 192.168.1.1\n  • IP段: 10.0.0.0/24\n  • 多个IP用空格分隔，例如：192.168.1.5 192.168.1.6 10.0.0.0/24\033[0m"
     
     while :; do
-        read -p $'\033[33m请输入IP（输入 done 结束）: \033[0m' input
-        [[ "$input" == "done" ]] && break
+        read -p $'\033[33m请输入IP（多个用空格分隔，直接回车结束）: \033[0m' input
+        if [[ -z "$input" ]]; then
+            break
+        fi
         
         IFS=' ' read -ra ips <<< "$input"
         for ip in "${ips[@]}"; do
@@ -182,9 +183,11 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
             fi
         done
     done
+else
+    echo -e "\033[90m已跳过白名单配置\033[0m"
 fi
 
-# 永久保存配置
+#---------- 持久化配置 ----------#
 echo -e "\n\033[36m保存防火墙规则...\033[0m"
 mkdir -p /etc/ipset
 ipset save whitelist > /etc/ipset.conf
