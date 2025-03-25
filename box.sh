@@ -310,6 +310,50 @@ uninstall_service() {
     [ $check_fail -eq 0 ] && echo -e "${GREEN}✅ 卸载完成，无残留${NC}" || echo -e "${RED}⚠️  检测到残留组件，请重启系统${NC}"
 }
 
+# ======================= 安装snell协议 =======================
+install_snell() {
+    clear
+    # 添加来源提示（使用工具箱内置颜色变量）
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/xOS/Snell${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    # 执行安装流程（增加错误处理和自动清理）
+    if wget -O snell.sh https://raw.githubusercontent.com/xOS/Snell/master/Snell.sh; then
+        chmod +x snell.sh
+        ./snell.sh
+        rm -f snell.sh  # 新增清理步骤
+    else
+        echo -e "${RED}下载 Snell 安装脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+    
+    # 返回主菜单提示
+    read -n 1 -s -r -p "安装完成，按任意键返回主菜单..."
+}
+
+# ======================= 安装Hysteria2协议 =======================
+install_hysteria2() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Misaka-blog/hysteria-install${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    if wget -N --no-check-certificate https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/hysteria.sh; then
+        chmod +x hysteria.sh
+        bash hysteria.sh
+        rm -f hysteria.sh  # 新增清理步骤
+    else
+        echo -e "${RED}下载 Hysteria2 安装脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+    
+    read -n 1 -s -r -p "安装完成，按任意键返回主菜单..."
+}
+
+
 # ======================= 主菜单 =======================
 main_menu() {
   while true; do
@@ -319,6 +363,8 @@ main_menu() {
     echo -e "1. 开启root用户登录"
     echo -e "2. 安装流量监控服务"
     echo -e "3. 完全卸载流量监控"
+    echo -e "4. 安装 Snell 协议服务"
+    echo -e "5. 安装 Hysteria2 协议服务"
     echo -e "0. 退出脚本"
     echo -e "========================"
 
@@ -334,6 +380,14 @@ main_menu() {
         ;;
       3) 
         uninstall_service 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      4) 
+        install_snell 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      5)  
+        install_hysteria2 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       0) 
