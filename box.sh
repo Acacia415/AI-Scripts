@@ -266,35 +266,48 @@ EOF
 }
 
 # ======================= 流量监控卸载 =======================
-uninstall_traffic_monitor() {
-  # 高危操作确认
-  read -p $'\033[31m⚠️  确定要完全卸载IP黑名单服务吗？[y/N] \033[0m' confirm
-  if [[ ! "${confirm,,}" =~ ^y ]]; then
-      echo -e "${CYAN}已取消卸载操作${NC}"
-      return 0
-  fi
-
-  echo -e "\n${YELLOW}[1/5] 停止服务...${NC}"
-  systemctl disable --now ip_blacklist.service 2>/dev/null
-
-  echo -e "\n${YELLOW}[2/5] 删除核心文件...${NC}"
-  rm -vf /etc/systemd/system/ip_blacklist.service /root/ip_blacklist.sh
-
-  echo -e "\n${YELLOW}[3/5] 清理网络规则...${NC}"
-  iptables -D INPUT -j TRAFFIC_BLOCK 2>/dev/null
-  iptables -F TRAFFIC_BLOCK 2>/dev/null
-  iptables -X TRAFFIC_BLOCK 2>/dev/null
-  ipset flush 2>/dev/null
-  ipset destroy 2>/dev/null
-
-  echo -e "\n${YELLOW}[4/5] 删除配置文件...${NC}"
-  rm -vf /etc/ipset.conf /etc/iptables/rules.v4
-
-  echo -e "\n${YELLOW}[5/5] 重载系统配置...${NC}"
-  systemctl daemon-reload
-  systemctl reset-failed
-
-  echo -e "\n${GREEN}✅ 卸载完成！${NC}"
+uninstall_service() {
+    # 彩色定义
+    RED='\033[31m'
+    GREEN='\033[32m'
+    YELLOW='\033[33m'
+    NC='\033[0m'
+    clear
+    echo -e "${RED}⚠️ ⚠️ ⚠️  危险操作警告 ⚠️ ⚠️ ⚠️ ${NC}"
+    echo -e "${YELLOW}此操作将执行以下操作："
+    echo -e "1. 永久删除所有防火墙规则"
+    echo -e "2. 清除全部流量监控数据"
+    echo -e "3. 移除所有相关系统服务${NC}\n"
+    read -p "确定要彻底卸载所有组件吗？[y/N] " confirm
+    [[ ! "$confirm" =~ [yY] ]] && echo "操作已取消" && return
+    echo -e "\n${YELLOW}[1/6] 停止服务...${NC}"
+    systemctl disable --now ip_blacklist.service 2>/dev/null || true
+    echo -e "\n${YELLOW}[2/6] 删除文件...${NC}"
+    rm -vf /etc/systemd/system/ip_blacklist.service /root/ip_blacklist.sh
+    echo -e "\n${YELLOW}[3/6] 清理网络规则...${NC}"
+    # 增强型规则清除
+    iptables -D INPUT -j TRAFFIC_BLOCK 2>/dev/null || true
+    iptables -F TRAFFIC_BLOCK 2>/dev/null || true
+    iptables -X TRAFFIC_BLOCK 2>/dev/null || true
+    iptables-save | grep -vE 'TRAFFIC_BLOCK|banlist|whitelist' | iptables-restore
+    # 内核级清理
+    { 
+        ipset flush -q && ipset destroy -q
+        rmmod ip_set_hash_net 2>/dev/null
+        rmmod xt_set 2>/dev/null
+        rmmod ip_set 2>/dev/null
+    } || true
+    echo -e "\n${YELLOW}[4/6] 删除配置...${NC}"
+    rm -vf /etc/ipset.conf /etc/iptables/rules.v4
+    echo -e "\n${YELLOW}[5/6] 重置系统...${NC}"
+    systemctl daemon-reload
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    echo -e "\n${YELLOW}[6/6] 验证卸载...${NC}"
+    local check_fail=0
+    [ -f "/root/ip_blacklist.sh" ] && check_fail=1 && echo -e "${RED}残留文件: /root/ip_blacklist.sh"
+    ipset list -n | grep -qE 'banlist|whitelist' && check_fail=1 && echo -e "${RED}残留ipset集合"
+    iptables -nL | grep -q TRAFFIC_BLOCK && check_fail=1 && echo -e "${RED}残留iptables规则"
+    [ $check_fail -eq 0 ] && echo -e "${GREEN}✅ 卸载完成，无残留${NC}" || echo -e "${RED}⚠️  检测到残留组件，请重启系统${NC}"
 }
 
 # ======================= 主菜单 =======================
