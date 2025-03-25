@@ -105,13 +105,14 @@ EOF
   systemctl daemon-reload
   systemctl enable --now ip_blacklist.service
 
-  # 完成提示
-  echo -e "\n${GREEN}✅ 安装完成！${NC}"
-  echo -e "已添加白名单IP："
-  ipset list whitelist -output save | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?' | sed 's/^/  ➤ /'
-  echo -e "\n管理命令："
-  echo -e "  实时日志: ${CYAN}journalctl -u ip_blacklist.service -f${NC}"
-  echo -e "  临时解封: ${CYAN}ipset del banlist <IP地址>${NC}"
+# 完成提示
+echo -e "\n${GREEN}✅ 安装完成！${NC}"
+echo -e "已添加白名单IP："
+ipset list whitelist -output save | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?' | sed 's/^/  ➤ /'
+echo -e "\n管理命令："
+echo -e "  实时日志: ${CYAN}journalctl -u ip_blacklist.service -f${NC}"
+echo -e "  临时解封: ${CYAN}ipset del banlist <IP地址>${NC}"
+echo -e "  添加白名单: ${CYAN}ipset add whitelist <IP地址>${NC}"
 }
 
 # ======================= 卸载部分 =======================
