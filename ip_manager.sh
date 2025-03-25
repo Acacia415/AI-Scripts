@@ -1,6 +1,6 @@
 #!/bin/bash
 # IP流量管理一体化脚本
-# 一键命令：curl -sSL https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/ip_manager.sh | sudo bash
+# 一键命令：curl -sSL https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/ip_manager.sh | sudo bash -s
 # 彩色定义
 RED='\033[31m'
 GREEN='\033[32m'
@@ -9,24 +9,16 @@ CYAN='\033[36m'
 NC='\033[0m'
 #---------- 通用函数 ----------#
 check_root() {
-  if [ "$(id -u)" -ne 0 ]; then
-    echo -e "${RED}错误：请使用sudo运行此脚本${NC}"
-    exit 1
-  fi
-}
-confirm_action() {
-  local prompt=$1
-  read -p "${YELLOW}${prompt} [y/N] ${NC}" confirm
-  [[ "$confirm" =~ [yY] ]] || return 1
+  [ "$(id -u)" -ne 0 ] && { echo -e "${RED}错误：请使用sudo运行此脚本${NC}"; exit 1; }
 }
 show_header() {
   clear
   echo -e "${CYAN}========================================"
-  echo "IP流量管理脚本 v2.1"
+  echo "IP流量管理脚本 v2.2"
   echo "GitHub: https://github.com/Acacia415"
   echo "功能选项："
-  echo "  1. 安装流量监控系统"
-  echo "  2. 卸载流量监控系统"
+  echo "  1) 安装流量监控系统"
+  echo "  2) 卸载流量监控系统"
   echo -e "----------------------------------------"
   echo "  输入 0 退出管理脚本"
   echo -e "========================================${NC}"
@@ -141,15 +133,27 @@ uninstall_script() {
 #---------- 主流程 ----------#
 main() {
   check_root
-  show_header
-  PS3=$'\n'"请选择操作 (1-2, 输入0退出): "
-  options=("安装系统" "卸载系统")
-  select opt in "${options[@]}"; do
-    case $REPLY in
-      1) install_script; break ;;
-      2) uninstall_script; break ;;
-      0) echo -e "${GREEN}已退出脚本${NC}"; exit 0 ;;
-      *) echo -e "${RED}无效选择，请重新输入${NC}";;
+  while true; do
+    show_header
+    read -p "请选择操作 (输入数字 1/2/0): " choice
+    
+    case $choice in
+      1)
+        install_script
+        break
+        ;;
+      2)
+        uninstall_script
+        break
+        ;;
+      0)
+        echo -e "${GREEN}已退出脚本${NC}"
+        exit 0
+        ;;
+      *)
+        echo -e "${RED}无效输入，请输入 1（安装）/2（卸载）/0（退出）${NC}"
+        sleep 2
+        ;;
     esac
   done
 }
