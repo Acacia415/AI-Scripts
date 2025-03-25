@@ -333,7 +333,7 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       3) 
-        uninstall_traffic_monitor 
+        uninstall_service 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       0) 
