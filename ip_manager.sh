@@ -36,7 +36,7 @@ install_traffic_monitor() {
   # 依赖检查
   if ! check_dependencies; then
     echo -e "${RED}依赖安装失败，请手动执行：apt-get update && apt-get install ipset iptables iproute2${NC}"
-    exit 1
+    return 1
   fi
 
   # ---------- 生成主监控脚本 ----------
@@ -117,49 +117,67 @@ EOF
 # ======================= 卸载部分 =======================
 uninstall_traffic_monitor() {
   # 高危操作确认
-  read -p "⚠️  确定要完全卸载吗？[y/N] " confirm
-  [[ ! "$confirm" =~ [yY] ]] && echo "操作取消" && return
+  echo -e "\n${RED}════════════ 警告 ════════════${NC}"
+  read -p "⚠️  确定要完全卸载吗？(必须输入y并回车确认) [y/N]: " confirm
 
-  echo -e "\n${YELLOW}[1/5] 停止服务...${NC}"
-  systemctl disable --now ip_blacklist.service 2>/dev/null || true
+  case "$confirm" in
+    [yY])
+      echo -e "\n${YELLOW}[1/5] 停止服务...${NC}"
+      systemctl disable --now ip_blacklist.service 2>/dev/null || true
 
-  echo -e "\n${YELLOW}[2/5] 删除文件...${NC}"
-  rm -vf /etc/systemd/system/ip_blacklist.service /root/ip_blacklist.sh
+      echo -e "\n${YELLOW}[2/5] 删除文件...${NC}"
+      rm -vf /etc/systemd/system/ip_blacklist.service /root/ip_blacklist.sh
 
-  echo -e "\n${YELLOW}[3/5] 清理网络规则...${NC}"
-  iptables -D INPUT -j TRAFFIC_BLOCK 2>/dev/null || true
-  iptables -F TRAFFIC_BLOCK 2>/dev/null || true
-  iptables -X TRAFFIC_BLOCK 2>/dev/null || true
-  ipset flush whitelist 2>/dev/null || true
-  ipset destroy whitelist 2>/dev/null || true
-  ipset destroy banlist 2>/dev/null || true
+      echo -e "\n${YELLOW}[3/5] 清理网络规则...${NC}"
+      iptables -D INPUT -j TRAFFIC_BLOCK 2>/dev/null || true
+      iptables -F TRAFFIC_BLOCK 2>/dev/null || true
+      iptables -X TRAFFIC_BLOCK 2>/dev/null || true
+      ipset flush whitelist 2>/dev/null || true
+      ipset destroy whitelist 2>/dev/null || true
+      ipset destroy banlist 2>/dev/null || true
 
-  echo -e "\n${YELLOW}[4/5] 删除配置...${NC}"
-  rm -vf /etc/ipset.conf /etc/iptables/rules.v4
+      echo -e "\n${YELLOW}[4/5] 删除配置...${NC}"
+      rm -vf /etc/ipset.conf /etc/iptables/rules.v4
 
-  echo -e "\n${YELLOW}[5/5] 重载系统...${NC}"
-  systemctl daemon-reload
-  echo -e "\n${GREEN}✅ 卸载完成！${NC}"
+      echo -e "\n${YELLOW}[5/5] 重载系统...${NC}"
+      systemctl daemon-reload
+      echo -e "\n${GREEN}✅ 卸载完成！${NC}"
+      ;;
+    *)
+      echo -e "${YELLOW}已取消卸载操作${NC}"
+      return
+      ;;
+  esac
 }
 
 # ======================= 主菜单 =======================
 main_menu() {
-  clear
-  echo -e "\n${CYAN}流量监控管理脚本${NC}"
-  echo -e "--------------------------------"
-  echo -e "1. 安装流量监控服务"
-  echo -e "2. 完全卸载服务"
-  echo -e "0. 退出脚本"
-  echo -e "--------------------------------"
-
   while true; do
+    clear
+    echo -e "\n${CYAN}流量监控管理脚本${NC}"
+    echo -e "--------------------------------"
+    echo -e "1. 安装流量监控服务"
+    echo -e "2. 完全卸载服务"
+    echo -e "0. 退出脚本"
+    echo -e "--------------------------------"
+
     read -p "请输入选项 [0-2]: " choice
     case $choice in
-      1) install_traffic_monitor; break ;;
-      2) uninstall_traffic_monitor; break ;;
-      0) echo -e "${GREEN}已退出${NC}"; exit 0 ;;
-      *) echo -e "${RED}无效选项，请重新输入${NC}" ;;
+      1) 
+        install_traffic_monitor
+        ;;
+      2) 
+        uninstall_traffic_monitor 
+        ;;
+      0) 
+        echo -e "${GREEN}已退出${NC}"
+        exit 0
+        ;;
+      *) 
+        echo -e "${RED}无效选项，请重新输入${NC}"
+        ;;
     esac
+    read -n 1 -s -r -p "按任意键继续..."
   done
 }
 
