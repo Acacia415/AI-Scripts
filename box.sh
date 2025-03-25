@@ -16,7 +16,7 @@ NC='\033[0m'
 # 依赖检查函数
 check_dependencies() {
   local missing=()
-  for cmd in ipset iptables ip ss systemctl curl; do
+  for cmd in ipset iptables ip ss systemctl curl bc; do
     if ! command -v $cmd &>/dev/null; then
       missing+=("$cmd")
     fi
@@ -25,7 +25,7 @@ check_dependencies() {
   if [ ${#missing[@]} -gt 0 ]; then
     echo -e "${RED}缺失必要组件: ${missing[*]}${NC}"
     echo -e "正在尝试自动安装..."
-    apt-get update && apt-get install -y ipset iptables iproute2 systemctl curl
+    apt-get update && apt-get install -y ipset iptables iproute2 bc curl
     return $?
   fi
 }
@@ -110,7 +110,7 @@ init_system() {
     iptables -A TRAFFIC_BLOCK -m set --match-set banlist src -j DROP
 
     # 获取活动网卡
-    INTERFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -v lo | xargs -I {} sh -c 'if ip link show {} | grep -q "state UP"; then echo {}; fi' | head -n 1)
+    INTERFACE=$(ip route get 8.8.8.8 | awk '{print $5}' | head -n1)
     [ -z "$INTERFACE" ] && {
         echo -e "${RED}未找到有效的网卡接口！${NC}"
         exit 1
@@ -304,7 +304,7 @@ uninstall_service() {
     echo -e "\n${YELLOW}[6/6] 验证卸载...${NC}"
     local check_fail=0
     [ -f "/root/ip_blacklist.sh" ] && check_fail=1 && echo -e "${RED}残留文件: /root/ip_blacklist.sh"
-    ipset list -n | grep -qE 'banlist|whitelist' && check_fail=1 && echo -e "${RED}残留ipset集合"
+    ipset list -n 2>/dev/null | grep -qE 'banlist|whitelist' && check_fail=1 && echo -e "${RED}残留ipset集合"
     iptables -nL | grep -q TRAFFIC_BLOCK && check_fail=1 && echo -e "${RED}残留iptables规则"
     [ $check_fail -eq 0 ] && echo -e "${GREEN}✅ 卸载完成，无残留${NC}" || echo -e "${RED}⚠️  检测到残留组件，请重启系统${NC}"
 }
