@@ -26,7 +26,7 @@ setup_alias() {
     ((${#config_files[@]} == 0)) && return
     for config in "${config_files[@]}"; do
         # 检查是否已存在别名
-        if ! grep -q "alias w='bash -c" "$config"; then
+        if ! grep -q "alias p='bash -c" "$config"; then
             echo -e "\n# IRIS工具箱快捷命令\n$alias_cmd" >> "$config"
             echo -e "${GREEN}快捷方式已添加到 ${config}${NC}"
         fi
