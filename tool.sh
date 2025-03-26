@@ -564,107 +564,123 @@ open_all_ports() {
     fi
 }
 
-# ======================= Caddy反向代理 =======================
-install_caddy() {
-    clear
-    echo -e "${YELLOW}════════════════════════════════════${NC}"
-    echo -e "${CYAN}正在配置Caddy反向代理...${NC}"
-    echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    # 安装检测与自动修复
-    if ! command -v caddy &> /dev/null; then
-        echo -e "${RED}未检测到Caddy，开始安装...${NC}"
-        if ! bash <(curl -L -s https://raw.githubusercontent.com/qiuxiuya/qiuxiuya/main/VPS/caddy.sh); then
-            echo -e "${RED}Caddy安装失败！${NC}"
+# ======================= 安装Caddy反代 =======================
+configure_caddy_reverse_proxy() {
+    # 环境常量定义
+    local CADDY_SERVICE="/lib/systemd/system/caddy.service"
+    local CADDYFILE="/etc/caddy/Caddyfile"
+    local TEMP_CONF=$(mktemp)
+    local domain port
+
+    # 首次安装检测
+    if ! command -v caddy &>/dev/null; then
+        echo -e "${CYAN}开始安装Caddy服务器...${NC}"
+        
+        # 安装依赖组件
+        if ! sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https &>/dev/null; then
+            echo -e "${RED}依赖组件安装失败！请检查apt源配置${NC}"
             return 1
         fi
-        
-        # 创建systemd服务（关键改进）
-        sudo tee /etc/systemd/system/caddy.service >/dev/null <<EOF
-[Unit]
-Description=Caddy HTTP/2 web server
-Documentation=https://caddyserver.com/docs/
-After=network.target
-[Service]
-User=root
-ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile
-ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile
-Restart=on-failure
-[Install]
-WantedBy=multi-user.target
-EOF
-        sudo systemctl daemon-reload
-        
-        # ▼▼▼ 关键修改：仅在首次安装时初始化配置文件 ▼▼▼
+
+        # 添加官方软件源
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
+        sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | \
+        sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+
+        # 执行安装
+        sudo apt-get update &>/dev/null
+        if ! sudo apt-get install -y caddy &>/dev/null; then
+            echo -e "${RED}Caddy官方安装失败！错误码：$?${NC}"
+            return 1
+        fi
+
+        # 初始化配置文件
         sudo mkdir -p /etc/caddy
-        sudo tee /etc/caddy/Caddyfile >/dev/null <<< ""  # 强制创建空配置文件
-        # ▼▼▼ 新增：启动并验证服务 ▼▼▼
-        sudo systemctl start caddy
-        sudo systemctl enable caddy >/dev/null 2>&1
-        sudo systemctl is-active caddy || {
-            echo -e "${RED}Caddy服务未运行！${NC}";
-            return 1;
-        }
+        [ ! -f "$CADDYFILE" ] && sudo touch "$CADDYFILE"
+        echo -e "# Caddyfile自动生成配置\n# 手动修改后请执行 systemctl reload caddy" | sudo tee "$CADDYFILE" >/dev/null
+        sudo chown caddy:caddy "$CADDYFILE"
+        echo -e "${GREEN}✅ Caddy安装完成，版本：$(caddy version)${NC}"
+    else
+        echo -e "${CYAN}检测到Caddy已安装，版本：$(caddy version)${NC}"
     fi
-    
-    # ▼▼▼ 全局服务健康检查 ▼▼▼
-    if ! sudo systemctl is-active caddy; then
-        echo -e "${YELLOW}检测到Caddy服务未运行，尝试修复启动...${NC}"
-        sudo systemctl start caddy || {
-            echo -e "${RED}服务启动失败，请检查日志：journalctl -u caddy${NC}";
-            return 1;
-        }
-    fi
-    
-    # 配置循环
-    while true; do
-        # 域名输入与验证（保持不变）
-        read -p "请输入要绑定的域名（不要带https://）：" domain
-        domain=$(echo "$domain" | sed 's/https\?:\/\///g')
-        if [[ ! "$domain" =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]]; then
-            echo -e "${RED}域名格式无效！${NC}"
-            continue
-        fi
-        if grep -q "^$domain {" /etc/caddy/Caddyfile; then
-            echo -e "${YELLOW}该域名配置已存在${NC}"
-            continue
-        fi
-        
-        # 端口输入与验证（保持不变）
-        read -p "请输入要代理的本地端口（1-65535）：" port
-        if [[ ! "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
-            echo -e "${RED}端口号无效！${NC}"
-            continue
-        fi
-        
-        # 追加配置并格式化
-        echo -e "\n${domain} {\n    reverse_proxy http://localhost:${port}\n}" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
-        sudo caddy fmt --overwrite /etc/caddy/Caddyfile
-        
-        # 服务管理（关键改进）
-        if systemctl is-active --quiet caddy; then
-            echo -e "${CYAN}检测到运行中的Caddy服务，正在平滑重启...${NC}"
-            sudo caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || {
-                echo -e "${YELLOW}配置重载失败，执行完全重启...${NC}"
-                sudo systemctl restart caddy
-            }
+
+    # 配置输入循环
+    while : ; do
+        # 域名输入验证
+        until [[ $domain =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]]; do
+            read -p "请输入域名（无需https://）：" domain
+            domain=$(echo "$domain" | sed 's/https\?:\/\///g')
+            [[ $domain =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]] || echo -e "${RED}域名格式无效！示例：example.com${NC}"
+        done
+
+        # 端口输入验证
+        until [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1 -a "$port" -le 65535 ]; do
+            read -p "请输入本地端口号（1-65535）：" port
+            [[ $port =~ ^[0-9]+$ ]] || { echo -e "${RED}端口必须为数字！"; continue; }
+            [ "$port" -ge 1 -a "$port" -le 65535 ] || echo -e "${RED}端口范围1-65535！"
+        done
+
+        # 配置冲突检测
+        if sudo caddy validate --config "$CADDYFILE" --adapter caddyfile 2>/dev/null; then
+            if grep -q "^$domain {" "$CADDYFILE"; then
+                echo -e "${YELLOW}⚠ 检测到现有配置："
+                grep -A3 "^$domain {" "$CADDYFILE"
+                read -p "要覆盖此配置吗？[y/N] " overwrite
+                [[ $overwrite =~ ^[Yy]$ ]] || continue
+                sudo caddy adapt --config "$CADDYFILE" --adapter caddyfile | \
+                awk -v domain="$domain" '/^'$domain' {/{flag=1} !flag; /^}/{flag=0}' | \
+                sudo tee "$TEMP_CONF" >/dev/null
+                sudo mv "$TEMP_CONF" "$CADDYFILE"
+            fi
         else
-            echo -e "${CYAN}启动Caddy服务...${NC}"
-            sudo systemctl start caddy
-            sudo systemctl enable caddy >/dev/null 2>&1
+            echo -e "${YELLOW}⚠ 当前配置文件存在错误，将创建新配置${NC}"
+            sudo truncate -s 0 "$CADDYFILE"
         fi
-        
-        # 结果验证
-        if sudo systemctl is-active --quiet caddy; then
-            echo -e "${GREEN}反向代理配置成功！${NC}"
-            echo -e "访问地址：${BLUE}https://${domain}${NC}"
+
+        # 生成配置块
+        echo -e "\n# 自动生成配置 - $(date +%F)" | sudo tee -a "$CADDYFILE" >/dev/null
+        cat <<EOF | sudo tee -a "$CADDYFILE" >/dev/null
+$domain {
+    reverse_proxy localhost:$port {
+        header_up Host {host}
+        header_up X-Real-IP {remote}
+        header_up X-Forwarded-For {remote}
+        header_up X-Forwarded-Proto {scheme}
+    }
+    encode gzip
+    tls {
+        protocols tls1.2 tls1.3
+        ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+    }
+}
+EOF
+
+        # 格式化配置文件
+        sudo caddy fmt "$CADDYFILE" --overwrite
+
+        # 配置验证与生效
+        if ! sudo caddy validate --config "$CADDYFILE"; then
+            echo -e "${RED}配置验证失败！错误详情："
+            sudo caddy validate --config "$CADDYFILE" 2>&1 | grep -v "valid"
+            sudo sed -i "/# 自动生成配置 - $(date +%F)/,+6d" "$CADDYFILE"
+            return 1
+        fi
+
+        # 服务热重载
+        if systemctl is-active caddy &>/dev/null; then
+            sudo systemctl reload caddy || sudo systemctl restart caddy
         else
-            echo -e "${RED}服务启动异常，请检查日志：journalctl -u caddy${NC}"
+            sudo systemctl enable --now caddy &>/dev/null
         fi
-        
-        read -p "是否继续添加其他域名？[y/N] " choice
-        [[ ! "$choice" =~ ^[Yy]$ ]] && break
+
+        echo -e "${GREEN}✅ 配置生效成功！访问地址：https://$domain${NC}"
+        read -p "是否继续添加配置？[y/N] " more
+        [[ $more =~ ^[Yy]$ ]] || break
     done
+
+    # 清理临时文件
+    rm -f "$TEMP_CONF"
 }
 
 # ======================= IP优先级设置 =======================
