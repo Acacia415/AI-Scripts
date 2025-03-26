@@ -13,6 +13,34 @@ BLUE='\033[34m'
 CYAN='\033[36m'
 NC='\033[0m'
 
+# ======================= 静默设置快捷键 =======================
+# 获取当前用户的shell类型和配置文件路径
+auto_set_alias() {
+    # 获取真实用户（即使使用sudo）
+    REAL_USER=$(logname 2>/dev/null || echo "${SUDO_USER:-$USER}")
+    USER_HOME=$(eval echo ~"$REAL_USER")
+    
+    # 判断当前shell类型
+    if [ -f "$USER_HOME/.zshrc" ]; then
+        RC_FILE="$USER_HOME/.zshrc"
+    else
+        RC_FILE="$USER_HOME/.bashrc"
+    fi
+    # 生成alias命令
+    SCRIPT_PATH=$(realpath "$0")  # 获取脚本绝对路径
+    ALIAS_CMD="alias p='sudo $SCRIPT_PATH'"
+    # 检查是否已存在配置
+    if ! grep -qF "$ALIAS_CMD" "$RC_FILE"; then
+        echo -e "\n# IRIS工具箱快捷键 (由脚本自动添加)\n$ALIAS_CMD" >> "$RC_FILE"
+        # 尝试立即生效（静默模式）
+        su - "$REAL_USER" -c "source '$RC_FILE'" >/dev/null 2>&1 || true
+    fi
+}
+# 自动执行（仅在root权限下操作）
+if [ "$EUID" -eq 0 ]; then
+    auto_set_alias
+fi
+
 # 依赖检查函数
 check_dependencies() {
   local missing=()
