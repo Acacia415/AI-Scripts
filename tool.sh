@@ -565,7 +565,7 @@ open_all_ports() {
 }
 
 # ======================= 安装Caddy反代 =======================
-install_caddy() {
+configure_caddy_reverse_proxy() {
     # 环境常量定义
     local CADDY_SERVICE="/lib/systemd/system/caddy.service"
     local CADDYFILE="/etc/caddy/Caddyfile"
@@ -853,7 +853,7 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       11)
-        install_caddy
+        configure_caddy_reverse_proxy
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       12)
