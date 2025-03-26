@@ -16,7 +16,7 @@ INSTALL_MARKER="$USER_HOME/.iris_toolbox_installed"
 # ======================= 快捷键设置 =======================
 setup_alias() {
     # 定义别名命令
-    local alias_cmd="alias w='bash -c \"\$(curl -sSL https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/box.sh)\"'"
+    local alias_cmd="alias p='bash -c \"\$(curl -sSL https://raw.githubusercontent.com/Acacia415/GPT-Scripts/refs/heads/main/tool.sh)\"'"
     local config_files=()
     # 检测不同shell的配置文件
     [[ -f $USER_HOME/.bashrc ]] && config_files+=("$USER_HOME/.bashrc")
@@ -36,7 +36,7 @@ setup_alias() {
     # 提示生效方法
     echo -e "\n${YELLOW}快捷命令已配置！您现在可以："
     echo -e "1. 手动执行 ${CYAN}source ~/.bashrc${YELLOW} 立即生效"
-    echo -e "2. 后续直接输入 ${CYAN}w${YELLOW} 运行脚本${NC}"
+    echo -e "2. 后续直接输入 ${CYAN}p${YELLOW} 运行脚本${NC}"
 }
 # ======================= 首次运行检查 =======================
 check_first_run() {
@@ -69,7 +69,7 @@ uninstall_service() {
     # 删除标记文件
     rm -f "$INSTALL_MARKER"
     # 取消当前会话的别名
-    unalias w 2>/dev/null
+    unalias p 2>/dev/null
 }
 
 # ======================= 依赖检查函数 =======================
