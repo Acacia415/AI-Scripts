@@ -789,6 +789,23 @@ EOF
     done
 }
 
+# ======================= TCP性能优化 =======================
+install_magic_tcp() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/qiuxiuya/magicTCP${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    read -p "是否要执行TCP性能优化？[y/N] " confirm
+    [[ ! "$confirm" =~ [yY] ]] && echo "操作已取消" && return
+    
+    if bash <(curl -sSL https://raw.githubusercontent.com/qiuxiuya/magicTCP/main/main.sh); then
+        echo -e "${GREEN}✅ TCP优化完成${NC}"
+    else
+        echo -e "${RED}❌ TCP优化失败，请检查网络连接${NC}"
+    end
+}
+
 # ======================= 主菜单 =======================
 main_menu() {
   while true; do
@@ -807,6 +824,7 @@ main_menu() {
     echo -e "10. 开放所有端口"
     echo -e "11. 安装Caddy反代"
     echo -e "12. IP优先级设置"
+    echo -e "13. TCP性能优化"
     echo -e "0. 退出脚本"
     echo -e "========================"
 
@@ -858,6 +876,10 @@ main_menu() {
         ;;
       12)
         modify_ip_preference
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      13)
+        install_magic_tcp 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       0) 
