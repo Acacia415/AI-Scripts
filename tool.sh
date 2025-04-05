@@ -797,13 +797,13 @@ install_magic_tcp() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
     read -p "是否要执行TCP性能优化？[y/N] " confirm
-    [[ ! "$confirm" =~ [yY] ]] && echo "操作已取消" && return
+    [[ ! "$confirm" =~ [yY] ]] && { echo -e "${BLUE}操作已取消${NC}"; return; }
     
     if bash <(curl -sSL https://raw.githubusercontent.com/qiuxiuya/magicTCP/main/main.sh); then
         echo -e "${GREEN}✅ TCP优化完成${NC}"
     else
         echo -e "${RED}❌ TCP优化失败，请检查网络连接${NC}"
-    end
+    fi
 }
 
 # ======================= 主菜单 =======================
