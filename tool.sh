@@ -796,20 +796,31 @@ install_magic_tcp() {
     echo -e "${CYAN}脚本来源：https://github.com/qiuxiuya/magicTCP${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
+    # 用户确认环节
     read -p "是否要执行TCP性能优化？[y/N] " confirm
-    [[ ! "$confirm" =~ [yY] ]] && { echo -e "${BLUE}操作已取消${NC}"; return; }
+    if [[ ! "$confirm" =~ [yY] ]]; then
+        echo -e "${BLUE}操作已取消${NC}"
+        return 1
+    fi  # 必须显式闭合if语句
     
-    echo -e "${CYAN}正在下载优化脚本...${NC}"
-    if bash <(curl -sSL https://raw.githubusercontent.com/qiuxiuya/magicTCP/main/main.sh); then
-        echo -e "${GREEN}✅ TCP优化完成，建议重启系统后生效${NC}"
-    else
-        echo -e "${RED}❌ TCP优化失败，请检查："
-        echo -e "1. 网络连接状态"
-        echo -e "2. 脚本源是否可用"
-        echo -e "3. 系统兼容性${NC}"
+    # 网络检测环节
+    if ! curl -Is https://raw.githubusercontent.com >/dev/null 2>&1; then
+        echo -e "${RED}❌ 网络连接异常，无法访问GitHub${NC}"
         return 1
     fi
-}
+    
+    # 执行优化脚本
+    echo -e "${CYAN}正在应用TCP优化参数..."
+    if bash <(curl -sSL https://raw.githubusercontent.com/qiuxiuya/magicTCP/main/main.sh); then
+        echo -e "${GREEN}✅ 优化成功完成，重启后生效${NC}"
+    else
+        echo -e "${RED}❌ 优化过程中出现错误，请检查："
+        echo -e "1. 系统是否为Debian/Ubuntu"
+        echo -e "2. 是否具有root权限"
+        echo -e "3. 查看日志：/var/log/magic_tcp.log${NC}"
+        return 1
+    fi  # 闭合核心if语句
+}  # 函数结束（对应原错误行号807）
 
 # ======================= 主菜单 =======================
 main_menu() {
