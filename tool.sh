@@ -15,46 +15,19 @@ NC='\033[0m'
 
 # ===================== IRIS 工具箱快捷键自动安装 =====================
 
-# 仅 root 权限下执行
+# 确保以 root 权限运行
 if [ "$EUID" -ne 0 ]; then
     echo "请使用 sudo 执行本脚本"
     exit 1
 fi
 
-# 获取真实用户
-REAL_USER=$(logname 2>/dev/null || echo "${SUDO_USER:-$USER}")
-USER_HOME=$(eval echo ~"$REAL_USER")
-
-# 判断用户使用的配置文件
-if [ -f "$USER_HOME/.zshrc" ]; then
-    RC_FILE="$USER_HOME/.zshrc"
-else
-    RC_FILE="$USER_HOME/.bashrc"
-fi
-
-# alias 内容
+# 获取脚本的绝对路径
 SCRIPT_PATH=$(realpath "$0")
-ALIAS_CMD="alias p='sudo $SCRIPT_PATH'"
 
-# 写入 alias（如果尚未存在）
-if ! grep -qF "$ALIAS_CMD" "$RC_FILE"; then
-    echo -e "\n# IRIS工具箱快捷键 (由脚本自动添加)\n$ALIAS_CMD" >> "$RC_FILE"
-    echo "[+] 已添加 alias 到 $RC_FILE"
-else
-    echo "[*] alias 已存在，无需重复添加"
-fi
-
-# 自动 source（只在非 root 用户下）
-if [ "$REAL_USER" != "root" ]; then
-    if [ "$USER" == "$REAL_USER" ]; then
-        source "$RC_FILE"
-        echo "[+] alias 已立即生效 ✅"
-    else
-        su - "$REAL_USER" -c "bash -c 'source \"$RC_FILE\"'" >/dev/null 2>&1 && \
-        echo "[+] 已尝试自动使 alias 生效 ✅" || \
-        echo "[!] 已添加 alias，但未能自动生效，请手动执行：source $RC_FILE"
-    fi
-fi
+# 创建 /usr/local/bin/p 命令
+ln -sf "$SCRIPT_PATH" /usr/local/bin/p
+chmod +x /usr/local/bin/p
+echo "[+] 已创建命令：p ✅"
 
 # ======================= 开启root登录 =======================
 enable_root_login() {
