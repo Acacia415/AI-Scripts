@@ -25,7 +25,7 @@ fi
 SCRIPT_PATH=$(realpath "$0")
 
 # 创建 /usr/local/bin/p 命令
-ln -sf "$SCRIPT_PATH" /usr/local/bin/p
+cp -f "$(realpath "$0")" /usr/local/bin/p
 chmod +x /usr/local/bin/p
 echo "[+] 已创建命令：p ✅"
 
