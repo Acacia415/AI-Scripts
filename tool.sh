@@ -814,17 +814,25 @@ install_shell_beautify() {
     echo -e "${CYAN}正在安装命令行美化组件...${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
 
-    echo -e "${CYAN}[1/5] 更新软件源...${NC}"
+    echo -e "${CYAN}[1/6] 更新软件源...${NC}"
     apt-get update
 
-    echo -e "${CYAN}[2/5] 安装依赖组件...${NC}"
+    echo -e "${CYAN}[2/6] 安装依赖组件...${NC}"
     if ! command -v git &> /dev/null; then
         apt-get install -y git > /dev/null
     else
         echo -e "${GREEN} ✓ Git 已安装${NC}"
     fi
 
-    echo -e "${CYAN}[3/5] 配置oh-my-zsh...${NC}"
+    echo -e "${CYAN}[3/6] 检查zsh...${NC}"
+    if ! command -v zsh &> /dev/null; then
+        echo -e "${YELLOW}未检测到zsh，正在安装...${NC}"
+        apt-get install -y zsh > /dev/null
+    else
+        echo -e "${GREEN} ✓ Zsh 已安装${NC}"
+    fi
+
+    echo -e "${CYAN}[4/6] 配置oh-my-zsh...${NC}"
     if [ ! -d "$HOME/.oh-my-zsh" ]; then
         echo -e "首次安装oh-my-zsh..."
         sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
@@ -836,12 +844,11 @@ install_shell_beautify() {
         echo -e "${GREEN} ✓ oh-my-zsh 已安装${NC}"
     fi
 
-    echo -e "${CYAN}[4/5] 设置ultima主题...${NC}"
+    echo -e "${CYAN}[5/6] 设置ultima主题...${NC}"
     ULTIMA_REPO="https://github.com/egorlem/ultima.zsh-theme"
     TEMP_DIR="$HOME/ultima-shell"
     THEME_DEST="$HOME/.oh-my-zsh/themes"
 
-    # 克隆并移动主题文件
     rm -rf "$TEMP_DIR"
     git clone -q "$ULTIMA_REPO" "$TEMP_DIR"
     if [ -f "$TEMP_DIR/ultima.zsh-theme" ]; then
@@ -852,10 +859,9 @@ install_shell_beautify() {
         return 1
     fi
 
-    # 设置主题
     sed -i 's/ZSH_THEME=.*/ZSH_THEME="ultima"/' ~/.zshrc
 
-    echo -e "${CYAN}[5/5] 设置默认shell...${NC}"
+    echo -e "${CYAN}[6/6] 设置默认shell...${NC}"
     if [ "$SHELL" != "$(which zsh)" ]; then
         chsh -s $(which zsh) >/dev/null
     fi
