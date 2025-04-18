@@ -63,11 +63,25 @@ enable_root_login() {
 
 # ======================= 流量监控安装 =======================
 install_traffic_monitor() {
-  # 依赖检查
-  if ! check_dependencies; then
-    echo -e "${RED}依赖安装失败，请手动执行：apt-get update && apt-get install ipset iptables iproute2${NC}"
-    return 1
-  fi
+  # 检查依赖并安装
+check_dependencies() {
+    local deps=("ipset" "iptables" "ip")
+    local missing=()
+    
+    for dep in "${deps[@]}"; do
+        if ! command -v $dep &>/dev/null; then
+            missing+=("$dep")
+        fi
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo -e "${YELLOW}正在安装缺失依赖：${missing[*]}${NC}"
+        apt-get update
+        if ! apt-get install -y ipset iptables iproute2; then
+            return 1
+        fi
+    fi
+    return 0
+}
 
   #---------- 生成主监控脚本 ----------#
   echo -e "\n${CYAN}[1/4] 生成主脚本到 /root/ip_blacklist.sh${NC}"
