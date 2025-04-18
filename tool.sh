@@ -807,7 +807,6 @@ install_magic_tcp() {
     fi  # 闭合核心if语句
 }  # 函数结束（对应原错误行号807）
 
-# ======================= 命令行美化 =======================
 install_shell_beautify() {
     clear
     echo -e "${YELLOW}════════════════════════════════════${NC}"
@@ -823,6 +822,12 @@ install_shell_beautify() {
     else
         echo -e "${GREEN} ✓ Git 已安装${NC}"
     fi
+    if ! command -v wget &> /dev/null; then
+        apt-get install -y wget > /dev/null
+    fi
+    if ! command -v unzip &> /dev/null; then
+        apt-get install -y unzip > /dev/null
+    fi
 
     echo -e "${CYAN}[3/6] 检查zsh...${NC}"
     if ! command -v zsh &> /dev/null; then
@@ -834,12 +839,12 @@ install_shell_beautify() {
 
     echo -e "${CYAN}[4/6] 配置oh-my-zsh...${NC}"
     if [ ! -d "$HOME/.oh-my-zsh" ]; then
-        echo -e "首次安装oh-my-zsh..."
-        sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}oh-my-zsh安装失败！请检查网络连接${NC}"
-            return 1
-        fi
+        echo -e "${CYAN}正在下载 oh-my-zsh 压缩包...${NC}"
+        wget -qO /tmp/ohmyzsh.zip https://gitee.com/mirrors/oh-my-zsh/repository/archive/master.zip
+        unzip -q /tmp/ohmyzsh.zip -d /tmp
+        mv /tmp/oh-my-zsh-master ~/.oh-my-zsh
+        cp ~/.oh-my-zsh/templates/zshrc.zsh-template ~/.zshrc
+        echo -e "${GREEN} ✓ oh-my-zsh 安装完成${NC}"
     else
         echo -e "${GREEN} ✓ oh-my-zsh 已安装${NC}"
     fi
