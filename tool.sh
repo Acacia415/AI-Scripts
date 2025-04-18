@@ -814,10 +814,9 @@ install_shell_beautify() {
     echo -e "${CYAN}正在安装命令行美化组件...${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
 
-    # 检查依赖组件
     echo -e "${CYAN}[1/5] 更新软件源...${NC}"
     apt-get update
-    
+
     echo -e "${CYAN}[2/5] 安装依赖组件...${NC}"
     if ! command -v git &> /dev/null; then
         apt-get install -y git > /dev/null
@@ -825,7 +824,6 @@ install_shell_beautify() {
         echo -e "${GREEN} ✓ Git 已安装${NC}"
     fi
 
-    # 安装oh-my-zsh（带状态检测）
     echo -e "${CYAN}[3/5] 配置oh-my-zsh...${NC}"
     if [ ! -d "$HOME/.oh-my-zsh" ]; then
         echo -e "首次安装oh-my-zsh..."
@@ -838,35 +836,30 @@ install_shell_beautify() {
         echo -e "${GREEN} ✓ oh-my-zsh 已安装${NC}"
     fi
 
-    # 配置主题（修复版本）
     echo -e "${CYAN}[4/5] 设置ultima主题...${NC}"
-    OMZ_CUSTOM_THEMES_DIR="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes"
-    
-    # 修正克隆路径和符号链接
-    if [ -d "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme" ]; then
-        echo -e "${GREEN} ✓ 检测到已安装ultima主题，尝试更新...${NC}"
-        git -C "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme" pull --quiet
+    ULTIMA_REPO="https://github.com/egorlem/ultima.zsh-theme"
+    TEMP_DIR="$HOME/ultima-shell"
+    THEME_DEST="$HOME/.oh-my-zsh/themes"
+
+    # 克隆并移动主题文件
+    rm -rf "$TEMP_DIR"
+    git clone -q "$ULTIMA_REPO" "$TEMP_DIR"
+    if [ -f "$TEMP_DIR/ultima.zsh-theme" ]; then
+        mv -f "$TEMP_DIR/ultima.zsh-theme" "$THEME_DEST/ultima.zsh-theme"
+        echo -e "${GREEN} ✓ 主题安装完成${NC}"
     else
-        echo -e "正在安装ultima主题..."
-        git clone -q https://github.com/egorlem/ultima.zsh-theme "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme"
-    fi
-    # 创建正确格式的符号链接（关键修复点）
-    ln -sfv "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme/ultima.zsh-theme" "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme"
-    # 验证主题文件存在性
-    if [ ! -f "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme" ]; then
-        echo -e "${RED}主题文件未正确生成，请检查安装日志${NC}"
+        echo -e "${RED}❌ 克隆失败或找不到主题文件${NC}"
         return 1
     fi
-    # 应用主题配置
+
+    # 设置主题
     sed -i 's/ZSH_THEME=.*/ZSH_THEME="ultima"/' ~/.zshrc
-    
-    # 设置默认shell
+
     echo -e "${CYAN}[5/5] 设置默认shell...${NC}"
     if [ "$SHELL" != "$(which zsh)" ]; then
         chsh -s $(which zsh) >/dev/null
     fi
 
-    # 交互生效确认
     echo -e "\n${GREEN}✅ 美化完成！重启终端后生效${NC}"
     read -p "$(echo -e "${YELLOW}是否立即生效主题？[${GREEN}Y${YELLOW}/n] ${NC}")" confirm
     confirm=${confirm:-Y}
