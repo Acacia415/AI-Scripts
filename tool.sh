@@ -814,74 +814,52 @@ install_shell_beautify() {
     echo -e "${CYAN}正在安装命令行美化组件...${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
 
-    # 更新软件源
-    echo -e "${CYAN}[1/7] 更新软件源...${NC}"
-    apt-get update >/dev/null 2>&1 || {
-        echo -e "${RED}软件源更新失败，请检查网络连接！${NC}"
-        return 1
-    }
-
-    # 安装必要组件
-    echo -e "${CYAN}[2/7] 安装依赖组件...${NC}"
-    if ! command -v git &>/dev/null; then
-        echo -e "${CYAN}  安装git...${NC}"
-        apt-get install -y git >/dev/null 2>&1 || {
-            echo -e "${RED}git安装失败！${NC}"
-            return 1
-        }
+    # 检查依赖组件
+    echo -e "${CYAN}[1/5] 更新软件源...${NC}"
+    apt-get update
+    
+    echo -e "${CYAN}[2/5] 安装依赖组件...${NC}"
+    if ! command -v git &> /dev/null; then
+        apt-get install -y git > /dev/null
+    else
+        echo -e "${GREEN} ✓ Git 已安装${NC}"
     fi
 
-    apt-get install -y zsh >/dev/null 2>&1 || {
-        echo -e "${RED}zsh安装失败！${NC}"
-        return 1
-    }
-
-    # 安装oh-my-zsh
-    echo -e "${CYAN}[3/7] 安装oh-my-zsh...${NC}"
-    export RUNZSH=no
-    export CHSH=yes
-    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended >/dev/null 2>&1 || {
-        echo -e "${RED}oh-my-zsh安装失败！${NC}"
-        return 1
-    }
-
-    # 主题配置交互
-    echo -e "${CYAN}[4/7] 主题配置${NC}"
-    read -p "是否使用ultima主题？[Y/n] " confirm
-    confirm=${confirm:-Y}
-
-    if [[ "${confirm^^}" == "Y" ]]; then
-        # 克隆主题仓库
-        echo -e "${CYAN}[5/7] 获取ultima主题...${NC}"
-        git clone https://github.com/egorlem/ultima.zsh-theme ~/ultima-shell >/dev/null 2>&1 || {
-            echo -e "${RED}主题下载失败，请检查git配置！${NC}"
+    # 安装oh-my-zsh（带状态检测）
+    echo -e "${CYAN}[3/5] 配置oh-my-zsh...${NC}"
+    if [ ! -d "$HOME/.oh-my-zsh" ]; then
+        echo -e "首次安装oh-my-zsh..."
+        sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}oh-my-zsh安装失败！请检查网络连接${NC}"
             return 1
-        }
-
-        # 配置主题
-        echo -e "${CYAN}[6/7] 应用主题配置...${NC}"
-        echo 'source ~/ultima-shell/ultima.zsh-theme' >> ~/.zshrc
-        mv ~/ultima-shell/ultima.zsh-theme "${ZSH:-$HOME/.oh-my-zsh}/themes/" >/dev/null 2>&1 || {
-            echo -e "${RED}主题文件移动失败！${NC}"
-            return 1
-        }
-
-        # 修改配置文件
-        sed -i 's/^ZSH_THEME=.*/ZSH_THEME="ultima"/' ~/.zshrc
+        fi
+    else
+        echo -e "${GREEN} ✓ oh-my-zsh 已安装${NC}"
     fi
 
+    # 配置主题
+    echo -e "${CYAN}[4/5] 设置ultima主题...${NC}"
+    if [ ! -d "/root/ultima-shell" ]; then
+        git clone -q https://github.com/egorlem/ultima.zsh-theme ~/ultima-shell
+    fi
+    sed -i 's/ZSH_THEME=.*/ZSH_THEME="ultima"/' ~/.zshrc
+    
     # 设置默认shell
-    echo -e "${CYAN}[7/7] 设置默认shell...${NC}"
-    chsh -s $(which zsh) >/dev/null 2>&1
-    # 交互式生效确认
+    echo -e "${CYAN}[5/5] 设置默认shell...${NC}"
+    if [ "$SHELL" != "$(which zsh)" ]; then
+        chsh -s $(which zsh) >/dev/null
+    fi
+
+    # 交互生效确认
     echo -e "\n${GREEN}✅ 美化完成！重启终端后生效${NC}"
     read -p "$(echo -e "${YELLOW}是否立即生效主题？[${GREEN}Y${YELLOW}/n] ${NC}")" confirm
     confirm=${confirm:-Y}
     if [[ "${confirm^^}" == "Y" ]]; then
         echo -e "${GREEN}正在应用新配置...${NC}"
-        exec zsh  # 立即切换shell
+        exec zsh
     else
-        echo -e "\n${YELLOW}可稍后手动执行：${CYAN}exec zsh${YELLOW} 来生效${NC}"
+        echo -e "\n${YELLOW}可稍后手动执行：${CYAN}exec zsh ${YELLOW}生效配置${NC}"
     fi
 }
 
