@@ -807,6 +807,84 @@ install_magic_tcp() {
     fi  # 闭合核心if语句
 }  # 函数结束（对应原错误行号807）
 
+# ======================= 命令行美化 =======================
+install_shell_beautify() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}正在安装命令行美化组件...${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+
+    # 更新软件源
+    echo -e "${CYAN}[1/7] 更新软件源...${NC}"
+    apt-get update >/dev/null 2>&1 || {
+        echo -e "${RED}软件源更新失败，请检查网络连接！${NC}"
+        return 1
+    }
+
+    # 安装必要组件
+    echo -e "${CYAN}[2/7] 安装依赖组件...${NC}"
+    if ! command -v git &>/dev/null; then
+        echo -e "${CYAN}  安装git...${NC}"
+        apt-get install -y git >/dev/null 2>&1 || {
+            echo -e "${RED}git安装失败！${NC}"
+            return 1
+        }
+    fi
+
+    apt-get install -y zsh >/dev/null 2>&1 || {
+        echo -e "${RED}zsh安装失败！${NC}"
+        return 1
+    }
+
+    # 安装oh-my-zsh
+    echo -e "${CYAN}[3/7] 安装oh-my-zsh...${NC}"
+    export RUNZSH=no
+    export CHSH=yes
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended >/dev/null 2>&1 || {
+        echo -e "${RED}oh-my-zsh安装失败！${NC}"
+        return 1
+    }
+
+    # 主题配置交互
+    echo -e "${CYAN}[4/7] 主题配置${NC}"
+    read -p "是否使用ultima主题？[Y/n] " confirm
+    confirm=${confirm:-Y}
+
+    if [[ "${confirm^^}" == "Y" ]]; then
+        # 克隆主题仓库
+        echo -e "${CYAN}[5/7] 获取ultima主题...${NC}"
+        git clone https://github.com/egorlem/ultima.zsh-theme ~/ultima-shell >/dev/null 2>&1 || {
+            echo -e "${RED}主题下载失败，请检查git配置！${NC}"
+            return 1
+        }
+
+        # 配置主题
+        echo -e "${CYAN}[6/7] 应用主题配置...${NC}"
+        echo 'source ~/ultima-shell/ultima.zsh-theme' >> ~/.zshrc
+        mv ~/ultima-shell/ultima.zsh-theme "${ZSH:-$HOME/.oh-my-zsh}/themes/" >/dev/null 2>&1 || {
+            echo -e "${RED}主题文件移动失败！${NC}"
+            return 1
+        }
+
+        # 修改配置文件
+        sed -i 's/^ZSH_THEME=.*/ZSH_THEME="ultima"/' ~/.zshrc
+    fi
+
+    # 设置默认shell
+    echo -e "${CYAN}[7/7] 设置默认shell...${NC}"
+    chsh -s $(which zsh) >/dev/null 2>&1
+    # 交互式生效确认
+    echo -e "\n${GREEN}✅ 美化完成！重启终端后生效${NC}"
+    read -p "$(echo -e "${YELLOW}是否立即生效主题？[${GREEN}Y${YELLOW}/n] ${NC}")" confirm
+    confirm=${confirm:-Y}
+    if [[ "${confirm^^}" == "Y" ]]; then
+        echo -e "${GREEN}正在应用新配置...${NC}"
+        exec zsh  # 立即切换shell
+    else
+        echo -e "\n${YELLOW}可稍后手动执行：${CYAN}exec zsh${YELLOW} 来生效${NC}"
+    fi
+}
+
 # ======================= 主菜单 =======================
 main_menu() {
   while true; do
@@ -826,6 +904,7 @@ main_menu() {
     echo -e "11. 安装Caddy反代"
     echo -e "12. IP优先级设置"
     echo -e "13. TCP性能优化"
+    echo -e "14. 命令行美化"
     echo -e "0. 退出脚本"
     echo -e "========================"
 
@@ -881,6 +960,10 @@ main_menu() {
         ;;
       13)
         install_magic_tcp 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      14)  
+        install_shell_beautify 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       0) 
