@@ -838,27 +838,25 @@ install_shell_beautify() {
         echo -e "${GREEN} ✓ oh-my-zsh 已安装${NC}"
     fi
 
-    # 配置主题
+    # 配置主题（修复版本）
     echo -e "${CYAN}[4/5] 设置ultima主题...${NC}"
-    # 确保自定义主题目录存在
     OMZ_CUSTOM_THEMES_DIR="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes"
-    mkdir -p "$OMZ_CUSTOM_THEMES_DIR"
-    # 安装/更新ultima主题
+    
+    # 修正克隆路径和符号链接
     if [ -d "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme" ]; then
         echo -e "${GREEN} ✓ 检测到已安装ultima主题，尝试更新...${NC}"
-        cd "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme"
-        git pull --quiet && echo -e "${GREEN} ✓ 主题更新完成${NC}" || echo -e "${YELLOW} ! 主题更新失败，使用已有版本${NC}"
-        cd - >/dev/null
+        git -C "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme" pull --quiet
     else
         echo -e "正在安装ultima主题..."
         git clone -q https://github.com/egorlem/ultima.zsh-theme "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme"
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}主题安装失败！请检查网络连接${NC}"
-            return 1
-        fi
     fi
-    # 创建主题符号链接
-    ln -sfv "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme/ultima.zsh-theme" "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme.zsh"
+    # 创建正确格式的符号链接（关键修复点）
+    ln -sfv "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme/ultima.zsh-theme" "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme"
+    # 验证主题文件存在性
+    if [ ! -f "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme" ]; then
+        echo -e "${RED}主题文件未正确生成，请检查安装日志${NC}"
+        return 1
+    fi
     # 应用主题配置
     sed -i 's/ZSH_THEME=.*/ZSH_THEME="ultima"/' ~/.zshrc
     
