@@ -814,29 +814,12 @@ install_shell_beautify() {
     echo -e "${CYAN}正在安装命令行美化组件...${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
 
-    # 选择使用镜像
-    echo -e "${CYAN}请选择安装源镜像：${NC}"
-    echo -e "${CYAN}[1] 国内镜像 (Gitee)${NC}"
-    echo -e "${CYAN}[2] 国外镜像 (GitHub)${NC}"
-    read -p "$(echo -e "${YELLOW}请输入选择（默认国内镜像）：${CYAN}")" mirror_choice
-    mirror_choice=${mirror_choice:-1}
-
-    if [[ "$mirror_choice" == "1" ]]; then
-        OMZ_INSTALL_URL="https://gitee.com/mirrors/oh-my-zsh/raw/master/tools/install.sh"
-        THEME_URL="https://gitee.com/yaoyue/ultima.zsh-theme/raw/master/ultima.zsh-theme"
-        echo -e "${GREEN}选择了国内镜像（Gitee）${NC}"
-    else
-        OMZ_INSTALL_URL="https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh"
-        THEME_URL="https://raw.githubusercontent.com/egorlem/ultima.zsh-theme/master/ultima.zsh-theme"
-        echo -e "${GREEN}选择了国外镜像（GitHub）${NC}"
-    fi
-
     echo -e "${CYAN}[1/6] 更新软件源...${NC}"
-    apt-get update -y
+    apt-get update
 
     echo -e "${CYAN}[2/6] 安装依赖组件...${NC}"
     if ! command -v git &> /dev/null; then
-        apt-get install -y git
+        apt-get install -y git > /dev/null
     else
         echo -e "${GREEN} ✓ Git 已安装${NC}"
     fi
@@ -844,43 +827,43 @@ install_shell_beautify() {
     echo -e "${CYAN}[3/6] 检查zsh...${NC}"
     if ! command -v zsh &> /dev/null; then
         echo -e "${YELLOW}未检测到zsh，正在安装...${NC}"
-        apt-get install -y zsh
+        apt-get install -y zsh > /dev/null
     else
         echo -e "${GREEN} ✓ Zsh 已安装${NC}"
     fi
 
     echo -e "${CYAN}[4/6] 配置oh-my-zsh...${NC}"
     if [ ! -d "$HOME/.oh-my-zsh" ]; then
-        echo -e "正在下载 oh-my-zsh 压缩包..."
-        sh -c "$(curl -fsSL $OMZ_INSTALL_URL)" "" --unattended
+        echo -e "首次安装oh-my-zsh..."
+        sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
         if [ $? -ne 0 ]; then
-            echo -e "${RED}❌ oh-my-zsh 安装失败！请检查网络连接${NC}"
+            echo -e "${RED}oh-my-zsh安装失败！请检查网络连接${NC}"
             return 1
-        else
-            echo -e "${GREEN} ✓ oh-my-zsh 安装完成${NC}"
         fi
     else
         echo -e "${GREEN} ✓ oh-my-zsh 已安装${NC}"
     fi
 
     echo -e "${CYAN}[5/6] 设置ultima主题...${NC}"
+    ULTIMA_REPO="https://github.com/egorlem/ultima.zsh-theme"
+    TEMP_DIR="$HOME/ultima-shell"
     THEME_DEST="$HOME/.oh-my-zsh/themes"
-    mkdir -p "$THEME_DEST"
 
-    echo -e "正在下载主题文件..."
-    wget -q --show-progress -O "$THEME_DEST/ultima.zsh-theme" "$THEME_URL"
-
-    if [ -f "$THEME_DEST/ultima.zsh-theme" ]; then
-        sed -i 's/^ZSH_THEME=.*/ZSH_THEME="ultima"/' "$HOME/.zshrc"
+    rm -rf "$TEMP_DIR"
+    git clone -q "$ULTIMA_REPO" "$TEMP_DIR"
+    if [ -f "$TEMP_DIR/ultima.zsh-theme" ]; then
+        mv -f "$TEMP_DIR/ultima.zsh-theme" "$THEME_DEST/ultima.zsh-theme"
         echo -e "${GREEN} ✓ 主题安装完成${NC}"
     else
-        echo -e "${RED}❌ 下载失败或找不到主题文件${NC}"
+        echo -e "${RED}❌ 克隆失败或找不到主题文件${NC}"
         return 1
     fi
 
+    sed -i 's/ZSH_THEME=.*/ZSH_THEME="ultima"/' ~/.zshrc
+
     echo -e "${CYAN}[6/6] 设置默认shell...${NC}"
     if [ "$SHELL" != "$(which zsh)" ]; then
-        chsh -s "$(which zsh)" >/dev/null
+        chsh -s $(which zsh) >/dev/null
     fi
 
     echo -e "\n${GREEN}✅ 美化完成！重启终端后生效${NC}"
