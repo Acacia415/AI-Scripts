@@ -877,12 +877,38 @@ install_shell_beautify() {
     fi
 }
 
+# ======================= 脚本更新 =======================
+update_script() {
+  echo -e "${YELLOW}开始更新脚本...${NC}"
+  
+  # 删除旧脚本
+  rm -f /root/tool.sh
+  
+  # 下载并执行新脚本
+  if curl -sSL https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/tool.sh -o /root/tool.sh && 
+     chmod +x /root/tool.sh
+  then
+    echo -e "${GREEN}更新成功，即将启动新脚本...${NC}"
+    sleep 2
+    exec /root/tool.sh  # 用新脚本替换当前进程
+  else
+    echo -e "${RED}更新失败！请手动执行："
+    echo -e "curl -sSL https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/tool.sh -o tool.sh"
+    echo -e "chmod +x tool.sh && ./tool.sh${NC}"
+    exit 1
+  fi
+}
+
 # ======================= 主菜单 =======================
 main_menu() {
   while true; do
     clear
-    echo -e "\n${CYAN}IRIS自用工具箱${NC}"
-    echo -e "========================"
+    echo -e "${CYAN}"
+    echo -e " ___ ____ ___ ____     ____ _  _ ____ ____ _  _ _   _ ____ ___  "
+    echo -e "  |  |___  |  |__/     [__  |__| |___ |__/ |  |  \_/  [__  |__] "
+    echo -e "  |  |___  |  |  \     ___] |  | |___ |  \ |__|   |   ___] |    "
+    echo -e "                                                              ${NC}"
+    echo -e "${YELLOW}==================================================${NC}"
     echo -e "1. 开启root用户登录"
     echo -e "2. 安装流量监控服务"
     echo -e "3. 完全卸载流量监控"
@@ -897,8 +923,9 @@ main_menu() {
     echo -e "12. IP优先级设置"
     echo -e "13. TCP性能优化"
     echo -e "14. 命令行美化"
+    echo -e "99. 脚本更新"
     echo -e "0. 退出脚本"
-    echo -e "========================"
+    echo -e "${YELLOW}==================================================${NC}"
 
     read -p "请输入选项 : " choice
     case $choice in
@@ -956,6 +983,10 @@ main_menu() {
         ;;
       14)  
         install_shell_beautify 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      99)  
+        update_script 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       0) 
