@@ -840,9 +840,26 @@ install_shell_beautify() {
 
     # 配置主题
     echo -e "${CYAN}[4/5] 设置ultima主题...${NC}"
-    if [ ! -d "/root/ultima-shell" ]; then
-        git clone -q https://github.com/egorlem/ultima.zsh-theme ~/ultima-shell
+    # 确保自定义主题目录存在
+    OMZ_CUSTOM_THEMES_DIR="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes"
+    mkdir -p "$OMZ_CUSTOM_THEMES_DIR"
+    # 安装/更新ultima主题
+    if [ -d "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme" ]; then
+        echo -e "${GREEN} ✓ 检测到已安装ultima主题，尝试更新...${NC}"
+        cd "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme"
+        git pull --quiet && echo -e "${GREEN} ✓ 主题更新完成${NC}" || echo -e "${YELLOW} ! 主题更新失败，使用已有版本${NC}"
+        cd - >/dev/null
+    else
+        echo -e "正在安装ultima主题..."
+        git clone -q https://github.com/egorlem/ultima.zsh-theme "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme"
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}主题安装失败！请检查网络连接${NC}"
+            return 1
+        fi
     fi
+    # 创建主题符号链接
+    ln -sfv "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme/ultima.zsh-theme" "$OMZ_CUSTOM_THEMES_DIR/ultima.zsh-theme.zsh"
+    # 应用主题配置
     sed -i 's/ZSH_THEME=.*/ZSH_THEME="ultima"/' ~/.zshrc
     
     # 设置默认shell
