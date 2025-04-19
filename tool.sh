@@ -949,6 +949,153 @@ install_shell_beautify() {
     fi
 }
 
+# ======================= DNS解锁管理 =======================
+dns_unlock_menu() {
+  while true; do
+    clear
+    echo -e "${YELLOW}════════════ DNS解锁服务管理 ════════════${NC}"
+    echo -e "1. 安装服务端 (DNS解锁服务器)"
+    echo -e "2. 卸载服务端"
+    echo -e "3. 设置客户端"
+    echo -e "4. 卸载客户端"
+    echo -e "0. 返回主菜单"
+    echo -e "${YELLOW}════════════════════════════════════════${NC}"
+    read -p "请输入选项: " sub_choice
+
+    case $sub_choice in
+      1)
+        install_dns_unlock_server
+        read -n 1 -s -r -p "按任意键返回..."
+        ;;
+      2)
+        uninstall_dns_unlock_server
+        read -n 1 -s -r -p "按任意键返回..."
+        ;;
+      3)
+        setup_dns_client
+        read -n 1 -s -r -p "按任意键返回..."
+        ;;
+      4)
+        uninstall_dns_client
+        read -n 1 -s -r -p "按任意键返回..."
+        ;;
+      0)
+        break
+        ;;
+      *)
+        echo -e "${RED}无效选项，请重新输入${NC}"
+        sleep 1
+        ;;
+    esac
+  done
+}
+
+# 安装服务端
+install_dns_unlock_server() {
+  clear
+  echo -e "${YELLOW}正在安装DNS解锁服务端...${NC}"
+  
+  # 解决53端口占用
+  systemctl stop systemd-resolved
+  sed -i 's/#DNS=/DNS=8.8.8.8/' /etc/systemd/resolved.conf
+  sed -i 's/#DNSStubListener=yes/DNSStubListener=no/' /etc/systemd/resolved.conf
+  ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+  systemctl restart systemd-resolved
+
+  # 安装组件
+  wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh 
+  bash dnsmasq_sniproxy.sh -f
+
+  # 获取本机IP
+  LOCAL_IP=$(curl -4s ip.sb)
+  
+  # 配置dnsmasq
+  echo "address=/chatgpt.com/$LOCAL_IP" > /etc/dnsmasq.d/custom_netflix.conf
+  systemctl restart dnsmasq
+
+  # 配置sniproxy
+  sed -i '/^}/i \
+  .*chatgpt\.com$ *' /etc/sniproxy.conf
+  systemctl restart sniproxy
+
+  # 防火墙设置
+  read -p "是否限制53端口访问？[Y/n] " limit_dns
+  limit_dns=${limit_dns:-Y}
+  if [[ "${limit_dns^^}" == "Y" ]]; then
+    iptables -I INPUT -p tcp --dport 53 -j DROP
+    manage_iptables_rules
+  fi
+  
+  echo -e "${GREEN}服务端安装完成！${NC}"
+}
+
+# IP白名单管理
+manage_iptables_rules() {
+  while true; do
+    clear
+    echo -e "${YELLOW}════════ IP白名单管理 ════════${NC}"
+    echo -e "1. 添加白名单IP"
+    echo -e "2. 移除白名单IP"
+    echo -e "0. 返回上级"
+    echo -e "${YELLOW}═════════════════════════════${NC}"
+    read -p "请选择: " rule_choice
+
+    case $rule_choice in
+      1)
+        read -p "请输入允许的IP地址（多个用空格分隔）: " ips
+        for ip in $ips; do
+          iptables -I INPUT -s $ip -p tcp --dport 53 -j ACCEPT
+        done
+        iptables-save > /etc/iptables/rules.v4
+        echo -e "${GREEN}已添加白名单IP！${NC}"
+        read -n 1 -s -r -p "按任意键继续..."
+        ;;
+      2)
+        echo -e "${CYAN}当前规则列表：${NC}"
+        iptables -L INPUT -v -n --line-numbers
+        read -p "请输入要删除的规则行号: " line_num
+        iptables -D INPUT $line_num
+        iptables-save > /etc/iptables/rules.v4
+        echo -e "${GREEN}规则已删除！${NC}"
+        read -n 1 -s -r -p "按任意键继续..."
+        ;;
+      0)
+        break
+        ;;
+      *)
+        echo -e "${RED}无效输入！${NC}"
+        sleep 1
+        ;;
+    esac
+  done
+}
+
+# 卸载服务端
+uninstall_dns_unlock_server() {
+  clear
+  wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh 
+  bash dnsmasq_sniproxy.sh -u
+  echo -e "${GREEN}服务端已卸载！${NC}"
+}
+
+# 设置客户端
+setup_dns_client() {
+  clear
+  read -p "请输入解锁服务器的IP地址: " server_ip
+  rm -f /etc/resolv.conf
+  echo "nameserver $server_ip" > /etc/resolv.conf
+  chattr +i /etc/resolv.conf
+  echo -e "${GREEN}客户端设置完成！${NC}"
+}
+
+# 卸载客户端
+uninstall_dns_client() {
+  clear
+  chattr -i /etc/resolv.conf
+  echo "nameserver 8.8.8.8" > /etc/resolv.conf
+  echo -e "${GREEN}客户端配置已恢复！${NC}"
+}
+
 # ======================= 脚本更新 =======================
 update_script() {
   echo -e "${YELLOW}开始更新脚本...${NC}"
@@ -999,6 +1146,7 @@ main_menu() {
     echo -e "13. IP优先级设置"
     echo -e "14. TCP性能优化"
     echo -e "15. 命令行美化"
+    echo -e "16. DNS解锁服务"
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
@@ -1064,6 +1212,10 @@ main_menu() {
         ;;
       15)  
         install_shell_beautify 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      16)  
+        dns_unlock_menu 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       99)  
