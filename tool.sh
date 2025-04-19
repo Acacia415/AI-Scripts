@@ -958,6 +958,7 @@ dns_unlock_menu() {
     echo -e "2. 卸载服务端"
     echo -e "3. 设置客户端"
     echo -e "4. 卸载客户端"
+    echo -e "5. IP白名单管理"
     echo -e "0. 返回主菜单"
     echo -e "${YELLOW}════════════════════════════════════════${NC}"
     read -p "请输入选项: " sub_choice
@@ -979,6 +980,10 @@ dns_unlock_menu() {
         uninstall_dns_client
         read -n 1 -s -r -p "按任意键返回..."
         ;;
+      5)
+        manage_iptables_rules
+        read -n 1 -s -r -p "按任意键返回..."
+        ;;
       0)
         break
         ;;
@@ -990,14 +995,15 @@ dns_unlock_menu() {
   done
 }
 
+# 安装服务端（优化版）
 install_dns_unlock_server() {
   clear
-  echo -e "${YELLOW}Installing DNS unlock server...${NC}"
+  echo -e "${YELLOW}正在安装DNS解锁服务端...${NC}"
   
   # 禁用系统DNS服务
-  sudo systemctl stop systemd-resolved
-  sudo systemctl disable systemd-resolved
-  sudo systemctl mask systemd-resolved
+  sudo systemctl stop systemd-resolved 2>/dev/null
+  sudo systemctl disable systemd-resolved 2>/dev/null
+  sudo systemctl mask systemd-resolved 2>/dev/null
   sudo rm -f /etc/resolv.conf
   echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
 
@@ -1006,16 +1012,21 @@ install_dns_unlock_server() {
   sudo apt-get install -y dnsmasq build-essential libev-dev libpcre3-dev libudns-dev autoconf
 
   # 编译安装SNI Proxy
-  wget https://github.com/dlundquist/sniproxy/archive/refs/tags/0.6.1.tar.gz
+  wget -q https://github.com/dlundquist/sniproxy/archive/refs/tags/0.6.1.tar.gz
   tar -zxvf 0.6.1.tar.gz
   cd sniproxy-0.6.1
   ./autogen.sh && ./configure && make
   sudo make install
+  cd ..
 
   # 配置DNSmasq
   LOCAL_IP=$(curl -4s ip.sb)
-  echo "server=8.8.8.8" | sudo tee /etc/dnsmasq.d/custom.conf
-  echo "address=/chatgpt.com/$LOCAL_IP" | sudo tee -a /etc/dnsmasq.d/custom.conf
+  sudo tee /etc/dnsmasq.d/custom.conf <<EOF
+server=8.8.8.8
+address=/chatgpt.com/$LOCAL_IP
+address=/netflix.com/$LOCAL_IP
+address=/example.com/$LOCAL_IP
+EOF
   sudo systemctl restart dnsmasq
 
   # 配置SNI Proxy
@@ -1033,6 +1044,8 @@ listen 443 {
 
 table {
     .*chatgpt\.com$ *
+    .*netflix\.com$ *
+    .*example\.com$ *
 }
 EOF
 
@@ -1053,19 +1066,22 @@ EOF
   sudo systemctl daemon-reload
   sudo systemctl enable sniproxy --now
 
-  # 防火墙规则优化
+  # 初始防火墙规则（保留原有限制逻辑）
   sudo iptables -I INPUT -p tcp --dport 53 -j DROP
   sudo iptables -I INPUT -p tcp --dport 80,443 -j DROP
   sudo netfilter-persistent save
+
+  echo -e "${GREEN}服务端安装完成！${NC}"
 }
 
-# IP白名单管理
+# IP白名单管理（增强版）
 manage_iptables_rules() {
   while true; do
     clear
     echo -e "${YELLOW}════════ IP白名单管理 ════════${NC}"
-    echo -e "1. 添加白名单IP"
-    echo -e "2. 移除白名单IP"
+    echo -e "1. 添加白名单IP（全端口）"
+    echo -e "2. 添加白名单IP（指定端口）"
+    echo -e "3. 移除白名单IP"
     echo -e "0. 返回上级"
     echo -e "${YELLOW}═════════════════════════════${NC}"
     read -p "请选择: " rule_choice
@@ -1074,20 +1090,27 @@ manage_iptables_rules() {
       1)
         read -p "请输入允许的IP地址（多个用空格分隔）: " ips
         for ip in $ips; do
-          iptables -I INPUT -s $ip -p tcp --dport 53 -j ACCEPT
+          sudo iptables -I INPUT -s $ip -p tcp -m multiport --dports 53,80,443 -j ACCEPT
         done
-        iptables-save > /etc/iptables/rules.v4
-        echo -e "${GREEN}已添加白名单IP！${NC}"
-        read -n 1 -s -r -p "按任意键继续..."
+        sudo netfilter-persistent save
+        echo -e "${GREEN}全端口白名单已添加！${NC}"
         ;;
       2)
+        read -p "请输入端口号（多个用逗号分隔）: " ports
+        read -p "请输入允许的IP地址（多个用空格分隔）: " ips
+        for ip in $ips; do
+          sudo iptables -I INPUT -s $ip -p tcp -m multiport --dports ${ports//,/ } -j ACCEPT
+        done
+        sudo netfilter-persistent save
+        echo -e "${GREEN}指定端口白名单已添加！${NC}"
+        ;;
+      3)
         echo -e "${CYAN}当前规则列表：${NC}"
-        iptables -L INPUT -v -n --line-numbers
+        sudo iptables -L INPUT -v -n --line-numbers | grep ACCEPT
         read -p "请输入要删除的规则行号: " line_num
-        iptables -D INPUT $line_num
-        iptables-save > /etc/iptables/rules.v4
+        sudo iptables -D INPUT $line_num
+        sudo netfilter-persistent save
         echo -e "${GREEN}规则已删除！${NC}"
-        read -n 1 -s -r -p "按任意键继续..."
         ;;
       0)
         break
@@ -1097,32 +1120,87 @@ manage_iptables_rules() {
         sleep 1
         ;;
     esac
+    read -n 1 -s -r -p "按任意键继续..."
   done
 }
 
-# 卸载服务端
+# 卸载服务端（增强版）
 uninstall_dns_unlock_server() {
   clear
-  wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh 
-  bash dnsmasq_sniproxy.sh -u
-  echo -e "${GREEN}服务端已卸载！${NC}"
+  echo -e "${YELLOW}正在卸载服务端组件...${NC}"
+  
+  # 停止服务
+  sudo systemctl stop dnsmasq
+  sudo systemctl stop sniproxy
+
+  # 移除服务
+  sudo systemctl disable dnsmasq 2>/dev/null
+  sudo systemctl disable sniproxy 2>/dev/null
+  sudo rm -f /etc/systemd/system/sniproxy.service
+  sudo systemctl daemon-reload
+
+  # 删除配置文件
+  sudo rm -rf /etc/dnsmasq.d/custom.conf
+  sudo rm -f /etc/sniproxy.conf
+
+  # 卸载软件
+  sudo apt-get remove -y dnsmasq
+  sudo rm -f /usr/local/sbin/sniproxy
+
+  # 恢复DNS设置
+  sudo rm -f /etc/resolv.conf
+  echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+  sudo systemctl unmask systemd-resolved 2>/dev/null
+  sudo systemctl start systemd-resolved 2>/dev/null
+
+  # 清理防火墙规则
+  sudo iptables -D INPUT -p tcp --dport 53 -j DROP 2>/dev/null
+  sudo iptables -D INPUT -p tcp --dport 80 -j DROP 2>/dev/null
+  sudo iptables -D INPUT -p tcp --dport 443 -j DROP 2>/dev/null
+  sudo netfilter-persistent save
+
+  echo -e "${GREEN}服务端已彻底卸载！${NC}"
 }
 
-# 设置客户端
+# 客户端设置（兼容性增强）
 setup_dns_client() {
   clear
   read -p "请输入解锁服务器的IP地址: " server_ip
-  rm -f /etc/resolv.conf
-  echo "nameserver $server_ip" > /etc/resolv.conf
-  chattr +i /etc/resolv.conf
+  
+  # 备份原配置
+  sudo cp /etc/resolv.conf /etc/resolv.conf.bak
+  
+  # 针对不同系统处理
+  if grep -q "Ubuntu" /etc/os-release; then
+    sudo systemctl stop systemd-resolved
+    sudo rm -f /etc/resolv.conf
+    echo "nameserver $server_ip" | sudo tee /etc/resolv.conf
+    sudo chattr +i /etc/resolv.conf
+  else
+    sudo sed -i "/^# Generated by NetworkManager/d" /etc/resolv.conf
+    echo "nameserver $server_ip" | sudo tee /etc/resolv.conf
+    sudo chattr +i /etc/resolv.conf 2>/dev/null || \
+    (echo -e "${YELLOW}无法锁定DNS设置，建议手动配置网络管理器${NC}")
+  fi
+  
   echo -e "${GREEN}客户端设置完成！${NC}"
 }
 
-# 卸载客户端
+# 客户端卸载（兼容性增强）
 uninstall_dns_client() {
   clear
-  chattr -i /etc/resolv.conf
-  echo "nameserver 8.8.8.8" > /etc/resolv.conf
+  sudo chattr -i /etc/resolv.conf 2>/dev/null
+  if [ -f /etc/resolv.conf.bak ]; then
+    sudo mv /etc/resolv.conf.bak /etc/resolv.conf
+  else
+    echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+  fi
+  
+  # 恢复Ubuntu系统服务
+  if grep -q "Ubuntu" /etc/os-release; then
+    sudo systemctl start systemd-resolved
+  fi
+  
   echo -e "${GREEN}客户端配置已恢复！${NC}"
 }
 
