@@ -990,43 +990,73 @@ dns_unlock_menu() {
   done
 }
 
-# 安装服务端
 install_dns_unlock_server() {
   clear
-  echo -e "${YELLOW}正在安装DNS解锁服务端...${NC}"
+  echo -e "${YELLOW}Installing DNS unlock server...${NC}"
   
-  # 解决53端口占用
-  systemctl stop systemd-resolved
-  sed -i 's/#DNS=/DNS=8.8.8.8/' /etc/systemd/resolved.conf
-  sed -i 's/#DNSStubListener=yes/DNSStubListener=no/' /etc/systemd/resolved.conf
-  ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
-  systemctl restart systemd-resolved
+  # 禁用系统DNS服务
+  sudo systemctl stop systemd-resolved
+  sudo systemctl disable systemd-resolved
+  sudo systemctl mask systemd-resolved
+  sudo rm -f /etc/resolv.conf
+  echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
 
-  # 安装组件
-  wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh 
-  bash dnsmasq_sniproxy.sh -f
+  # 安装基础依赖
+  sudo apt-get update
+  sudo apt-get install -y dnsmasq build-essential libev-dev libpcre3-dev libudns-dev autoconf
 
-  # 获取本机IP
+  # 编译安装SNI Proxy
+  wget https://github.com/dlundquist/sniproxy/archive/refs/tags/0.6.1.tar.gz
+  tar -zxvf 0.6.1.tar.gz
+  cd sniproxy-0.6.1
+  ./autogen.sh && ./configure && make
+  sudo make install
+
+  # 配置DNSmasq
   LOCAL_IP=$(curl -4s ip.sb)
-  
-  # 配置dnsmasq
-  echo "address=/chatgpt.com/$LOCAL_IP" > /etc/dnsmasq.d/custom_netflix.conf
-  systemctl restart dnsmasq
+  echo "server=8.8.8.8" | sudo tee /etc/dnsmasq.d/custom.conf
+  echo "address=/chatgpt.com/$LOCAL_IP" | sudo tee -a /etc/dnsmasq.d/custom.conf
+  sudo systemctl restart dnsmasq
 
-  # 配置sniproxy
-  sed -i '/^}/i \
-  .*chatgpt\.com$ *' /etc/sniproxy.conf
-  systemctl restart sniproxy
+  # 配置SNI Proxy
+  sudo tee /etc/sniproxy.conf <<EOF
+user daemon
+pidfile /var/run/sniproxy.pid
 
-  # 防火墙设置
-  read -p "是否限制53端口访问？[Y/n] " limit_dns
-  limit_dns=${limit_dns:-Y}
-  if [[ "${limit_dns^^}" == "Y" ]]; then
-    iptables -I INPUT -p tcp --dport 53 -j DROP
-    manage_iptables_rules
-  fi
-  
-  echo -e "${GREEN}服务端安装完成！${NC}"
+listen 80 {
+    proto http
+}
+
+listen 443 {
+    proto tls
+}
+
+table {
+    .*chatgpt\.com$ *
+}
+EOF
+
+  # 创建systemd服务
+  sudo tee /etc/systemd/system/sniproxy.service <<EOF
+[Unit]
+Description=SNI Proxy
+After=network.target
+
+[Service]
+ExecStart=/usr/local/sbin/sniproxy -c /etc/sniproxy.conf
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable sniproxy --now
+
+  # 防火墙规则优化
+  sudo iptables -I INPUT -p tcp --dport 53 -j DROP
+  sudo iptables -I INPUT -p tcp --dport 80,443 -j DROP
+  sudo netfilter-persistent save
 }
 
 # IP白名单管理
