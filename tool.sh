@@ -29,6 +29,78 @@ cp -f "$(realpath "$0")" /usr/local/bin/p
 chmod +x /usr/local/bin/p
 echo "[+] 已创建命令：p ✅"
 
+# ======================= 系统信息查询 =======================
+display_system_info() {
+    # 检查依赖
+    check_deps() {
+        local deps=(jq whois)
+        local missing=()
+        for dep in "${deps[@]}"; do
+            if ! command -v $dep &>/dev/null; then
+                missing+=("$dep")
+            fi
+        done
+        if [ ${#missing[@]} -gt 0 ]; then
+            echo -e "${YELLOW}正在安装依赖：${missing[*]}${NC}"
+            apt-get update >/dev/null 2>&1
+            apt-get install -y "${missing[@]}" >/dev/null 2>&1
+        fi
+    }
+
+    # 获取公网IP信息
+    get_ip_info() {
+        local ipv4=$(curl -s4 ifconfig.me)
+        local ipv6=$(curl -s6 ifconfig.me)
+        echo "$ipv4" "$ipv6"
+    }
+
+    # 获取ASN信息
+    get_asn() {
+        local ip=$1
+        whois -h whois.radb.net -- "-i origin $ip" 2>/dev/null | grep -i descr: | head -1 | awk -F': ' '{print $2}' | xargs
+    }
+
+    # 获取地理信息
+    get_geo() {
+        local ip=$1
+        curl -s "https://ipinfo.io/$ip/json" 2>/dev/null | jq -r '[.country, .city] | join(" ")' 
+    }
+
+    # 获取CPU使用率
+    get_cpu_usage() {
+        echo $(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{printf "%.1f%%", 100 - $1}')
+    }
+
+    # 主显示逻辑
+    clear
+    check_deps
+    read ipv4 ipv6 <<< $(get_ip_info)
+    
+    echo -e "${CYAN}\n系统信息查询"
+    echo "------------------------"
+    echo -e "主机名\t: ${GREEN}$(hostname)${NC}"
+    echo -e "运营商\t: ${GREEN}$(get_asn $ipv4)${NC}"
+    echo "------------------------"
+    echo -e "系统版本\t: ${GREEN}$(lsb_release -sd)${NC}"
+    echo -e "内核版本\t: ${GREEN}$(uname -r)${NC}"
+    echo "------------------------"
+    echo -e "CPU架构\t: ${GREEN}$(uname -m)${NC}"
+    echo -e "CPU型号\t: ${GREEN}$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)${NC}"
+    echo -e "CPU核心\t: ${GREEN}$(nproc) 核${NC}"
+    echo -e "CPU占用\t: ${GREEN}$(get_cpu_usage)${NC}"
+    echo "------------------------"
+    echo -e "物理内存\t: ${GREEN}$(free -m | awk '/Mem/{printf "%.2f/%.2f MB (%.2f%%)", $3, $2, $3/$2*100}')${NC}"
+    echo -e "虚拟内存\t: ${GREEN}$(free -m | awk '/Swap/{printf "%.2f/%.2f MB (%.2f%%)", $3, $2, ($3/$2)*100}')${NC}"
+    echo -e "硬盘使用\t: ${GREEN}$(df -h / | awk 'NR==2{printf "%s/%s (%s)", $3, $2, $5}')${NC}"
+    echo "------------------------"
+    echo -e "公网IPv4\t: ${GREEN}${ipv4:-未检测到}${NC}"
+    echo -e "公网IPv6\t: ${GREEN}${ipv6:-未检测到}${NC}"
+    echo -e "地理位置\t: ${GREEN}$(get_geo $ipv4)${NC}"
+    echo -e "系统时区\t: ${GREEN}$(timedatectl | grep "Time zone" | awk '{print $3}')${NC}"
+    echo -e "运行时间\t: ${GREEN}$(awk '{printf "%d天%d时%d分", $1/86400, ($1%86400)/3600, ($1%3600)/60}' /proc/uptime)${NC}"
+    echo "------------------------"
+}
+
 # ======================= 开启root登录 =======================
 enable_root_login() {
   # 移除文件保护属性
@@ -912,20 +984,21 @@ main_menu() {
     echo " |_____|_|  \_\_____|_____/     |_|  \____/ \____/|______|____/ \____/_/ \_\\"
     echo -e "                                                              ${NC}"
     echo -e "${YELLOW}==================================================${NC}"
-    echo -e "1. 开启root用户登录"
-    echo -e "2. 安装流量监控服务"
-    echo -e "3. 完全卸载流量监控"
-    echo -e "4. 安装 Snell 协议服务"
-    echo -e "5. 安装 Hysteria2 协议服务"
-    echo -e "6. 安装 SS-Rust 协议服务"
-    echo -e "7. 安装 3X-UI 管理面板"
-    echo -e "8. 流媒体解锁检测"
-    echo -e "9. Speedtest网络测速"
-    echo -e "10. 开放所有端口"
-    echo -e "11. 安装Caddy反代"
-    echo -e "12. IP优先级设置"
-    echo -e "13. TCP性能优化"
-    echo -e "14. 命令行美化"
+    echo -e "1. 系统信息查询"
+    echo -e "2. 开启root用户登录"
+    echo -e "3. 安装流量监控服务"
+    echo -e "4. 完全卸载流量监控"
+    echo -e "5. 安装 Snell 协议服务"
+    echo -e "6. 安装 Hysteria2 协议服务"
+    echo -e "7. 安装 SS-Rust 协议服务"
+    echo -e "8. 安装 3X-UI 管理面板"
+    echo -e "9. 流媒体解锁检测"
+    echo -e "10. Speedtest网络测速"
+    echo -e "11. 开放所有端口"
+    echo -e "12. 安装Caddy反代"
+    echo -e "13. IP优先级设置"
+    echo -e "14. TCP性能优化"
+    echo -e "15. 命令行美化"
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
@@ -933,59 +1006,63 @@ main_menu() {
 
     read -p "请输入选项 : " choice
     case $choice in
-      1) 
-        enable_root_login
+      1)
+        display_system_info
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       2) 
-        install_traffic_monitor
+        enable_root_login
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       3) 
-        uninstall_service 
+        install_traffic_monitor
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       4) 
+        uninstall_service 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      5) 
         install_snell 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      5)  
+      6)  
         install_hysteria2 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      6)  
+      7)  
         install_ss_rust 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      7)  
+      8)  
         install_3x_ui 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      8)  
+      9)  
         install_media_check 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      9)  
+      10)  
         install_speedtest 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      10)  
+      11)  
         open_all_ports 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      11)
+      12)
         configure_caddy_reverse_proxy
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      12)
+      13)
         modify_ip_preference
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      13)
+      14)
         install_magic_tcp 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      14)  
+      15)  
         install_shell_beautify 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
