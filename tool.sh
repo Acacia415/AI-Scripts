@@ -1204,6 +1204,119 @@ uninstall_dns_client() {
   echo -e "${GREEN}客户端配置已恢复！${NC}"
 }
 
+# ======================= Sub-Store安装模块 =======================
+install_substore() {
+  check_root
+  public_ip=$(get_public_ip)
+  install_docker_packages
+  setup_substore_docker
+}
+check_root() {
+    if [ "$(id -u)" != "0" ]; then
+        echo -e "${RED}运行脚本需要 root 权限${NC}" >&2
+        exit 1
+    fi
+}
+get_public_ip() {
+    local ip_services=("ifconfig.me" "ipinfo.io/ip" "icanhazip.com" "ipecho.net/plain" "ident.me")
+    
+    for service in "${ip_services[@]}"; do
+        if public_ip=$(curl -sS --connect-timeout 5 "$service"); then
+            if [[ "$public_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "$public_ip"
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    
+    echo -e "${RED}无法获取公共 IP 地址。${NC}" >&2
+    exit 1
+}
+install_docker_packages() {
+    if ! command -v docker &> /dev/null; then
+        echo -e "${YELLOW}正在安装 Docker 和 Docker Compose...${NC}"
+        if ! curl -fsSL https://get.docker.com | bash; then
+            echo -e "${RED}Docker 安装失败${NC}" >&2
+            exit 1
+        fi
+        if ! apt-get update && apt-get install -y docker-compose; then
+            echo -e "${RED}Docker Compose 安装失败${NC}" >&2
+            exit 1
+        fi
+        echo -e "${GREEN}Docker 和 Docker Compose 安装完成。${NC}"
+    else
+        echo -e "${CYAN}Docker 和 Docker Compose 已安装。${NC}"
+    fi
+}
+setup_substore_docker() {
+    # 生成随机密钥
+    local secret_key=$(openssl rand -hex 16)
+    echo -e "${YELLOW}生成的密钥: ${secret_key}${NC}"
+    
+    # 创建数据目录
+    mkdir -p /root/sub-store-data
+    
+    # 清理旧容器
+    echo -e "${YELLOW}清理旧容器...${NC}"
+    docker rm -f sub-store >/dev/null 2>&1 || true
+    docker compose -p sub-store down >/dev/null 2>&1 || true
+    
+    # 创建 docker-compose 配置
+    cat <<EOF > docker-compose.yml
+version: '3'
+services:
+  sub-store:
+    image: xream/sub-store:latest
+    container_name: sub-store
+    restart: unless-stopped
+    environment:
+      - SUB_STORE_FRONTEND_BACKEND_PATH=/$secret_key
+    ports:
+      - "3001:3001"
+    volumes:
+      - /root/sub-store-data:/opt/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+EOF
+    # 启动服务
+    echo -e "${YELLOW}拉取最新镜像...${NC}"
+    docker compose -p sub-store pull
+    
+    echo -e "${YELLOW}启动容器...${NC}"
+    docker compose -p sub-store up -d
+    
+    # 等待健康检查
+    echo -e "${YELLOW}等待服务就绪...${NC}"
+    local attempt=0
+    while [ $attempt -lt 15 ]; do
+        health=$(docker inspect --format='{{.State.Health.Status}}' sub-store 2>/dev/null)
+        if [ "$health" == "healthy" ]; then
+            break
+        fi
+        attempt=$((attempt+1))
+        sleep 2
+    done
+    # 显示访问信息
+    if [ "$health" == "healthy" ]; then
+        echo -e "\n${GREEN}部署成功！${NC}"
+        echo -e "Sub-Store 面板: ${CYAN}http://${public_ip}:3001${NC}"
+        echo -e "后端地址: ${CYAN}http://${public_ip}:3001/${secret_key}${NC}"
+    else
+        echo -e "\n${YELLOW}警告: 服务启动异常，请检查日志: docker logs sub-store${NC}"
+        echo -e "${GREEN}手动验证命令: ${CYAN}curl -I http://127.0.0.1:3001${NC}"
+    fi
+    
+    # 显示帮助信息
+    echo -e "\n${YELLOW}管理命令:${NC}"
+    echo -e "启动: docker compose -f $(pwd)/docker-compose.yml start"
+    echo -e "停止: docker compose -f $(pwd)/docker-compose.yml stop"
+    echo -e "日志查看: docker logs --tail 50 sub-store"
+}
+
 # ======================= 脚本更新 =======================
 update_script() {
   echo -e "${YELLOW}开始更新脚本...${NC}"
@@ -1255,6 +1368,7 @@ main_menu() {
     echo -e "14. TCP性能优化"
     echo -e "15. 命令行美化"
     echo -e "16. DNS解锁服务"
+    echo -e "17. 安装Sub-Store"
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
@@ -1324,6 +1438,10 @@ main_menu() {
         ;;
       16)  
         dns_unlock_menu 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      17)  
+        install_substore 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       99)  
