@@ -511,6 +511,24 @@ install_ss_rust() {
     fi
 }
 
+# ====================== 安装 ShadowTLS ======================
+install_shadowtls() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Kismet0123/ShadowTLS-Manager${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    if wget -O ShadowTLS_Manager.sh --no-check-certificate https://raw.githubusercontent.com/Kismet0123/ShadowTLS-Manager/refs/heads/main/ShadowTLS_Manager.sh; then
+        chmod +x ShadowTLS_Manager.sh
+        ./ShadowTLS_Manager.sh
+        rm -f ShadowTLS_Manager.sh  # 清理安装脚本
+    else
+        echo -e "${RED}下载 ShadowTLS 安装脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
 # ======================= 安装3X-UI面板 =======================
 install_3x_ui() {
     clear
@@ -1359,16 +1377,17 @@ main_menu() {
     echo -e "5. 安装 Snell 协议服务"
     echo -e "6. 安装 Hysteria2 协议服务"
     echo -e "7. 安装 SS-Rust 协议服务"
-    echo -e "8. 安装 3X-UI 管理面板"
-    echo -e "9. 流媒体解锁检测"
-    echo -e "10. Speedtest网络测速"
-    echo -e "11. 开放所有端口"
-    echo -e "12. 安装Caddy反代"
-    echo -e "13. IP优先级设置"
-    echo -e "14. TCP性能优化"
-    echo -e "15. 命令行美化"
-    echo -e "16. DNS解锁服务"
-    echo -e "17. 安装Sub-Store"
+    echo -e "8. 安装 ShadowTLS"
+    echo -e "9. 安装 3X-UI 管理面板"
+    echo -e "10. 流媒体解锁检测"
+    echo -e "11. Speedtest网络测速"
+    echo -e "12. 开放所有端口"
+    echo -e "13. 安装Caddy反代"
+    echo -e "14. IP优先级设置"
+    echo -e "15. TCP性能优化"
+    echo -e "16. 命令行美化"
+    echo -e "17. DNS解锁服务"
+    echo -e "18. 安装Sub-Store"
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
@@ -1405,42 +1424,46 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       8)  
-        install_3x_ui 
+        install_shadowtls 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       9)  
-        install_media_check 
+        install_3x_ui 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       10)  
-        install_speedtest 
+        install_media_check 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       11)  
+        install_speedtest 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      12)  
         open_all_ports 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      12)
+      13)
         configure_caddy_reverse_proxy
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      13)
+      14)
         modify_ip_preference
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      14)
+      15)
         install_magic_tcp 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      15)  
+      16)  
         install_shell_beautify 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      16)  
+      17)  
         dns_unlock_menu 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      17)  
+      18)  
         install_substore 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
