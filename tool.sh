@@ -651,30 +651,40 @@ configure_caddy_reverse_proxy() {
     if ! command -v caddy &>/dev/null; then
         echo -e "${CYAN}开始安装Caddy服务器...${NC}"
         
-        # 安装依赖组件
-        if ! sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https &>/dev/null; then
-            echo -e "${RED}依赖组件安装失败！请检查apt源配置${NC}"
-            return 1
-        fi
-
-        # 添加官方软件源
+        # 安装依赖组件（显示进度）
+        echo -e "${YELLOW}[1/5] 安装依赖组件...${NC}"
+        sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https 2>&1 | \
+            while read line; do 
+                echo "  ▸ $line"
+            done
+        
+        # 添加官方软件源（显示进度）
+        echo -e "\n${YELLOW}[2/5] 添加Caddy官方源...${NC}"
         curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
-        sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+            sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
         curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | \
-        sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
-
-        # 执行安装
-        sudo apt-get update &>/dev/null
-        if ! sudo apt-get install -y caddy &>/dev/null; then
-            echo -e "${RED}Caddy官方安装失败！错误码：$?${NC}"
-            return 1
-        fi
-
-        # 初始化配置文件
-        sudo mkdir -p /etc/caddy
+            sudo tee /etc/apt/sources.list.d/caddy-stable.list | \
+            sed 's/^/  ▸ /'
+        # 更新软件源（显示进度）
+        echo -e "\n${YELLOW}[3/5] 更新软件源...${NC}"
+        sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/caddy-stable.list" \
+            -o Dir::Etc::sourceparts="-" \
+            -o APT::Get::List-Cleanup="0" 2>&1 | \
+            grep -v '^$' | \
+            sed 's/^/  ▸ /'
+        # 安装Caddy（显示进度）
+        echo -e "\n${YELLOW}[4/5] 安装Caddy...${NC}"
+        sudo apt-get install -y caddy 2>&1 | \
+            grep --line-buffered -E 'Unpacking|Setting up' | \
+            sed 's/^/  ▸ /'
+        # 初始化配置（显示进度）
+        echo -e "\n${YELLOW}[5/5] 初始化配置...${NC}"
+        sudo mkdir -vp /etc/caddy | sed 's/^/  ▸ /'
         [ ! -f "$CADDYFILE" ] && sudo touch "$CADDYFILE"
-        echo -e "# Caddyfile自动生成配置\n# 手动修改后请执行 systemctl reload caddy" | sudo tee "$CADDYFILE" >/dev/null
+        echo -e "# Caddyfile自动生成配置\n# 手动修改后请执行 systemctl reload caddy" | \
+            sudo tee "$CADDYFILE" | sed 's/^/  ▸ /'
         sudo chown caddy:caddy "$CADDYFILE"
+        
         echo -e "${GREEN}✅ Caddy安装完成，版本：$(caddy version)${NC}"
     else
         echo -e "${CYAN}检测到Caddy已安装，版本：$(caddy version)${NC}"
