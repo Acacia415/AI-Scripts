@@ -922,7 +922,7 @@ install_nginx() {
 # 配置反向代理
 configure_nginx_reverse_proxy() {
   [ ! -x "$(command -v nginx)" ] && echo -e "${RED}请先安装Nginx！${NC}" && return
-  # ▼▼▼▼▼▼ 新增输入验证 ▼▼▼▼▼▼
+  # 输入验证
   while true; do
     read -p "请输入域名 (例: example.com): " domain
     [[ "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] && break
@@ -930,75 +930,70 @@ configure_nginx_reverse_proxy() {
   done
   read -p "请输入目标服务器地址 (默认: 127.0.0.1): " upstream
   upstream=${upstream:-127.0.0.1}
-  [[ ! $upstream =~ ^[0-9.]+$ ]] && echo -e "${RED}IP地址格式错误！使用默认127.0.0.1${NC}" && upstream=127.0.0.1
+  [[ ! $upstream =~ ^[0-9.]+$ ]] && upstream=127.0.0.1
   read -p "请输入目标端口 (默认: 80): " port
   port=${port:-80}
-  [[ ! $port =~ ^[0-9]+$ ]] && echo -e "${RED}端口格式错误！使用默认80${NC}" && port=80
-  # ▼▼▼▼▼▼ 增强HTTPS选项 ▼▼▼▼▼▼
+  [[ ! $port =~ ^[0-9]+$ ]] && port=80
+  # HTTPS选项
   echo -e "${CYAN}是否启用HTTPS？${NC}"
   select ssl_choice in "自动申请证书" "手动提供证书" "跳过HTTPS"; do
     case $ssl_choice in
-      "自动申请证书")
-        # 预检查DNS解析
-        if ! host $domain &>/dev/null; then
-          echo -e "${YELLOW}⚠️  域名解析未生效！请确认："
-          echo -e "1. 已添加A记录指向本机IP"
-          echo -e "2. DNS生效可能需要10-60分钟${NC}"
-          read -p "强制继续？(y/N) " force_continue
-          [[ $force_continue != "y" ]] && return
-        fi
-        ssl_type=auto
-        break
-        ;;
+      "自动申请证书") ssl_type=auto; break ;;
       "手动提供证书") ssl_type=manual; break ;;
       "跳过HTTPS") ssl_type=no; break ;;
       *) echo "无效选项";;
     esac
   done
-  # ▼▼▼▼▼▼ 配置文件冲突处理 ▼▼▼▼▼▼
+  # 生成配置文件（修复proxy_pass缺少分号问题）
   config_file="/etc/nginx/sites-available/${domain}.conf"
-  if [ -f "$config_file" ]; then
-    echo -e "${YELLOW}⚠️  配置文件已存在！操作选项：${NC}"
-    select exist_opt in "覆盖配置" "追加配置" "取消操作"; do
-      case $exist_opt in
-        "覆盖配置") break ;;
-        "追加配置") config_file="/etc/nginx/sites-available/${domain}-$(date +%s).conf" ;;
-        "取消操作") return ;;
-      esac
-    done
-  fi
-  # 生成配置模板（保持原有结构）
   cat > $config_file <<EOF
-# ========== 基础配置 ==========
 server {
     listen 80;
     server_name $domain;
-    # 强制HTTPS重定向（当启用SSL时）
     location / {
         return 301 https://\$host\$request_uri;
     }
 }
-# ========== SSL配置 ==========
 server {
     listen 443 ssl;
     server_name $domain;
     
-    # SSL证书路径（自动填充）
+    # SSL证书路径
     ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
-    ...其他ssl配置保持不变...
+    ssl_session_timeout 1d;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_tickets off;
+    location / {
+        proxy_pass http://$upstream:$port;  # 确保此处有分号
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+    access_log /var/log/nginx/${domain}.access.log;
+    error_log /var/log/nginx/${domain}.error.log;
 }
 EOF
-  # ▼▼▼▼▼▼ 应用基础配置增强 ▼▼▼▼▼▼
+  # 应用配置（增加调试输出）
   echo -e "${YELLOW}[1/4] 应用基础配置...${NC}"
+  echo -e "${CYAN}生成的配置文件内容：${NC}"
+  cat $config_file | sed 's/^/  | /'
   ln -sf "$config_file" /etc/nginx/sites-enabled/
+  
   if ! nginx -t 2>/dev/null | grep -q "successful"; then
     echo -e "${RED}❌ 基础配置验证失败！错误详情："
-    nginx -t
+    nginx -t 2>&1 | sed 's/^/  ▸ /'
     rm -f "$config_file"
-    return
+    return 1
   fi
   systemctl reload nginx
+  
   # ▼▼▼▼▼▼ 证书处理增强 ▼▼▼▼▼▼
   case $ssl_type in
     "auto")
