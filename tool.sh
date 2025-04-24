@@ -1072,6 +1072,29 @@ fi
   fi
 }
 
+# ▼▼▼▼▼▼ 添加证书自动续期逻辑 ▼▼▼▼▼▼
+setup_auto_renew() {
+  echo -e "${YELLOW}[+] 配置证书自动续期...${NC}"
+  
+  # 创建续期脚本
+  renew_script="/usr/local/bin/ssl_renew.sh"
+  cat > "$renew_script" <<EOF
+#!/bin/bash
+echo "[SSL Renew] 执行时间: \$(date)"
+if certbot renew --quiet --post-hook "systemctl reload nginx"; then
+  echo "证书续期成功 ✅"
+else
+  echo "证书续期失败 ❌ 错误码: \$?"
+fi
+EOF
+  # 设置权限
+  chmod +x "$renew_script"
+  # 添加cron任务（每天凌晨2点检查续期）
+  (crontab -l 2>/dev/null; echo "0 2 * * * $renew_script") | crontab -
+  
+  echo -e "${GREEN}✅ 已启用SSL证书自动续期 (每天2:00 AM)${NC}"
+}
+
 # 删除配置
 remove_nginx_config() {
   echo -e "${YELLOW}现有配置列表：${NC}"
@@ -1104,6 +1127,7 @@ show_nginx_configs() {
   echo -e "\n${CYAN}可用的配置：${NC}"
   ls /etc/nginx/sites-available/*.conf 2>/dev/null | xargs -n1 basename
 }
+
 
 # ======================= IP优先级设置 =======================
 modify_ip_preference() {
