@@ -922,6 +922,7 @@ install_nginx() {
 # 配置反向代理
 configure_nginx_reverse_proxy() {
   [ ! -x "$(command -v nginx)" ] && echo -e "${RED}请先安装Nginx！${NC}" && return
+  
   # 输入验证
   while true; do
     read -p "请输入域名 (例: example.com): " domain
@@ -982,17 +983,18 @@ server {
 EOF
   # 应用配置（增加调试输出）
   echo -e "${YELLOW}[1/4] 应用基础配置...${NC}"
-  echo -e "${CYAN}生成的配置文件内容：${NC}"
-  cat $config_file | sed 's/^/  | /'
   ln -sf "$config_file" /etc/nginx/sites-enabled/
   
-  if ! nginx -t 2>/dev/null | grep -q "successful"; then
+  # 使用退出状态码判断
+  if ! nginx -t 2>/dev/null; then
     echo -e "${RED}❌ 基础配置验证失败！错误详情："
     nginx -t 2>&1 | sed 's/^/  ▸ /'
     rm -f "$config_file"
     return 1
+  else
+    echo -e "${GREEN}✅ 配置语法检查通过！${NC}"
+    systemctl reload nginx
   fi
-  systemctl reload nginx
   
   # ▼▼▼▼▼▼ 证书处理增强 ▼▼▼▼▼▼
   case $ssl_type in
