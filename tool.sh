@@ -862,6 +862,137 @@ caddy_main() {
     done
 }
 
+# ======================= Nginx 管理模块 =======================
+nginx_main() {
+  while true; do
+    clear
+    echo -e "${CYAN}=== Nginx 管理脚本 v1.0 ==="
+    echo -e "1. 安装/更新Nginx"
+    echo -e "2. 配置反向代理"
+    echo -e "3. 删除网站配置"
+    echo -e "4. 完全卸载Nginx"
+    echo -e "5. 查看配置列表"
+    echo -e "0. 返回主菜单"
+    echo -e "${YELLOW}===============================${NC}"
+    read -p "请输入选项: " nginx_choice
+
+    case $nginx_choice in
+      1) install_nginx ;;
+      2) configure_nginx_reverse_proxy ;;
+      3) remove_nginx_config ;;
+      4) uninstall_nginx ;;
+      5) show_nginx_configs ;;
+      0) break ;;
+      *) echo -e "${RED}无效选项！${NC}"; sleep 1 ;;
+    esac
+    [ "$nginx_choice" != "0" ] && read -p "按回车键继续..."
+  done
+}
+
+# 安装Nginx（详细进度显示）
+install_nginx() {
+  clear
+  echo -e "${YELLOW}[1/5] 更新软件源...${NC}"
+  apt-get update 2>&1 | grep -v '^$' | sed 's/^/  ▸ /'
+  
+  echo -e "\n${YELLOW}[2/5] 安装依赖项...${NC}"
+  apt-get install -y curl gnupg2 ca-certificates lsb-release ubuntu-keyring 2>&1 | \
+    grep --line-buffered -E 'Unpacking|Setting up' | sed 's/^/  ▸ /'
+
+  echo -e "\n${YELLOW}[3/5] 添加官方源...${NC}"
+  curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor | \
+    tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
+  echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/ubuntu $(lsb_release -cs) nginx" | \
+    tee /etc/apt/sources.list.d/nginx.list | sed 's/^/  ▸ /'
+
+  echo -e "\n${YELLOW}[4/5] 安装Nginx...${NC}"
+  apt-get update 2>&1 | grep -v '^$' | sed 's/^/  ▸ /'
+  apt-get install -y nginx 2>&1 | \
+    grep --line-buffered -E 'Unpacking|Setting up' | sed 's/^/  ▸ /'
+
+  echo -e "\n${YELLOW}[5/5] 初始化配置...${NC}"
+  mkdir -p /etc/nginx/sites-{available,enabled}
+  sed -i 's/include \/etc\/nginx\/sites-enabled\/\*;/include \/etc\/nginx\/sites-enabled\/*.conf;/' /etc/nginx/nginx.conf
+  systemctl restart nginx
+
+  echo -e "\n${GREEN}✅ Nginx 安装完成！版本信息：${NC}"
+  nginx -v
+}
+
+# 配置反向代理
+configure_nginx_reverse_proxy() {
+  [ ! -x "$(command -v nginx)" ] && echo -e "${RED}请先安装Nginx！${NC}" && return
+
+  read -p "请输入域名 (例: example.com): " domain
+  read -p "请输入目标服务器地址 (默认: 127.0.0.1): " upstream
+  upstream=${upstream:-127.0.0.1}
+  read -p "请输入目标端口 (默认: 80): " port
+  port=${port:-80}
+
+  config_file="/etc/nginx/sites-available/${domain}.conf"
+
+  cat > $config_file <<EOF
+server {
+    listen 80;
+    server_name $domain;
+
+    location / {
+        proxy_pass http://$upstream:$port;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    access_log /var/log/nginx/${domain}.access.log;
+    error_log /var/log/nginx/${domain}.error.log;
+}
+EOF
+
+  ln -sf $config_file /etc/nginx/sites-enabled/
+  nginx -t 2>&1 | grep -q "successful" && {
+    systemctl reload nginx
+    echo -e "${GREEN}✅ 配置生效！访问地址: http://$domain${NC}"
+  } || {
+    echo -e "${RED}配置验证失败！错误信息："
+    nginx -t
+    rm -f $config_file
+  }
+}
+
+# 删除配置
+remove_nginx_config() {
+  echo -e "${YELLOW}现有配置列表：${NC}"
+  ls /etc/nginx/sites-enabled/*.conf | xargs -n1 basename
+  read -p "输入要删除的配置文件名 (例: example.com.conf): " config
+  
+  rm -f "/etc/nginx/sites-enabled/$config"
+  rm -f "/etc/nginx/sites-available/$config"
+  systemctl reload nginx
+  echo -e "${GREEN}✅ 配置已移除！${NC}"
+}
+
+# 完全卸载
+uninstall_nginx() {
+  echo -e "${RED}⚠️  即将完全卸载Nginx！${NC}"
+  read -p "确认卸载？(y/N) " confirm
+  [[ $confirm != "y" ]] && return
+
+  systemctl stop nginx
+  apt-get purge -y nginx* 2>/dev/null
+  rm -rf /etc/nginx /var/log/nginx /var/www/html
+  apt-get autoremove -y
+  echo -e "${GREEN}✅ Nginx已彻底移除！${NC}"
+}
+
+# 查看配置
+show_nginx_configs() {
+  echo -e "${CYAN}启用的配置：${NC}"
+  ls /etc/nginx/sites-enabled/*.conf 2>/dev/null | xargs -n1 basename
+  echo -e "\n${CYAN}可用的配置：${NC}"
+  ls /etc/nginx/sites-available/*.conf 2>/dev/null | xargs -n1 basename
+}
+
 # ======================= IP优先级设置 =======================
 modify_ip_preference() {
     # 权限检查
@@ -1487,11 +1618,12 @@ main_menu() {
     echo -e "11. Speedtest网络测速"
     echo -e "12. 开放所有端口"
     echo -e "13. Caddy反代管理"
-    echo -e "14. IP优先级设置"
-    echo -e "15. TCP性能优化"
-    echo -e "16. 命令行美化"
-    echo -e "17. DNS解锁服务"
-    echo -e "18. 安装Sub-Store"
+    echo -e "14. Nginx管理"
+    echo -e "15. IP优先级设置"
+    echo -e "16. TCP性能优化"
+    echo -e "17. 命令行美化"
+    echo -e "18. DNS解锁服务"
+    echo -e "19. 安装Sub-Store"
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
@@ -1552,22 +1684,26 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       14)
-        modify_ip_preference
+        nginx_main
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       15)
+        modify_ip_preference
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      16)
         install_magic_tcp 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      16)  
+      17)  
         install_shell_beautify 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      17)  
+      18)  
         dns_unlock_menu 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      18)  
+      19)  
         install_substore 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
