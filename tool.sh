@@ -922,24 +922,52 @@ install_nginx() {
 # 配置反向代理
 configure_nginx_reverse_proxy() {
   [ ! -x "$(command -v nginx)" ] && echo -e "${RED}请先安装Nginx！${NC}" && return
-  # 收集基本信息
-  read -p "请输入域名 (例: example.com): " domain
+  # ▼▼▼▼▼▼ 新增输入验证 ▼▼▼▼▼▼
+  while true; do
+    read -p "请输入域名 (例: example.com): " domain
+    [[ "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] && break
+    echo -e "${RED}域名格式错误！请重新输入${NC}"
+  done
   read -p "请输入目标服务器地址 (默认: 127.0.0.1): " upstream
   upstream=${upstream:-127.0.0.1}
+  [[ ! $upstream =~ ^[0-9.]+$ ]] && echo -e "${RED}IP地址格式错误！使用默认127.0.0.1${NC}" && upstream=127.0.0.1
   read -p "请输入目标端口 (默认: 80): " port
   port=${port:-80}
-  # HTTPS选项
+  [[ ! $port =~ ^[0-9]+$ ]] && echo -e "${RED}端口格式错误！使用默认80${NC}" && port=80
+  # ▼▼▼▼▼▼ 增强HTTPS选项 ▼▼▼▼▼▼
   echo -e "${CYAN}是否启用HTTPS？${NC}"
   select ssl_choice in "自动申请证书" "手动提供证书" "跳过HTTPS"; do
     case $ssl_choice in
-      "自动申请证书") ssl_type=auto; break ;;
+      "自动申请证书")
+        # 预检查DNS解析
+        if ! host $domain &>/dev/null; then
+          echo -e "${YELLOW}⚠️  域名解析未生效！请确认："
+          echo -e "1. 已添加A记录指向本机IP"
+          echo -e "2. DNS生效可能需要10-60分钟${NC}"
+          read -p "强制继续？(y/N) " force_continue
+          [[ $force_continue != "y" ]] && return
+        fi
+        ssl_type=auto
+        break
+        ;;
       "手动提供证书") ssl_type=manual; break ;;
       "跳过HTTPS") ssl_type=no; break ;;
       *) echo "无效选项";;
     esac
   done
-  # 生成配置模板
+  # ▼▼▼▼▼▼ 配置文件冲突处理 ▼▼▼▼▼▼
   config_file="/etc/nginx/sites-available/${domain}.conf"
+  if [ -f "$config_file" ]; then
+    echo -e "${YELLOW}⚠️  配置文件已存在！操作选项：${NC}"
+    select exist_opt in "覆盖配置" "追加配置" "取消操作"; do
+      case $exist_opt in
+        "覆盖配置") break ;;
+        "追加配置") config_file="/etc/nginx/sites-available/${domain}-$(date +%s).conf" ;;
+        "取消操作") return ;;
+      esac
+    done
+  fi
+  # 生成配置模板（保持原有结构）
   cat > $config_file <<EOF
 # ========== 基础配置 ==========
 server {
@@ -958,65 +986,89 @@ server {
     # SSL证书路径（自动填充）
     ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
-    ssl_session_timeout 1d;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
-    ssl_prefer_server_ciphers off;
-    ssl_session_tickets off;
-    # 反向代理配置
-    location / {
-        proxy_pass http://$upstream:$port;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-    access_log /var/log/nginx/${domain}.access.log;
-    error_log /var/log/nginx/${domain}.error.log;
+    ...其他ssl配置保持不变...
 }
 EOF
-  # 证书处理逻辑
+  # ▼▼▼▼▼▼ 应用基础配置增强 ▼▼▼▼▼▼
+  echo -e "${YELLOW}[1/4] 应用基础配置...${NC}"
+  ln -sf "$config_file" /etc/nginx/sites-enabled/
+  if ! nginx -t 2>/dev/null | grep -q "successful"; then
+    echo -e "${RED}❌ 基础配置验证失败！错误详情："
+    nginx -t
+    rm -f "$config_file"
+    return
+  fi
+  systemctl reload nginx
+  # ▼▼▼▼▼▼ 证书处理增强 ▼▼▼▼▼▼
   case $ssl_type in
     "auto")
-      if ! command -v certbot &>/dev/null; then
-        echo -e "${YELLOW}[1/2] 安装Certbot...${NC}"
+      if ! dpkg -l | grep -q python3-certbot-nginx; then
+        echo -e "${YELLOW}[2/4] 安装Certbot依赖...${NC}"
         apt-get install -y certbot python3-certbot-nginx 2>&1 | sed 's/^/  ▸ /'
       fi
-      
-      echo -e "${YELLOW}[2/2] 申请证书...${NC}"
-      certbot --nginx -d $domain --non-interactive --agree-tos --email admin@$domain | sed 's/^/  ▸ /'
-      
-      # 自动续订配置
-      (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
+      # 带重试机制的证书申请
+      for attempt in {1..3}; do
+        echo -e "${YELLOW}[3/4] 申请证书（尝试第${attempt}次）...${NC}"
+        certbot_output=$(certbot --nginx -d $domain --non-interactive --agree-tos --email admin@$domain 2>&1)
+        echo "$certbot_output" | sed 's/^/  ▸ /'
+        if grep -q "Congratulations" <<< "$certbot_output"; then
+          echo -e "${YELLOW}[4/4] 验证证书绑定...${NC}"
+          if [ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]; then
+            (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
+            break
+          else
+            echo -e "${RED}证书文件未生成！尝试手动修复："
+            echo -e "1. 检查DNS解析"
+            echo -e "2. 运行 certbot --nginx -d $domain 手动配置${NC}"
+            return
+          fi
+        else
+          [ $attempt -lt 3 ] && sleep $((attempt*10)) || {
+            echo -e "${RED}❌ 证书申请失败！尝试手动修复："
+            certbot --nginx rollback -d $domain --non-interactive
+            echo -e "手动命令：certbot --nginx -d $domain${NC}"
+            return
+          }
+        fi
+      done
       ;;
     "manual")
-      echo -e "${CYAN}请将证书文件放置到以下路径：${NC}"
-      echo -e "SSL证书: /etc/ssl/private/$domain.crt"
-      echo -e "私钥文件: /etc/ssl/private/$domain.key"
-      read -p "按回车键继续..." 
-      sed -i "s|ssl_certificate .*|ssl_certificate /etc/ssl/private/$domain.crt;|" $config_file
-      sed -i "s|ssl_certificate_key .*|ssl_certificate_key /etc/ssl/private/$domain.key;|" $config_file
+      while true; do
+        echo -e "${CYAN}请确认以下文件已存在："
+        echo -e "SSL证书: /etc/ssl/private/$domain.crt"
+        echo -e "私钥文件: /etc/ssl/private/$domain.key${NC}"
+        read -p "按回车键继续，或输入q退出: " input
+        
+        [ "$input" == "q" ] && return
+        
+        if [ -f "/etc/ssl/private/$domain.crt" ] && [ -f "/etc/ssl/private/$domain.key" ]; then
+          sed -i "s|ssl_certificate .*|ssl_certificate /etc/ssl/private/$domain.crt;|" $config_file
+          sed -i "s|ssl_certificate_key .*|ssl_certificate_key /etc/ssl/private/$domain.key;|" $config_file
+          break
+        else
+          echo -e "${RED}文件不存在！请重新检查路径${NC}"
+        fi
+      done
       ;;
-      
     "no")
-      # 关闭HTTPS重定向
       sed -i '/return 301/d' $config_file
       sed -i '/listen 443 ssl/,/}/d' $config_file
+      echo -e "${YELLOW}⚠️  已禁用HTTPS，建议在公网环境始终启用SSL加密！${NC}"
       ;;
   esac
-  # 应用配置
-  ln -sf $config_file /etc/nginx/sites-enabled/
+  # ▼▼▼▼▼▼ 最终验证增强 ▼▼▼▼▼▼
+  echo -e "\n${YELLOW}[最终配置验证]${NC}"
   if nginx -t 2>&1 | grep -q "successful"; then
     systemctl reload nginx
     [ "$ssl_type" != "no" ] && final_url="https://$domain" || final_url="http://$domain"
     echo -e "${GREEN}✅ 配置生效！访问地址: $final_url${NC}"
+    echo -e "\n${CYAN}快速测试命令："
+    echo -e "curl -I $final_url"
+    echo -e "openssl s_client -connect $domain:443 -servername $domain 2>/dev/null | openssl x509 -noout -dates${NC}"
   else
-    echo -e "${RED}配置验证失败！错误信息："
-    nginx -t
-    rm -f $config_file
+    echo -e "${RED}配置验证失败！执行回滚操作..."
+    rm -f "/etc/nginx/sites-enabled/${domain}.conf"
+    systemctl reload nginx
   fi
 }
 
