@@ -986,15 +986,18 @@ EOF
   ln -sf "$config_file" /etc/nginx/sites-enabled/
   
   # 使用退出状态码判断
-  if ! nginx -t 2>/dev/null; then
-    echo -e "${RED}❌ 基础配置验证失败！错误详情："
-    nginx -t 2>&1 | sed 's/^/  ▸ /'
-    rm -f "$config_file"
-    return 1
-  else
-    echo -e "${GREEN}✅ 配置语法检查通过！${NC}"
-    systemctl reload nginx
-  fi
+nginx_test_output=$(nginx -t 2>&1)
+if [ $? -eq 0 ]; then
+  echo -e "${GREEN}✅ 配置语法检查通过！${NC}"
+  echo -e "${CYAN}Nginx测试输出：${NC}"
+  echo "$nginx_test_output" | sed 's/^/  ▸ /'
+  systemctl reload nginx
+else
+  echo -e "${RED}❌ 基础配置验证失败！错误详情：${NC}"
+  echo "$nginx_test_output" | sed 's/^/  ▸ /'
+  rm -f "$config_file"
+  return 1
+fi
   
   # ▼▼▼▼▼▼ 证书处理增强 ▼▼▼▼▼▼
   case $ssl_type in
