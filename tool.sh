@@ -645,7 +645,7 @@ configure_caddy_reverse_proxy() {
     local CADDY_SERVICE="/lib/systemd/system/caddy.service"
     local CADDYFILE="/etc/caddy/Caddyfile"
     local TEMP_CONF=$(mktemp)
-    local domain port
+    local domain ip port
 
     # 首次安装检测
     if ! command -v caddy &>/dev/null; then
@@ -689,9 +689,13 @@ configure_caddy_reverse_proxy() {
             [[ $domain =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]] || echo -e "${RED}域名格式无效！示例：example.com${NC}"
         done
 
+        # 目标IP输入（支持域名/IPv4/IPv6）
+        read -p "请输入目标服务器地址（默认为localhost）:" ip
+        ip=${ip:-localhost}
+
         # 端口输入验证
         until [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1 -a "$port" -le 65535 ]; do
-            read -p "请输入本地端口号（1-65535）：" port
+            read -p "请输入目标端口号（1-65535）:" port
             [[ $port =~ ^[0-9]+$ ]] || { echo -e "${RED}端口必须为数字！"; continue; }
             [ "$port" -ge 1 -a "$port" -le 65535 ] || echo -e "${RED}端口范围1-65535！"
         done
@@ -717,7 +721,7 @@ configure_caddy_reverse_proxy() {
         echo -e "\n# 自动生成配置 - $(date +%F)" | sudo tee -a "$CADDYFILE" >/dev/null
         cat <<EOF | sudo tee -a "$CADDYFILE" >/dev/null
 $domain {
-    reverse_proxy localhost:$port {
+    reverse_proxy $ip:$port {
         header_up Host {host}
         header_up X-Real-IP {remote}
         header_up X-Forwarded-For {remote}
@@ -752,6 +756,11 @@ EOF
         echo -e "${GREEN}✅ 配置生效成功！访问地址：https://$domain${NC}"
         read -p "是否继续添加配置？[y/N] " more
         [[ $more =~ ^[Yy]$ ]] || break
+
+        # 重置变量进行下一轮循环
+        domain=""
+        ip=""
+        port=""
     done
 
     # 清理临时文件
