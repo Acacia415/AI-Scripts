@@ -767,6 +767,97 @@ EOF
     rm -f "$TEMP_CONF"
 }
 
+# ======================= 卸载Caddy =======================
+uninstall_caddy() {
+    echo -e "${RED}警告：此操作将完全移除Caddy及所有相关配置！${NC}"
+    read -p "确定要卸载Caddy吗？(y/N) " confirm
+    [[ ! $confirm =~ ^[Yy]$ ]] && return
+
+    # 停止服务
+    echo -e "${CYAN}停止Caddy服务...${NC}"
+    sudo systemctl stop caddy.service 2>/dev/null
+
+    # 卸载软件包
+    if command -v caddy &>/dev/null; then
+        echo -e "${CYAN}卸载Caddy程序...${NC}"
+        sudo apt-get purge -y caddy 2>/dev/null
+    fi
+
+    # 删除配置文件
+    declare -a caddy_files=(
+        "/etc/caddy"
+        "/lib/systemd/system/caddy.service"
+        "/usr/share/keyrings/caddy-stable-archive-keyring.gpg"
+        "/etc/apt/sources.list.d/caddy-stable.list"
+        "/var/lib/caddy"
+        "/etc/ssl/caddy"
+    )
+
+    # 删除文件及目录
+    echo -e "${CYAN}清理残留文件...${NC}"
+    for target in "${caddy_files[@]}"; do
+        if [[ -e $target ]]; then
+            echo "删除：$target"
+            sudo rm -rf "$target"
+        fi
+    done
+
+    # 删除APT源更新
+    sudo apt-get update 2>/dev/null
+
+    # 清除无人值守安装标记（如有）
+    sudo rm -f /var/lib/cloud/instances/*/sem/config_apt_source
+
+    # 删除日志（可选）
+    read -p "是否删除所有Caddy日志文件？(y/N) " del_log
+    if [[ $del_log =~ ^[Yy]$ ]]; then
+        sudo journalctl --vacuum-time=1s --quiet
+        sudo rm -f /var/log/caddy/*.log 2>/dev/null
+    fi
+
+    echo -e "${GREEN}✅ Caddy已完全卸载，再见！${NC}"
+}
+
+# ======================= 主菜单 =======================
+show_menu() {
+    clear
+    echo -e "${CYAN}=== Caddy 管理脚本 v1.2 ===${NC}"
+    echo "1. 安装/配置反向代理"
+    echo "2. 完全卸载Caddy"
+    echo "3. 退出脚本"
+    echo -e "${YELLOW}===============================${NC}"
+}
+
+# ======================= 主逻辑 =======================
+case "$1" in
+    install|1)
+        configure_caddy_reverse_proxy
+        ;;
+    uninstall|2)
+        uninstall_caddy
+        ;;
+    *)
+        while true; do
+            show_menu
+            read -p "请输入选项数字：" choice
+            case $choice in
+                1) configure_caddy_reverse_proxy
+                   read -p "按回车键返回菜单..." 
+                   ;;
+                2) uninstall_caddy
+                   read -p "按回车键返回菜单..." 
+                   ;;
+                3) echo -e "${GREEN}已退出脚本${NC}"
+                   exit 0
+                   ;;
+                *) echo -e "${RED}无效选项，请重新输入！${NC}"
+                   sleep 1
+                   ;;
+            esac
+        done
+        ;;
+esac
+
 # ======================= IP优先级设置 =======================
 modify_ip_preference() {
     # 权限检查
