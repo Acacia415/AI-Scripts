@@ -639,7 +639,7 @@ open_all_ports() {
     fi
 }
 
-# ======================= 安装Caddy反代 =======================
+# ======================= Caddy反代管理 =======================
 configure_caddy_reverse_proxy() {
     # 环境常量定义
     local CADDY_SERVICE="/lib/systemd/system/caddy.service"
@@ -818,45 +818,39 @@ uninstall_caddy() {
     echo -e "${GREEN}✅ Caddy已完全卸载，再见！${NC}"
 }
 
-# ======================= 主菜单 =======================
-show_menu() {
+# ======================= Caddy子菜单 =======================
+show_caddy_menu() {
     clear
     echo -e "${CYAN}=== Caddy 管理脚本 v1.2 ===${NC}"
     echo "1. 安装/配置反向代理"
     echo "2. 完全卸载Caddy"
-    echo "3. 退出脚本"
+    echo "3. 返回主菜单"
     echo -e "${YELLOW}===============================${NC}"
 }
-
-# ======================= 主逻辑 =======================
-case "$1" in
-    install|1)
-        configure_caddy_reverse_proxy
-        ;;
-    uninstall|2)
-        uninstall_caddy
-        ;;
-    *)
-        while true; do
-            show_menu
-            read -p "请输入选项数字：" choice
-            case $choice in
-                1) configure_caddy_reverse_proxy
-                   read -p "按回车键返回菜单..." 
-                   ;;
-                2) uninstall_caddy
-                   read -p "按回车键返回菜单..." 
-                   ;;
-                3) echo -e "${GREEN}已退出脚本${NC}"
-                   exit 0
-                   ;;
-                *) echo -e "${RED}无效选项，请重新输入！${NC}"
-                   sleep 1
-                   ;;
-            esac
-        done
-        ;;
-esac
+# ======================= Cady主逻辑 =======================
+caddy_main() {
+    while true; do
+        show_caddy_menu
+        read -p "请输入Caddy管理选项：" caddy_choice
+        case $caddy_choice in
+            1) 
+                configure_caddy_reverse_proxy
+                read -p "按回车键返回菜单..." 
+                ;;
+            2) 
+                uninstall_caddy
+                read -p "按回车键返回菜单..." 
+                ;;
+            3) 
+                break
+                ;;
+            *) 
+                echo -e "${RED}无效选项！${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
 
 # ======================= IP优先级设置 =======================
 modify_ip_preference() {
@@ -1482,7 +1476,7 @@ main_menu() {
     echo -e "10. 流媒体解锁检测"
     echo -e "11. Speedtest网络测速"
     echo -e "12. 开放所有端口"
-    echo -e "13. 安装Caddy反代"
+    echo -e "13. Caddy反代管理"
     echo -e "14. IP优先级设置"
     echo -e "15. TCP性能优化"
     echo -e "16. 命令行美化"
@@ -1544,7 +1538,7 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       13)
-        configure_caddy_reverse_proxy
+        caddy_main
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       14)
