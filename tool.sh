@@ -930,9 +930,7 @@ install_nginx() {
 # 配置反向代理（关键修复点）
 configure_nginx_reverse_proxy() {
   [ ! -x "$(command -v nginx)" ] && echo -e "${RED}请先安装Nginx！${NC}" && return
-  # ▼▼▼▼▼▼ 新增的临时配置路径 ▼▼▼▼▼▼
-  temp_config="/etc/nginx/sites-available/temp_${domain}.conf"
-  enabled_config="/etc/nginx/sites-enabled/${domain}.conf"
+
   # 强化域名验证
   while true; do
     read -p "请输入域名 (例: example.com): " domain
@@ -943,25 +941,20 @@ configure_nginx_reverse_proxy() {
     fi
     echo -e "${RED}域名格式错误！请重新输入${NC}"
   done
-  read -p "请输入目标服务器地址 (默认: 127.0.0.1): " upstream
-  upstream=${upstream:-127.0.0.1}
-  [[ ! $upstream =~ ^[0-9.]+$ ]] && upstream=127.0.0.1
-  read -p "请输入目标端口 (默认: 80): " port
-  port=${port:-80}
-  [[ ! $port =~ ^[0-9]+$ ]] && port=80
-  # ▼▼▼▼▼▼ 生成临时配置文件（关键修复点） ▼▼▼▼▼▼
+
+  # 生成基础配置
   echo -e "${YELLOW}[1/4] 应用临时配置...${NC}"
-  cat > "$temp_config" <<EOF
+  cat > "/etc/nginx/sites-available/${domain}.conf" <<EOF
 server {
-    listen 80 default_server;  # 强制指定为默认服务
+    listen 80;
     server_name $domain;
     root /var/www/html;
     
-    # Certbot证书验证路径
     location ^~ /.well-known/acme-challenge/ {
         allow all;
         try_files \$uri \$uri/ =404;
     }
+
     location / {
         proxy_pass http://$upstream:$port;
         include proxy_params;
@@ -971,62 +964,33 @@ server {
     }
 }
 EOF
-  # ▼▼▼▼▼▼ 强制覆盖正式配置 ▼▼▼▼▼▼
-  mv "$temp_config" "/etc/nginx/sites-available/${domain}.conf"
-  ln -sf "/etc/nginx/sites-available/${domain}.conf" "$enabled_config"
-  
-  # 预加载配置
+
+  # 启用配置并测试
+  ln -sf "/etc/nginx/sites-available/${domain}.conf" "/etc/nginx/sites-enabled/"
   nginx -t && systemctl reload nginx
-  # HTTPS配置（关键修复部分）
-  echo -e "${CYAN}是否启用HTTPS？${NC}"
-  select ssl_choice in "自动申请证书" "手动提供证书" "跳过HTTPS"; do
-    case $ssl_choice in
-      "自动申请证书")
-        echo -e "${YELLOW}[2/4] 安装Certbot...${NC}"
-        if ! dpkg -l | grep -q python3-certbot-nginx; then
-          apt-get install -y certbot python3-certbot-nginx 2>&1 | sed 's/^/  ▸ /'
-        fi
-        echo -e "${YELLOW}[3/4] 申请SSL证书...${NC}"
-        # ▼▼▼▼▼▼ 修复Certbot参数 ▼▼▼▼▼▼
-        if certbot --nginx --nginx-server-root=/etc/nginx \
-                   -d $domain --non-interactive \
-                   --agree-tos --email admin@$domain \
-                   --cert-name $domain \
-                   --nginx-ctl-reload-command "systemctl reload nginx"; then
-          echo -e "${YELLOW}[4/4] 配置自动续期...${NC}"
-          (crontab -l 2>/dev/null; echo "0 3 * * * /usr/bin/certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
-          echo -e "${GREEN}✅ SSL证书部署成功！${NC}"
-        else
-          echo -e "${RED}证书申请失败！回滚配置...${NC}"
-          rm -f "/etc/nginx/sites-available/${domain}.conf" "$enabled_config"
-          systemctl reload nginx
-          return 1
-        fi
-        break
-        ;;
-        
-      "手动提供证书")
-        # 手动证书配置逻辑（保持不变）
-        ;;
-        
-      "跳过HTTPS")
-        echo -e "${YELLOW}[2/4] 跳过HTTPS配置${NC}"
-        break
-        ;;
-    esac
-  done
-  # 最终验证
-  if nginx -t; then
-    systemctl reload nginx
-    echo -e "\n${GREEN}✅ 配置生效！访问地址: http://$domain${NC}"
-    [ "$ssl_choice" = "自动申请证书" ] && echo -e "HTTPS地址: ${GREEN}https://$domain${NC}"
+
+  # 自动申请证书（修复版）
+  echo -e "${YELLOW}[2/4] 安装Certbot...${NC}"
+  if ! dpkg -l | grep -q python3-certbot-nginx; then
+    apt-get install -y certbot python3-certbot-nginx 2>&1 | sed 's/^/  ▸ /'
+  fi
+
+  echo -e "${YELLOW}[3/4] 申请SSL证书...${NC}"
+  if certbot --nginx --redirect -d $domain \
+             --non-interactive \
+             --agree-tos \
+             --email admin@$domain; then
+    echo -e "${YELLOW}[4/4] 配置自动续期...${NC}"
+    (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
+    echo -e "${GREEN}✅ SSL证书部署成功！${NC}"
   else
-    echo -e "${RED}最终配置验证失败！错误详情：${NC}"
-    nginx -t 2>&1 | sed 's/^/  ▸ /'
-    rm -f "$enabled_config"
+    echo -e "${RED}证书申请失败！错误原因：${NC}"
+    tail -n 10 /var/log/letsencrypt/letsencrypt.log
+    rm -f "/etc/nginx/sites-available/${domain}.conf" "/etc/nginx/sites-enabled/${domain}.conf"
     systemctl reload nginx
   fi
 }
+
 # ▼▼▼▼▼▼ 添加证书自动续期逻辑 ▼▼▼▼▼▼
 setup_auto_renew() {
   [ -f "/usr/local/bin/ssl_renew.sh" ] && return  # 防止重复添加
