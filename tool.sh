@@ -866,15 +866,16 @@ caddy_main() {
 nginx_main() {
   while true; do
     clear
-    echo -e "${CYAN}=== Nginx 管理脚本 v2.1 ==="  # 版本升级到2.1
+    echo -e "${CYAN}=== Nginx 管理脚本 v2.1 ==="
     echo -e "1. 安装/更新Nginx"
     echo -e "2. 配置反向代理"
     echo -e "3. 删除网站配置"
     echo -e "4. 完全卸载Nginx"
     echo -e "5. 查看配置列表"
-    echo -e "0. 返回主菜单"
-    echo -e "${YELLOW}===============================${NC}"
+    echo -e "0. 返回主菜单${NC}"
+    echo -e "${YELLOW}=======================================${NC}"
     read -p "请输入选项: " nginx_choice
+    
     case $nginx_choice in
       1) install_nginx ;;
       2) configure_nginx_reverse_proxy ;;
@@ -887,8 +888,6 @@ nginx_main() {
     [ "$nginx_choice" != "0" ] && read -p "按回车键继续..."
   done
 }
-
-# 安装Nginx（修复源检测问题）
 install_nginx() {
   clear
   echo -e "${YELLOW}[1/5] 更新软件源...${NC}"
@@ -898,16 +897,14 @@ install_nginx() {
   apt-get install -y curl gnupg2 ca-certificates lsb-release ubuntu-keyring 2>&1 | \
     grep --line-buffered -E 'Unpacking|Setting up' | sed 's/^/  ▸ /'
   
-  # 修正系统源判断逻辑
   echo -e "\n${YELLOW}[3/5] 添加官方源...${NC}"
   os_id=$(grep -E '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
   os_codename=$(lsb_release -cs)
   
-  # 使用更可靠的源判断方式
   case "$os_id" in
     "debian") repo_url="http://nginx.org/packages/debian" ;;
     "ubuntu") repo_url="http://nginx.org/packages/ubuntu" ;;
-    *) repo_url="http://nginx.org/packages/ubuntu" ;;  # 默认处理
+    *) repo_url="http://nginx.org/packages/ubuntu" ;;
   esac
   
   curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor | \
@@ -920,7 +917,6 @@ install_nginx() {
   apt-get install -y nginx 2>&1 | \
     grep --line-buffered -E 'Unpacking|Setting up' | sed 's/^/  ▸ /'
   
-  # 增强初始化配置
   echo -e "\n${YELLOW}[5/5] 初始化配置...${NC}"
   mkdir -p /etc/nginx/sites-{available,enabled}
   sed -i 's/include \/etc\/nginx\/sites-enabled\/\*;/include \/etc\/nginx\/sites-enabled\/*.conf;/' /etc/nginx/nginx.conf
@@ -929,16 +925,11 @@ install_nginx() {
   echo -e "\n${GREEN}✅ Nginx 安装完成！版本信息：${NC}"
   nginx -v
 }
-
-# 配置反向代理（修复Certbot问题）
 configure_nginx_reverse_proxy() {
   [ ! -x "$(command -v nginx)" ] && echo -e "${RED}请先安装Nginx！${NC}" && return
-
-  # 强化域名验证
   while true; do
     read -p "请输入域名 (例: example.com): " domain
     if [[ "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-      # 检查域名是否已存在配置
       if [ -f "/etc/nginx/sites-available/${domain}.conf" ]; then
         echo -e "${RED}该域名配置已存在！${NC}"
         continue
@@ -947,38 +938,27 @@ configure_nginx_reverse_proxy() {
     fi
     echo -e "${RED}域名格式错误！请重新输入${NC}"
   done
-
-  read -p "请输入目标服务器地址 (默认: 127.0.0.1): " upstream
+  read -p "目标服务器地址 (默认: 127.0.0.1): " upstream
   upstream=${upstream:-127.0.0.1}
   [[ ! $upstream =~ ^[0-9.]+$ ]] && upstream=127.0.0.1
-
-  read -p "请输入目标端口 (默认: 80): " port
+  read -p "目标端口 (默认: 80): " port
   port=${port:-80}
   [[ ! $port =~ ^[0-9]+$ ]] && port=80
-
-  # 确保目录存在
   mkdir -p /etc/nginx/sites-{available,enabled}
   mkdir -p /var/www/html
   chown -R www-data:www-data /var/www/html
-
-  # 生成配置文件
   config_path="/etc/nginx/sites-available/${domain}.conf"
-  
-  echo -e "${YELLOW}[1/4] 创建配置文件...${NC}"
   cat > "$config_path" <<EOF
 server {
     listen 80;
     server_name $domain;
-    
     root /var/www/html;
     index index.html index.htm;
     
-    # Certbot验证目录
     location ^~ /.well-known/acme-challenge/ {
         default_type "text/plain";
         root /var/www/html;
     }
-
     location / {
         proxy_pass http://$upstream:$port;
         proxy_set_header Host \$host;
@@ -991,11 +971,7 @@ server {
     }
 }
 EOF
-
-  # 创建软链接
   ln -sf "$config_path" "/etc/nginx/sites-enabled/${domain}.conf"
-
-  # 验证配置并重载
   if ! nginx -t &>/dev/null; then
     echo -e "${RED}Nginx配置验证失败！错误详情：${NC}"
     nginx -t
@@ -1005,8 +981,6 @@ EOF
   
   systemctl reload nginx
   echo -e "${GREEN}基本HTTP配置已应用并生效${NC}"
-
-  # HTTPS配置
   echo -e "${CYAN}是否启用HTTPS？${NC}"
   select ssl_choice in "自动申请证书" "手动提供证书" "跳过HTTPS"; do
     case $ssl_choice in
@@ -1015,81 +989,23 @@ EOF
         apt-get update &>/dev/null
         apt-get install -y certbot python3-certbot-nginx 2>&1 | sed 's/^/  ▸ /'
         
-        echo -e "${YELLOW}[3/4] 申请SSL证书...${NC}"
-        
-        # 使用certbot自动配置nginx
         if certbot --nginx -d $domain --non-interactive --agree-tos --email admin@$domain --redirect; then
-          echo -e "${YELLOW}[4/4] 配置自动续期...${NC}"
-          # 设置证书自动续期
           (crontab -l 2>/dev/null | grep -v certbot; echo "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
           echo -e "${GREEN}✅ HTTPS配置成功！访问地址: https://$domain${NC}"
         else
-          # 尝试standalone模式作为备选
-          echo -e "${YELLOW}Nginx插件失败，尝试standalone模式...${NC}"
-          systemctl stop nginx  # 停止Nginx释放80端口
-          
+          systemctl stop nginx
           if certbot certonly --standalone -d $domain --non-interactive --agree-tos --email admin@$domain; then
-            # 自动配置Nginx使用证书
-            cat > "$config_path" <<EOF
-server {
-    listen 80;
-    server_name $domain;
-    return 301 https://\$host\$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name $domain;
-    
-    ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
-    ssl_trusted_certificate /etc/letsencrypt/live/$domain/chain.pem;
-    
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-    ssl_ciphers EECDH+AESGCM:EDH+AESGCM;
-    ssl_ecdh_curve secp384r1;
-    ssl_session_timeout 10m;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_tickets off;
-    
-    # HSTS (63072000 seconds = 2 years)
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
-    
-    root /var/www/html;
-    index index.html index.htm;
-    
-    location ^~ /.well-known/acme-challenge/ {
-        default_type "text/plain";
-        root /var/www/html;
-    }
-
-    location / {
-        proxy_pass http://$upstream:$port;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-EOF
+            sudo sed -i "/server_name $domain;/a \
+    listen 443 ssl http2;\n\
+    listen [::]:443 ssl http2;\n\
+    ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;\n\
+    ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;\n\
+    ssl_protocols TLSv1.2 TLSv1.3;" "$config_path"
             systemctl start nginx
-            if nginx -t &>/dev/null; then
-              systemctl reload nginx
-              echo -e "${YELLOW}[4/4] 配置自动续期...${NC}"
-              # 设置证书自动续期
-              (crontab -l 2>/dev/null | grep -v certbot; echo "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
-              echo -e "${GREEN}✅ HTTPS配置成功！访问地址: https://$domain${NC}"
-            else
-              echo -e "${RED}SSL配置验证失败！错误详情：${NC}"
-              nginx -t
-              systemctl start nginx
-            fi
+            (crontab -l 2>/dev/null | grep -v certbot; echo "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
+            echo -e "${GREEN}✅ HTTPS配置成功！访问地址: https://$domain${NC}"
           else
-            systemctl start nginx  # 确保Nginx重新启动
+            systemctl start nginx
             echo -e "${RED}证书申请失败！回退到HTTP配置${NC}"
           fi
         fi
@@ -1097,9 +1013,8 @@ EOF
         ;;
         
       "手动提供证书")
-        echo -e "${YELLOW}[2/4] 配置手动证书...${NC}"
-        read -p "请输入SSL证书路径 (fullchain.pem): " ssl_cert
-        read -p "请输入SSL密钥路径 (privkey.pem): " ssl_key
+        read -p "SSL证书路径 (fullchain.pem): " ssl_cert
+        read -p "SSL密钥路径 (privkey.pem): " ssl_key
         
         if [ -f "$ssl_cert" ] && [ -f "$ssl_key" ]; then
           cat > "$config_path" <<EOF
@@ -1108,22 +1023,12 @@ server {
     server_name $domain;
     return 301 https://\$host\$request_uri;
 }
-
 server {
     listen 443 ssl http2;
     server_name $domain;
-    
     ssl_certificate $ssl_cert;
     ssl_certificate_key $ssl_key;
-    
     ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-    ssl_ciphers EECDH+AESGCM:EDH+AESGCM;
-    ssl_ecdh_curve secp384r1;
-    ssl_session_timeout 10m;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_tickets off;
-    
     root /var/www/html;
     index index.html index.htm;
     
@@ -1139,14 +1044,8 @@ server {
     }
 }
 EOF
-          
-          if nginx -t &>/dev/null; then
-            systemctl reload nginx
-            echo -e "${GREEN}✅ 手动SSL配置成功！访问地址: https://$domain${NC}"
-          else
-            echo -e "${RED}SSL配置验证失败！错误详情：${NC}"
-            nginx -t
-          fi
+          systemctl reload nginx
+          echo -e "${GREEN}✅ 手动SSL配置成功！访问地址: https://$domain${NC}"
         else
           echo -e "${RED}证书文件不存在，保留HTTP配置${NC}"
         fi
@@ -1154,75 +1053,50 @@ EOF
         ;;
         
       "跳过HTTPS")
-        echo -e "${YELLOW}[2/4] 保留HTTP配置${NC}"
         break
         ;;
     esac
   done
+  if sudo ss -ltnp | grep -q 'nginx.*443'; then
+    echo -e "${GREEN}✅ 443端口监听正常${NC}"
+  else
+    sudo sed -i "/server_name $domain;/a \
+    listen 443 ssl http2;\n\
+    listen [::]:443 ssl http2;" "$config_path"
+    sudo nginx -t && sudo systemctl reload nginx
+  fi
 }
-
-# ▼▼▼▼▼▼ 添加证书自动续期逻辑 ▼▼▼▼▼▼
-setup_auto_renew() {
-  [ -f "/usr/local/bin/ssl_renew.sh" ] && return  # 防止重复添加
-  
-  echo -e "${YELLOW}[+] 配置证书自动续期...${NC}"
-  renew_script="/usr/local/bin/ssl_renew.sh"
-  cat > "$renew_script" <<EOF
-#!/bin/bash
-echo "[SSL Renew] 执行时间: \$(date)"
-if /usr/bin/certbot renew --quiet --post-hook "systemctl reload nginx"; then
-  echo "证书续期成功 ✅"
-else
-  echo -e "证书续期失败 ❌ 错误码: \$?\n尝试强制续期..."
-  /usr/bin/certbot renew --force-renewal --quiet --post-hook "systemctl reload nginx"
-fi
-EOF
-  chmod +x "$renew_script"
-  (crontab -l 2>/dev/null; echo "0 2 * * * $renew_script") | crontab -
-  echo -e "${GREEN}✅ 已启用SSL证书自动续期 (每天2:00 AM)${NC}"
-}
-
-# 删除配置（增加存在性检查）
 remove_nginx_config() {
   echo -e "${YELLOW}现有配置列表：${NC}"
-  ls /etc/nginx/sites-enabled/*.conf 2>/dev/null | xargs -n1 basename || \
-    echo -e "${RED}无可用配置${NC}"
+  ls /etc/nginx/sites-enabled/*.conf 2>/dev/null | xargs -n1 basename || echo -e "${RED}无可用配置${NC}"
   
-  read -p "输入要删除的配置文件名 (例: example.com.conf): " config
+  read -p "输入要删除的配置文件名: " config
   [ -z "$config" ] && return
   
   if [ -f "/etc/nginx/sites-enabled/$config" ]; then
-    rm -f "/etc/nginx/sites-enabled/$config"
-    rm -f "/etc/nginx/sites-available/$config"
+    rm -f "/etc/nginx/sites-enabled/$config" "/etc/nginx/sites-available/$config"
     systemctl reload nginx
     echo -e "${GREEN}✅ 配置已移除！${NC}"
   else
     echo -e "${RED}配置不存在！${NC}"
   fi
 }
-
-# 完全卸载（增加确认步骤）
 uninstall_nginx() {
   echo -e "${RED}⚠️  即将完全卸载Nginx！${NC}"
   read -p "确认卸载？(输入大写YES确认): " confirm
   [[ $confirm != "YES" ]] && return
-
   systemctl stop nginx
   apt-get purge -y nginx* 2>/dev/null
   rm -rf /etc/nginx /var/log/nginx /var/www/html
   apt-get autoremove -y
   echo -e "${GREEN}✅ Nginx已彻底移除！${NC}"
 }
-
-# 查看配置（优化显示格式）
 show_nginx_configs() {
   echo -e "${CYAN}启用的配置：${NC}"
-  ls -1 /etc/nginx/sites-enabled/*.conf 2>/dev/null | xargs -i basename {} || \
-    echo -e "${YELLOW}无启用配置${NC}"
+  ls -1 /etc/nginx/sites-enabled/*.conf 2>/dev/null | xargs -i basename {} || echo -e "${YELLOW}无启用配置${NC}"
   
   echo -e "\n${CYAN}可用的配置：${NC}"
-  ls -1 /etc/nginx/sites-available/*.conf 2>/dev/null | xargs -i basename {} || \
-    echo -e "${YELLOW}无可用配置${NC}"
+  ls -1 /etc/nginx/sites-available/*.conf 2>/dev/null | xargs -i basename {} || echo -e "${YELLOW}无可用配置${NC}"
 }
 
 # ======================= IP优先级设置 =======================
