@@ -863,36 +863,35 @@ caddy_main() {
 }
 
 # ====================== Nginx 管理模块 =======================
-nginx_main() {  
+nginx_main() {
     clear
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/GPT-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
+    # 定义临时脚本路径
     local nginx_script="/tmp/nginx-manager.sh"
     
     # 下载管理脚本
-    if ! curl -Ls -o "$nginx_script" https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/nginx-manager.sh; then
+    if wget -O "$nginx_script" --no-check-certificate \
+        https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/nginx-manager.sh; then
+        
+        # 添加执行权限
+        chmod +x "$nginx_script"
+        
+        # 执行管理脚本
+        "$nginx_script"
+        
+        # 清理临时文件
+        rm -f "$nginx_script"
+    else
         echo -e "${RED}错误：Nginx 管理脚本下载失败！${NC}"
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
     fi
     
-    # 添加执行权限
-    chmod +x "$nginx_script"
-    
-    # 执行脚本并保留退出状态
-    "$nginx_script"
-    local exit_status=$?
-    
-    # 清理临时文件
-    rm -f "$nginx_script"
-    
-    # 根据退出状态处理返回逻辑
-    if [ $exit_status -ne 0 ]; then
-        read -n 1 -s -r -p "${RED}Nginx 管理执行异常，按任意键返回主菜单...${NC}"
-    fi
-    return $exit_status
+    # 返回主菜单前等待
+    read -n 1 -s -r -p "操作已完成，按任意键返回主菜单..."
 }
 
 # ======================= IP优先级设置 =======================
