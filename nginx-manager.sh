@@ -83,7 +83,7 @@ install_nginx() {
 
     systemctl enable --now nginx
     
-    # 增强版错误处理
+    # 错误处理
     if ! systemctl is-active --quiet nginx; then
         echo -e "${RED}启动失败，执行深度修复...${NC}"
         
