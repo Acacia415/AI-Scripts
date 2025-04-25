@@ -862,31 +862,25 @@ caddy_main() {
     done
 }
 
-# ====================== Nginx 管理模块 =======================
+# ====================== 修改后的Nginx管理函数 =======================
 nginx_main() {
     clear
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/GPT-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    # 定义临时脚本路径
     local nginx_script="/tmp/nginx-manager.sh"
     
-    # 下载管理脚本
     if wget -O "$nginx_script" --no-check-certificate \
         https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/nginx-manager.sh; then
-        
-        # 添加执行权限
         chmod +x "$nginx_script"
-        
-        # 执行管理脚本
         "$nginx_script"
-        
-        # 清理临时文件
         rm -f "$nginx_script"
     else
         echo -e "${RED}错误：Nginx 管理脚本下载失败！${NC}"
     fi
+    
+}
 
 # ======================= IP优先级设置 =======================
 modify_ip_preference() {
