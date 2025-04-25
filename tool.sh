@@ -933,7 +933,11 @@ install_nginx() {
 # 配置反向代理（关键修复点）
 configure_nginx_reverse_proxy() {
   [ ! -x "$(command -v nginx)" ] && echo -e "${RED}请先安装Nginx！${NC}" && return
-  
+
+  # ▼▼▼▼▼▼ 新增的临时配置路径 ▼▼▼▼▼▼
+  temp_config="/etc/nginx/sites-available/temp_${domain}.conf"
+  enabled_config="/etc/nginx/sites-enabled/${domain}.conf"
+
   # 强化域名验证
   while true; do
     read -p "请输入域名 (例: example.com): " domain
@@ -954,13 +958,12 @@ configure_nginx_reverse_proxy() {
   port=${port:-80}
   [[ ! $port =~ ^[0-9]+$ ]] && port=80
 
-  # 生成基础配置模板（关键修复）
-  config_file="/etc/nginx/sites-available/${domain}.conf"
-  cat > $config_file <<EOF
-# 必须保留的HTTP配置块（用于证书续期）
+  # ▼▼▼▼▼▼ 生成临时配置文件（代替原config_file） ▼▼▼▼▼▼
+  echo -e "${YELLOW}[1/4] 应用临时配置...${NC}"
+  cat > "$temp_config" <<EOF
 server {
     listen 80;
-    server_name $domain;  # 严格匹配域名
+    server_name $domain;
     
     # Certbot证书验证路径
     location ^~ /.well-known/acme-challenge/ {
@@ -979,22 +982,15 @@ server {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
     }
-
-    access_log /var/log/nginx/${domain}.access.log;
-    error_log /var/log/nginx/${domain}.error.log;
 }
 EOF
 
-  # 应用基础配置
-  echo -e "${YELLOW}[1/4] 应用临时配置...${NC}"
-  ln -sf "$config_file" /etc/nginx/sites-enabled/
-  
-  # 强化配置验证
-  nginx -t 2>/dev/null
-  if [ $? -ne 0 ]; then
-    echo -e "${RED}基础配置验证失败！错误详情：${NC}"
+  # ▼▼▼▼▼▼ 新增配置验证和重载 ▼▼▼▼▼▼
+  ln -sf "$temp_config" "$enabled_config"
+  if ! nginx -t; then
+    echo -e "${RED}临时配置验证失败！错误详情：${NC}"
     nginx -t 2>&1 | sed 's/^/  ▸ /'
-    rm -f "$config_file" "/etc/nginx/sites-enabled/${domain}.conf"
+    rm -f "$temp_config" "$enabled_config"
     return 1
   fi
   systemctl reload nginx
@@ -1010,16 +1006,16 @@ EOF
         fi
 
         echo -e "${YELLOW}[3/4] 申请SSL证书...${NC}"
-        # 添加--nginx参数并捕获错误
         if certbot --nginx -d $domain --non-interactive --agree-tos --email admin@$domain --keep-until-expiring; then
           echo -e "${YELLOW}[4/4] 配置自动续期...${NC}"
-          (crontab -l 2>/dev/null; echo "0 3 * * /usr/bin/certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
+          (crontab -l 2>/dev/null; echo "0 3 * * * /usr/bin/certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
+          # ▼▼▼▼▼▼ 替换临时配置为正式配置 ▼▼▼▼▼▼
+          mv "$temp_config" "/etc/nginx/sites-available/${domain}.conf"
         else
           echo -e "${RED}证书申请失败！回滚配置...${NC}"
-          # 修正回滚命令
           certbot --nginx --rollback -d $domain --non-interactive 2>/dev/null || \
             echo -e "${YELLOW}自动回滚失败，手动清理...${NC}"
-          rm -f "$config_file" "/etc/nginx/sites-enabled/${domain}.conf"
+          rm -f "$temp_config" "$enabled_config"
           systemctl reload nginx
           return 1
         fi
@@ -1032,21 +1028,21 @@ EOF
         
       "跳过HTTPS")
         echo -e "${YELLOW}[2/4] 跳过HTTPS配置${NC}"
+        mv "$temp_config" "/etc/nginx/sites-available/${domain}.conf"
         break
         ;;
     esac
   done
 
-  # 最终配置验证
-  echo -e "${YELLOW}[+] 最终配置检查...${NC}"
+  # ▼▼▼▼▼▼ 最终验证和清理 ▼▼▼▼▼▼
   if nginx -t; then
     systemctl reload nginx
     echo -e "${GREEN}✅ 配置生效！访问地址: http://$domain${NC}"
     [ "$ssl_choice" = "自动申请证书" ] && echo -e "HTTPS地址: ${GREEN}https://$domain${NC}"
   else
-    echo -e "${RED}配置验证失败！错误详情：${NC}"
+    echo -e "${RED}最终配置验证失败！错误详情：${NC}"
     nginx -t 2>&1 | sed 's/^/  ▸ /'
-    rm -f "/etc/nginx/sites-enabled/${domain}.conf"
+    rm -f "$enabled_config"
     systemctl reload nginx
   fi
 }
