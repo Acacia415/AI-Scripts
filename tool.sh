@@ -927,13 +927,14 @@ install_nginx() {
   echo -e "\n${GREEN}✅ Nginx 安装完成！版本信息：${NC}"
   nginx -v
 }
-# 配置反向代理（关键修复点）
-configure_nginx_reverse_proxy() {
-  [ ! -x "$(command -v nginx)" ] && echo -e "${RED}请先安装Nginx！${NC}" && return
 
-  # 强化域名验证
+# 配置反向代理（关键修复点）
+
+  [ ! -x "$(command -v nginx)" ] && echo -e "${RED}请先安装Nginx！${NC}" && return
+  # 强化域名验证（增加小写转换）
   while true; do
     read -p "请输入域名 (例: example.com): " domain
+    domain=$(echo "$domain" | tr '[:upper:]' '[:lower:]')  # 转换为小写
     if [[ "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
       [ -f "/etc/nginx/sites-available/${domain}.conf" ] && \
         echo -e "${RED}该域名配置已存在！${NC}" && continue
@@ -941,53 +942,60 @@ configure_nginx_reverse_proxy() {
     fi
     echo -e "${RED}域名格式错误！请重新输入${NC}"
   done
-
-  # 生成基础配置
+  # ▼▼▼▼▼▼ 生成增强版配置文件 ▼▼▼▼▼▼
   echo -e "${YELLOW}[1/4] 应用临时配置...${NC}"
   cat > "/etc/nginx/sites-available/${domain}.conf" <<EOF
 server {
     listen 80;
-    server_name $domain;
+    server_name ${domain} www.${domain};  # 增加www子域支持
     root /var/www/html;
     
+    # Certbot证书验证路径（增加gzip禁用）
     location ^~ /.well-known/acme-challenge/ {
         allow all;
+        gzip off;  # 防止gzip干扰验证文件
         try_files \$uri \$uri/ =404;
     }
-
     location / {
-        proxy_pass http://$upstream:$port;
+        proxy_pass http://${upstream}:${port};
         include proxy_params;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 EOF
-
-  # 启用配置并测试
+  # ▼▼▼▼▼▼ 强制刷新配置缓存 ▼▼▼▼▼▼
   ln -sf "/etc/nginx/sites-available/${domain}.conf" "/etc/nginx/sites-enabled/"
   nginx -t && systemctl reload nginx
-
-  # 自动申请证书（修复版）
-  echo -e "${YELLOW}[2/4] 安装Certbot...${NC}"
-  if ! dpkg -l | grep -q python3-certbot-nginx; then
-    apt-get install -y certbot python3-certbot-nginx 2>&1 | sed 's/^/  ▸ /'
-  fi
-
+  sleep 2  # 等待配置生效
+  # ▼▼▼▼▼▼ 修复Certbot参数 ▼▼▼▼▼▼
   echo -e "${YELLOW}[3/4] 申请SSL证书...${NC}"
-  if certbot --nginx --redirect -d $domain \
-             --non-interactive \
-             --agree-tos \
-             --email admin@$domain; then
+  if certbot --nginx \
+    --nginx-server-root=/etc/nginx \  # 明确指定配置路径
+    -d ${domain} \
+    -d www.${domain} \  # 包含www子域
+    --non-interactive \
+    --agree-tos \
+    --email admin@${domain} \
+    --redirect; then  # 自动设置HTTP跳转HTTPS
+    
+    # 修复续期配置
     echo -e "${YELLOW}[4/4] 配置自动续期...${NC}"
-    (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
-    echo -e "${GREEN}✅ SSL证书部署成功！${NC}"
+    (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --post-hook 'nginx -t && systemctl reload nginx'") | crontab -
+    
+    # 验证证书部署
+    echo -e "${GREEN}✅ SSL证书部署成功！验证信息："
+    openssl x509 -in /etc/letsencrypt/live/${domain}/cert.pem -noout -dates
   else
-    echo -e "${RED}证书申请失败！错误原因：${NC}"
-    tail -n 10 /var/log/letsencrypt/letsencrypt.log
+    echo -e "${RED}证书申请失败！详细日志：${NC}"
+    tail -n 20 /var/log/letsencrypt/letsencrypt.log
+    # 自动回滚配置
     rm -f "/etc/nginx/sites-available/${domain}.conf" "/etc/nginx/sites-enabled/${domain}.conf"
     systemctl reload nginx
+    return 1
   fi
 }
 
