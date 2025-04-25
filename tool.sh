@@ -932,118 +932,128 @@ install_nginx() {
 
 # 配置反向代理（关键修复点）
 configure_nginx_reverse_proxy() {
-  [ ! -x "$(command -v nginx)" ] && echo -e "${RED}请先安装Nginx！${NC}" && return
+  clear
+  echo -e "${BLUE}===== 配置 Nginx 反向代理 =====${NC}"
+  echo
+  read -rp "请输入你要绑定的域名（如 cdn.example.com）: " domain
+  echo
+  read -rp "请输入你要代理到的本地服务端口（如 3000）: " port
+  echo
+  read -rp "请输入上游地址（默认 localhost）: " upstream
+  upstream="${upstream:-localhost}"
+  echo
 
-  # ▼▼▼▼▼▼ 新增的临时配置路径 ▼▼▼▼▼▼
-  temp_config="/etc/nginx/sites-available/temp_${domain}.conf"
+  echo -e "${YELLOW}开始配置反向代理...${NC}"
+
+  echo -e "${YELLOW}[1/4] 生成 Nginx 配置文件...${NC}"
+  config_file="/etc/nginx/sites-available/${domain}.conf"
   enabled_config="/etc/nginx/sites-enabled/${domain}.conf"
 
-  # 强化域名验证
-  while true; do
-    read -p "请输入域名 (例: example.com): " domain
-    if [[ "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-      # 检查域名是否已存在配置
-      [ -f "/etc/nginx/sites-available/${domain}.conf" ] && \
-        echo -e "${RED}该域名配置已存在！${NC}" && continue
-      break
-    fi
-    echo -e "${RED}域名格式错误！请重新输入${NC}"
-  done
-
-  read -p "请输入目标服务器地址 (默认: 127.0.0.1): " upstream
-  upstream=${upstream:-127.0.0.1}
-  [[ ! $upstream =~ ^[0-9.]+$ ]] && upstream=127.0.0.1
-
-  read -p "请输入目标端口 (默认: 80): " port
-  port=${port:-80}
-  [[ ! $port =~ ^[0-9]+$ ]] && port=80
-
-  # ▼▼▼▼▼▼ 生成临时配置文件（关键修复点） ▼▼▼▼▼▼
-  echo -e "${YELLOW}[1/4] 应用临时配置...${NC}"
-  cat > "$temp_config" <<EOF
+  cat > "$config_file" <<EOF
 server {
     listen 80;
-    server_name $domain;  # 强制域名匹配
-    root /var/www/html;   # 新增默认root路径
-    
-    # Certbot证书验证路径
-    location ^~ /.well-known/acme-challenge/ {
-        allow all;
-        try_files \$uri \$uri/ =404;
-    }
+    server_name $domain;
 
     location / {
         proxy_pass http://$upstream:$port;
-        include proxy_params;  # 引用标准化代理头
+        include proxy_params;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
     }
+
+    location ^~ /.well-known/acme-challenge/ {
+        allow all;
+        root /var/www/html;
+    }
 }
 EOF
 
-  # ▼▼▼▼▼▼ 强制覆盖正式配置 ▼▼▼▼▼▼
-  mv "$temp_config" "/etc/nginx/sites-available/${domain}.conf"
-  ln -sf "/etc/nginx/sites-available/${domain}.conf" "$enabled_config"
+  ln -sf "$config_file" "$enabled_config"
+  nginx -t && systemctl reload nginx
 
-  # ▼▼▼▼▼▼ 增强配置验证 ▼▼▼▼▼▼
-  if ! nginx -t 2>/dev/null; then
-    echo -e "${RED}临时配置验证失败！错误详情：${NC}"
-    nginx -t 2>&1 | sed 's/^/  ▸ /'
-    rm -f "/etc/nginx/sites-available/${domain}.conf" "$enabled_config"
-    return 1
-  fi
-  systemctl reload nginx
+  echo
+  echo -e "${YELLOW}是否自动为 $domain 申请 HTTPS 证书？${NC}"
+  echo "1) 自动申请证书"
+  echo "2) 稍后手动配置"
+  read -rp "请选择 [1-2]: " cert_choice
 
-  # ▼▼▼▼▼▼ 强制添加默认root目录（Certbot依赖项） ▼▼▼▼▼▼
-  [ ! -d "/var/www/html" ] && mkdir -p /var/www/html && chown -R www-data:www-data /var/www/html
+  case "$cert_choice" in
+  1 | "自动申请证书")
+    echo -e "${YELLOW}[2/4] 安装 Certbot...${NC}"
+    if ! dpkg -l | grep -q python3-certbot; then
+      apt-get install -y certbot python3-certbot 2>&1 | sed 's/^/  ▸ /'
+    fi
 
-  # HTTPS配置（关键修复部分）
-  echo -e "${CYAN}是否启用HTTPS？${NC}"
-  select ssl_choice in "自动申请证书" "手动提供证书" "跳过HTTPS"; do
-    case $ssl_choice in
-      "自动申请证书")
-        echo -e "${YELLOW}[2/4] 安装Certbot...${NC}"
-        if ! dpkg -l | grep -q python3-certbot-nginx; then
-          apt-get install -y certbot python3-certbot-nginx 2>&1 | sed 's/^/  ▸ /'
-        fi
+    echo -e "${YELLOW}[3/4] 申请证书 (使用 Webroot)...${NC}"
+    webroot_path="/var/www/html"
+    mkdir -p "$webroot_path"
+    chown -R www-data:www-data "$webroot_path"
 
-        echo -e "${YELLOW}[3/4] 申请SSL证书...${NC}"
-        # ▼▼▼▼▼▼ 强制指定nginx配置路径 ▼▼▼▼▼▼
-        if certbot --nginx --nginx-server-root=/etc/nginx -d $domain --non-interactive --agree-tos --email admin@$domain; then
-          echo -e "${YELLOW}[4/4] 配置自动续期...${NC}"
-          (crontab -l 2>/dev/null; echo "0 3 * * * /usr/bin/certbot renew --quiet --post-hook 'systemctl reload nginx'") | crontab -
-        else
-          echo -e "${RED}证书申请失败！回滚配置...${NC}"
-          rm -f "/etc/nginx/sites-available/${domain}.conf" "$enabled_config"
-          systemctl reload nginx
-          return 1
-        fi
-        break
-        ;;
-        
-      "手动提供证书")
-        # 手动证书配置逻辑（保持不变）
-        ;;
-        
-      "跳过HTTPS")
-        echo -e "${YELLOW}[2/4] 跳过HTTPS配置${NC}"
-        break
-        ;;
-    esac
-  done
+    if certbot certonly --webroot -w "$webroot_path" -d "$domain" --email admin@$domain --agree-tos --non-interactive; then
+      echo -e "${YELLOW}[4/4] 添加 SSL 配置到 Nginx...${NC}"
 
-  # ▼▼▼▼▼▼ 最终验证和清理 ▼▼▼▼▼▼
-  if nginx -t; then
-    systemctl reload nginx
-    echo -e "${GREEN}✅ 配置生效！访问地址: http://$domain${NC}"
-    [ "$ssl_choice" = "自动申请证书" ] && echo -e "HTTPS地址: ${GREEN}https://$domain${NC}"
-  else
-    echo -e "${RED}最终配置验证失败！错误详情：${NC}"
-    nginx -t 2>&1 | sed 's/^/  ▸ /'
-    rm -f "$enabled_config"
-    systemctl reload nginx
-  fi
+      ssl_cert_path="/etc/letsencrypt/live/$domain/fullchain.pem"
+      ssl_key_path="/etc/letsencrypt/live/$domain/privkey.pem"
+
+      cat >> "$config_file" <<EOF
+
+server {
+    listen 443 ssl;
+    server_name $domain;
+
+    ssl_certificate $ssl_cert_path;
+    ssl_certificate_key $ssl_key_path;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    root /var/www/html;
+
+    location / {
+        proxy_pass http://$upstream:$port;
+        include proxy_params;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    location ^~ /.well-known/acme-challenge/ {
+        allow all;
+        root $webroot_path;
+    }
+}
+EOF
+
+      if nginx -t; then
+        systemctl reload nginx
+        echo -e "${GREEN}✅ 证书申请成功，并启用了 HTTPS！${NC}"
+        echo -e "访问地址: ${GREEN}https://$domain${NC}"
+      else
+        echo -e "${RED}❌ 添加 SSL 配置后 Nginx 配置错误，请检查：${NC}"
+        nginx -t 2>&1 | sed 's/^/  ▸ /'
+      fi
+
+      setup_auto_renew
+    else
+      echo -e "${RED}❌ 证书申请失败，回滚配置...${NC}"
+      rm -f "$config_file" "$enabled_config"
+      systemctl reload nginx
+      return 1
+    fi
+    ;;
+  2 | *)
+    echo -e "${YELLOW}跳过证书申请。你可以稍后手动使用 Certbot 配置 HTTPS。${NC}"
+    ;;
+  esac
+
+  echo
+  echo -e "${GREEN}✅ 反向代理配置完成！${NC}"
+  echo -e "你现在可以通过以下地址访问你的服务："
+  echo -e "  ${CYAN}http://$domain${NC}"
+  echo -e "或（启用 HTTPS 后）："
+  echo -e "  ${CYAN}https://$domain${NC}"
+  echo
 }
 
 # ▼▼▼▼▼▼ 添加证书自动续期逻辑 ▼▼▼▼▼▼
