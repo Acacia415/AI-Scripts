@@ -886,13 +886,7 @@ nginx_main() {
         rm -f "$nginx_script"
     else
         echo -e "${RED}错误：Nginx 管理脚本下载失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
     fi
-    
-    # 返回主菜单前等待
-    read -n 1 -s -r -p "操作已完成，按任意键返回主菜单..."
-}
 
 # ======================= IP优先级设置 =======================
 modify_ip_preference() {
