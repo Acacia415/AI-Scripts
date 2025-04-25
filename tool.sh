@@ -866,7 +866,7 @@ caddy_main() {
 nginx_main() {
   while true; do
     clear
-    echo -e "${CYAN}=== Nginx 管理脚本 v2.1 ==="  # 版本升级到2.1
+    echo -e "${CYAN}=== Nginx 管理脚本 v2.2 ==="  # 版本升级到2.2
     echo -e "1. 安装/更新Nginx"
     echo -e "2. 配置反向代理"
     echo -e "3. 删除网站配置"
@@ -886,48 +886,6 @@ nginx_main() {
     esac
     [ "$nginx_choice" != "0" ] && read -p "按回车键继续..."
   done
-}
-
-# 安装Nginx（修复源检测问题）
-install_nginx() {
-  clear
-  echo -e "${YELLOW}[1/5] 更新软件源...${NC}"
-  apt-get update 2>&1 | grep -v '^$' | sed 's/^/  ▸ /'
-  
-  echo -e "\n${YELLOW}[2/5] 安装依赖项...${NC}"
-  apt-get install -y curl gnupg2 ca-certificates lsb-release ubuntu-keyring 2>&1 | \
-    grep --line-buffered -E 'Unpacking|Setting up' | sed 's/^/  ▸ /'
-  
-  # 修正系统源判断逻辑
-  echo -e "\n${YELLOW}[3/5] 添加官方源...${NC}"
-  os_id=$(grep -E '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
-  os_codename=$(lsb_release -cs)
-  
-  # 使用更可靠的源判断方式
-  case "$os_id" in
-    "debian") repo_url="http://nginx.org/packages/debian" ;;
-    "ubuntu") repo_url="http://nginx.org/packages/ubuntu" ;;
-    *) repo_url="http://nginx.org/packages/ubuntu" ;;  # 默认处理
-  esac
-  
-  curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor | \
-    tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
-  echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] $repo_url $os_codename nginx" | \
-    tee /etc/apt/sources.list.d/nginx.list | sed 's/^/  ▸ /'
-  
-  echo -e "\n${YELLOW}[4/5] 安装Nginx...${NC}"
-  apt-get update 2>&1 | grep -v '^$' | sed 's/^/  ▸ /'
-  apt-get install -y nginx 2>&1 | \
-    grep --line-buffered -E 'Unpacking|Setting up' | sed 's/^/  ▸ /'
-  
-  # 增强初始化配置
-  echo -e "\n${YELLOW}[5/5] 初始化配置...${NC}"
-  mkdir -p /etc/nginx/sites-{available,enabled}
-  sed -i 's/include \/etc\/nginx\/sites-enabled\/\*;/include \/etc\/nginx\/sites-enabled\/*.conf;/' /etc/nginx/nginx.conf
-  [ ! -d "/var/www/html" ] && mkdir -p /var/www/html && chown -R www-data:www-data /var/www/html
-  systemctl restart nginx
-  echo -e "\n${GREEN}✅ Nginx 安装完成！版本信息：${NC}"
-  nginx -v
 }
 
 # 配置反向代理（最终修复版）
@@ -968,10 +926,10 @@ configure_nginx_reverse_proxy() {
 server {
     listen 80;
     server_name $domain;
-    root /var/www/html;  # 必须声明root路径
     
-    # Certbot验证路径（增强权限）
+    # Certbot验证路径（关键修复）
     location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
         allow all;
         default_type "text/plain";
         try_files \$uri \$uri/ =404;
@@ -990,10 +948,10 @@ server {
 }
 EOF
 
-  # ▼▼▼▼▼▼ 强制创建验证目录 ▼▼▼▼▼▼
-  mkdir -p /var/www/html/.well-known/acme-challenge
-  chown -R www-data:www-data /var/www/html
-  chmod -R 755 /var/www/html
+  # ▼▼▼▼▼▼ 创建专用验证目录 ▼▼▼▼▼▼
+  mkdir -p /var/www/certbot/.well-known/acme-challenge
+  chown -R www-data:www-data /var/www/certbot
+  chmod -R 755 /var/www/certbot
 
   # ▼▼▼▼▼▼ 应用配置 ▼▼▼▼▼▼
   echo -e "${YELLOW}[2/4] 验证配置...${NC}"
@@ -1014,19 +972,40 @@ EOF
         echo -e "${YELLOW}[3/4] 安装Certbot...${NC}"
         apt-get install -y certbot python3-certbot-nginx 2>/dev/null | sed 's/^/  ▸ /'
 
-        echo -e "${YELLOW}[4/4] 申请SSL证书...${NC}"
-        # ▼▼▼▼▼▼ 关键修复参数 ▼▼▼▼▼▼
-        if certbot --nginx \
-          --nginx-server-root=/etc/nginx \
+        echo -e "${YELLOW}[4/4] 申请SSL证书（关键修复）...${NC}"
+        if certbot certonly \
+          --webroot \
+          -w /var/www/certbot \
           -d $domain \
           --non-interactive \
           --agree-tos \
           --email admin@$domain \
-          --keep-until-expiring; then
-          
-          # 更新配置链接
-          ln -sf "$final_config" "$enabled_config"
+          --force-renewal; then
+
+          # 手动注入SSL配置
+          cat >> "$final_config" <<EOF
+
+# 自动生成的SSL配置
+server {
+    listen 443 ssl;
+    server_name $domain;
+    ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
+    
+    location / {
+        proxy_pass http://$upstream:$port;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
           systemctl reload nginx
+          setup_auto_renew
           echo -e "${GREEN}✅ SSL证书安装成功！${NC}"
         else
           echo -e "${RED}证书申请失败！错误码: $?${NC}"
@@ -1058,8 +1037,8 @@ EOF
 
 # ▼▼▼▼▼▼ 添加证书自动续期逻辑 ▼▼▼▼▼▼
 setup_auto_renew() {
-  [ -f "/usr/local/bin/ssl_renew.sh" ] && return  # 防止重复添加
-  
+  [ -f "/usr/local/bin/ssl_renew.sh" ] && return
+
   echo -e "${YELLOW}[+] 配置证书自动续期...${NC}"
   renew_script="/usr/local/bin/ssl_renew.sh"
   cat > "$renew_script" <<EOF
