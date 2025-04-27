@@ -19,6 +19,27 @@ check_root() {
 check_dns_resolution() {
     local domain=$1
     echo -e "${YELLOW}正在验证域名解析: $domain...${NC}"
+    
+    # 检查dig命令是否存在，如果不存在则安装
+    if ! command -v dig &> /dev/null; then
+        echo -e "${YELLOW}未检测到dig命令，正在尝试安装...${NC}"
+        if command -v apt-get &> /dev/null; then
+            apt-get update && apt-get install -y dnsutils
+        elif command -v yum &> /dev/null; then
+            yum install -y bind-utils
+        else
+            echo -e "${RED}无法自动安装dig工具，请手动安装后重试${NC}"
+            return 1
+        fi
+    fi
+    
+    # 验证安装成功
+    if ! command -v dig &> /dev/null; then
+        echo -e "${RED}dig工具安装失败${NC}"
+        return 1
+    fi
+    
+    # 继续原有的DNS检查
     if ! dig +short A "$domain" | grep -qP '^\d+\.\d+\.\d+\.\d+$'; then
         echo -e "${RED}错误：域名 $domain 未解析到IP地址${NC}"
         echo -e "${YELLOW}请检查："
