@@ -1392,20 +1392,42 @@ install_docker_packages() {
     fi
 }
 setup_substore_docker() {
-    # 生成随机密钥
-    local secret_key=$(openssl rand -hex 16)
-    echo -e "${YELLOW}生成的密钥: ${secret_key}${NC}"
+    local secret_key
+    local compose_file="docker-compose.yml" # 定义 docker-compose 文件名
+
+    # 检查 docker-compose.yml 是否存在，并尝试从中提取 secret_key
+    if [ -f "$compose_file" ]; then
+        # 这个 sed 命令会查找包含 SUB_STORE_FRONTEND_BACKEND_PATH 的行
+        # 并提取等号后面、斜杠之后的32位十六进制字符作为密钥。
+        extracted_key=$(sed -n 's|.*SUB_STORE_FRONTEND_BACKEND_PATH=/\([0-9a-fA-F]\{32\}\).*|\1|p' "$compose_file" | head -n 1)
+        if [[ -n "$extracted_key" && ${#extracted_key} -eq 32 ]]; then
+            secret_key="$extracted_key"
+            echo -e "${GREEN}检测到已存在的密钥，将继续使用: ${secret_key}${NC}"
+        else
+            echo -e "${YELLOW}未能从现有的 ${compose_file} 中提取有效密钥，或文件格式不符。${NC}"
+        fi
+    fi
+
+    # 如果 secret_key 仍然为空 (文件不存在或提取失败)，则生成一个新的密钥
+    if [ -z "$secret_key" ]; then
+        secret_key=$(openssl rand -hex 16)
+        echo -e "${YELLOW}生成新的密钥: ${secret_key}${NC}"
+    fi
     
-    # 创建数据目录
+    # 创建数据目录 (此操作是幂等的，重复执行无害)
     mkdir -p /root/sub-store-data
     
-    # 清理旧容器
-    echo -e "${YELLOW}清理旧容器...${NC}"
+    # 清理旧容器和旧的 compose 项目实例 (使用 -p 指定项目名)
+    # 这有助于确保一个干净的启动环境，特别是如果镜像或配置有更改
+    echo -e "${YELLOW}清理旧容器和相关配置...${NC}"
     docker rm -f sub-store >/dev/null 2>&1 || true
+    # 'down' 命令会使用已存在的 docker-compose.yml (如果找到的话) 来关闭指定项目相关的服务和网络
     docker compose -p sub-store down >/dev/null 2>&1 || true
     
-    # 创建 docker-compose 配置
-    cat <<EOF > docker-compose.yml
+    # 创建/更新 docker-compose.yml 文件 (此操作会覆盖旧文件)
+    # 使用已经确定好的 secret_key (无论是旧的还是新生成的)
+    echo -e "${YELLOW}创建/更新 ${compose_file} 配置文件...${NC}"
+    cat <<EOF > "$compose_file"
 version: '3'
 services:
   sub-store:
@@ -1424,39 +1446,70 @@ services:
       timeout: 10s
       retries: 3
 EOF
-    # 启动服务
-    echo -e "${YELLOW}拉取最新镜像...${NC}"
-    docker compose -p sub-store pull
     
-    echo -e "${YELLOW}启动容器...${NC}"
-    docker compose -p sub-store up -d
+    # 拉取最新镜像 (指定服务名 sub-store)
+    echo -e "${YELLOW}拉取最新镜像 (xream/sub-store:latest)...${NC}"
+    if ! docker compose -p sub-store pull sub-store; then # 指定服务名 'sub-store' 进行拉取
+        echo -e "${RED}拉取镜像失败，请检查网络连接或镜像名称 (xream/sub-store:latest)。${NC}"
+        # 您可以在这里决定是否退出脚本，或者尝试使用本地可能存在的旧版本镜像
+        # exit 1 # 如果希望在拉取失败时退出
+    fi
     
-    # 等待健康检查
-    echo -e "${YELLOW}等待服务就绪...${NC}"
+    # 启动容器 (使用 -p 指定项目名)
+    echo -e "${YELLOW}启动容器 (项目名: sub-store)...${NC}"
+    if ! docker compose -p sub-store up -d; then
+        echo -e "${RED}启动容器失败。请检查 Docker 服务状态及 ${compose_file} 文件配置。${NC}"
+        echo -e "${RED}可以使用 'docker logs sub-store' 查看容器日志。${NC}"
+        # exit 1 # 如果希望在启动失败时退出
+    fi
+    
+    # 等待健康检查通过
+    echo -e "${YELLOW}等待服务就绪 (最多约30秒)...${NC}"
     local attempt=0
-    while [ $attempt -lt 15 ]; do
-        health=$(docker inspect --format='{{.State.Health.Status}}' sub-store 2>/dev/null)
-        if [ "$health" == "healthy" ]; then
+    local max_attempts=15 # 15次尝试 x 2秒/次 = 30秒
+    local health_status=""
+    while [ $attempt -lt $max_attempts ]; do
+        health_status=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' sub-store 2>/dev/null)
+        if [ "$health_status" == "healthy" ]; then
+            echo -e "${GREEN}服务健康检查通过。${NC}"
+            break
+        elif [[ "$health_status" == "exited" || "$health_status" == "dead" ]]; then
+            echo -e "${RED}容器未能正常启动，状态: ${health_status}。请检查日志。${NC}"
             break
         fi
         attempt=$((attempt+1))
-        sleep 2
+        sleep 2 # 等待2秒后重试
     done
+    
     # 显示访问信息
-    if [ "$health" == "healthy" ]; then
-        echo -e "\n${GREEN}部署成功！${NC}"
-        echo -e "Sub-Store 面板: ${CYAN}http://${public_ip}:3001${NC}"
-        echo -e "后端地址: ${CYAN}http://${public_ip}:3001/${secret_key}${NC}"
+    if [ "$health_status" == "healthy" ]; then
+        echo -e "\n${GREEN}Sub-Store 部署成功！${NC}"
+        echo -e "Sub-Store 面板访问地址: ${CYAN}http://${public_ip}:3001${NC}"
+        echo -e "Sub-Store 后端API地址: ${CYAN}http://${public_ip}:3001/${secret_key}${NC}"
     else
-        echo -e "\n${YELLOW}警告: 服务启动异常，请检查日志: docker logs sub-store${NC}"
-        echo -e "${GREEN}手动验证命令: ${CYAN}curl -I http://127.0.0.1:3001${NC}"
+        echo -e "\n${YELLOW}警告: Sub-Store 服务似乎未能成功启动或健康检查超时/失败 (状态: ${health_status})。${NC}"
+        echo -e "${YELLOW}请手动检查容器日志: ${CYAN}docker logs sub-store${NC}"
+        echo -e "${YELLOW}您也可以尝试手动访问面板: ${CYAN}http://${public_ip}:3001${NC}"
+        echo -e "${YELLOW}或通过本地验证服务是否监听端口: ${CYAN}curl -I http://127.0.0.1:3001${NC}"
     fi
     
-    # 显示帮助信息
-    echo -e "\n${YELLOW}管理命令:${NC}"
-    echo -e "启动: docker compose -f $(pwd)/docker-compose.yml start"
-    echo -e "停止: docker compose -f $(pwd)/docker-compose.yml stop"
-    echo -e "日志查看: docker logs --tail 50 sub-store"
+    # 显示一些常用的管理命令
+    # 注意: $(pwd) 会解析为当前脚本执行的目录。如果 docker-compose.yml 在此，命令有效。
+    # 使用 -p sub-store 来明确指定项目，更为稳妥。
+    local compose_cmd_prefix="docker compose -p sub-store -f $(pwd)/${compose_file}"
+    echo -e "\n${YELLOW}常用管理命令 (在 ${compose_file} 文件所在目录执行，或使用以下完整路径命令):${NC}"
+    echo -e "启动 Sub-Store: ${CYAN}${compose_cmd_prefix} start sub-store${NC}"
+    echo -e "停止 Sub-Store: ${CYAN}${compose_cmd_prefix} stop sub-store${NC}"
+    echo -e "重启 Sub-Store: ${CYAN}${compose_cmd_prefix} restart sub-store${NC}"
+    echo -e "查看 Sub-Store 日志: ${CYAN}docker logs --tail 50 sub-store${NC}"
+    echo -e "查看 Sub-Store 状态: ${CYAN}${compose_cmd_prefix} ps${NC}"
+    echo -e "更新 Sub-Store (重新执行此安装模块即可，或手动):"
+    echo -e "  1. 拉取新镜像: ${CYAN}${compose_cmd_prefix} pull sub-store${NC}"
+    echo -e "  2. 重启服务:   ${CYAN}${compose_cmd_prefix} up -d --force-recreate sub-store${NC}"
+    echo -e "完全卸载 Sub-Store (包括数据):"
+    echo -e "  1. 停止并删除容器/网络: ${CYAN}${compose_cmd_prefix} down${NC}"
+    echo -e "  2. 删除数据目录: ${CYAN}rm -rf /root/sub-store-data${NC}"
+    echo -e "  3. 删除配置文件: ${CYAN}rm -f $(pwd)/${compose_file}${NC}"
 }
 
 # ======================= 脚本更新 =======================
