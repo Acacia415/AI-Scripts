@@ -249,8 +249,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(
         f"🖼️ ImgHub 图床机器人\n\n"
         f"发送图片即可获取直链。\n\n"
-        f"图片直链格式：<code>{base_url}/i/文件ID</code>\n\n"
-        f"图片会直接在网页中显示，无需额外点击。",
+        f"图片直链格式：<code>{base_url}/i/文件ID</code>\n\n",
         parse_mode='HTML'
     )
 
