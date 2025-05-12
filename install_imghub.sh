@@ -18,7 +18,6 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # --- Python 脚本内容 ---
-# 注意: 这里的 Python 脚本是之前讨论中您确认的那个版本
 PYTHON_SCRIPT_CONTENT=$(cat <<'END_OF_PYTHON_SCRIPT'
 #!/usr/bin/python3
 import os
@@ -249,6 +248,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(
         f"🖼️ ImgHub 图床机器人\n\n"
         f"发送图片即可获取直链。\n\n"
+        f"请以文件格式发送图片避免压缩。\n\n"
         f"图片直链格式：<code>{base_url}/i/文件ID</code>\n\n",
         parse_mode='HTML'
     )
@@ -305,77 +305,67 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         original_file_id = file_to_process.file_id # This is the temporary file_id from TG server
         logger.info(f"📦 获取文件成功，临时 file_id: {original_file_id}, MIME: {mime_type}")
 
-        # Download the file to a local path
+        # Download the file to a local path ONCE
         downloaded_file_path_str = await file_to_process.download_to_drive()
         logger.info(f"💾 文件下载到本地完成，路径：{downloaded_file_path_str}")
 
         file_path_obj_to_send = Path(downloaded_file_path_str)
         
-        # Determine caption for the channel message
         caption_text = f"Uploaded by: {user.id} ({user.username or 'N/A'})\nOriginal Filename: {file_name_for_caption}\nMIME: {mime_type}\nTimestamp: {datetime.now().isoformat()}"
         if update.message.caption:
             caption_text = f"{update.message.caption}\n-----\n{caption_text}"
 
-
         sent_message = None
-        with open(file_path_obj_to_send, "rb") as photo_file_object:
+        with open(file_path_obj_to_send, "rb") as file_object_to_send: 
             if mime_type.startswith("image/gif"):
+                 logger.info(f"准备以动画形式发送 {mime_type}...")
                  sent_message = await bot.send_animation(
                     chat_id=channel_id,
-                    animation=photo_file_object,
+                    animation=file_object_to_send, 
                     caption=caption_text
                 )
-            elif mime_type.startswith("image/"): # For other images (jpeg, png, webp)
-                sent_message = await bot.send_photo(
+            elif mime_type.startswith("image/png") or \
+                 mime_type.startswith("image/jpeg") or \
+                 mime_type.startswith("image/webp"):
+                logger.info(f"准备以文档形式发送 {mime_type} 以保证质量...")
+                sent_message = await bot.send_document(
                     chat_id=channel_id,
-                    photo=photo_file_object,
-                    caption=caption_text
+                    document=file_object_to_send, 
+                    caption=caption_text,
+                    filename=file_name_for_caption 
                 )
-            else: # Fallback, should not happen if type check is robust
+            else: 
+                 logger.warning(f"尝试将MIME类型 {mime_type} 作为通用文档发送。")
                  sent_message = await bot.send_document(
                     chat_id=channel_id,
-                    document=photo_file_object,
-                    caption=caption_text
+                    document=file_object_to_send, 
+                    caption=caption_text,
+                    filename=file_name_for_caption
                 )
         
-        # Clean up the downloaded temporary file
         try:
             os.remove(downloaded_file_path_str)
             logger.info(f"🗑️ 临时文件 {downloaded_file_path_str} 已删除。")
         except OSError as e:
             logger.error(f"删除临时文件 {downloaded_file_path_str} 失败: {e}")
 
-
-        if not sent_message or not (sent_message.photo or sent_message.animation or sent_message.document):
+        if not sent_message or not (sent_message.photo or sent_message.animation or sent_message.document): 
             logger.error("图片未能成功发送到频道或返回消息中不包含媒体信息。")
             await update.message.reply_text("⚠️ 上传失败，无法将图片存入频道。请稍后重试。")
             return
             
-        # Use the file_id of the message in the channel for our records
-        # The file_id of the photo/document within the sent_message is more persistent
         persistent_file_id_for_retrieval = ""
-        if sent_message.photo:
+        if sent_message.photo: 
             persistent_file_id_for_retrieval = sent_message.photo[-1].file_id
-        elif sent_message.animation:
+        elif sent_message.animation: 
             persistent_file_id_for_retrieval = sent_message.animation.file_id
-        elif sent_message.document: # Should be an image document
+        elif sent_message.document: 
             persistent_file_id_for_retrieval = sent_message.document.file_id
 
-
         logger.info(f"📤 图片已发送至频道，message_id: {sent_message.message_id}, 持久化 file_id: {persistent_file_id_for_retrieval}")
-
-        # Generate a short, unique ID for the URL
-        # Using parts of message_id and unique_id can create more robust short IDs
-        # For simplicity, we'll stick to a similar method as before but ensure it's reasonably unique.
-        # A more robust system might involve a small local database (like SQLite) for ID generation if scale is a concern.
-        
-        # Let's use a portion of the channel message ID hex and a random suffix.
-        # Example: <hex_msg_id_part><random_suffix>
-        # Ensure file_id is based on something from the *channel* message
         
         base_id_str = f"{sent_message.chat.id}_{sent_message.message_id}"
         import hashlib
-        # Create a short hash, e.g., first 8 chars of sha1 of a unique string
         url_file_id = hashlib.sha1(base_id_str.encode()).hexdigest()[:8]
 
         import random
@@ -385,39 +375,35 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         while id_candidate in img_service.file_records:
             collision_count += 1
             suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=2))
-            id_candidate = f"{url_file_id[:8-len(suffix)]}{suffix}" # Ensure it stays short
-            if collision_count > 10: # Highly unlikely, but a safeguard
+            id_candidate = f"{url_file_id[:8-len(suffix)]}{suffix}" 
+            if collision_count > 10: 
                 id_candidate = hashlib.sha1(f"{base_id_str}_{random.random()}".encode()).hexdigest()[:10]
                 logger.warning(f"多次File ID碰撞后生成了更长的随机ID: {id_candidate}")
-            if collision_count > 20: # Extremely unlikely
+            if collision_count > 20: 
                  logger.error("无法生成唯一的File ID，存在严重问题。")
                  await update.message.reply_text("⚠️ 上传失败，无法生成唯一文件标识。")
                  return
 
-
         final_url_file_id = id_candidate
 
-        # Store record with the persistent file_id for retrieval
         img_service.file_records[final_url_file_id] = (
-            str(abs(channel_id))[4:] if abs(channel_id) >= 10000 else str(abs(channel_id)), # Channel part for t.me link
+            str(abs(channel_id))[4:] if abs(channel_id) >= 10000 else str(abs(channel_id)), 
             sent_message.message_id,
-            persistent_file_id_for_retrieval, # Use this for get_file later
+            persistent_file_id_for_retrieval, 
             mime_type
         )
 
         logger.info(f"📝 文件记录保存: url_file_id={final_url_file_id}, persistent_file_id={persistent_file_id_for_retrieval}")
-        img_service.save_records() # Save immediately
+        img_service.save_records() 
 
         direct_link = f"{base_url}/i/{final_url_file_id}"
-        # Backup link using channel ID and message ID
         channel_id_part_for_url = img_service.file_records[final_url_file_id][0]
         backup_link = f"https://t.me/c/{channel_id_part_for_url}/{sent_message.message_id}"
 
         await update.message.reply_text(
             f"✅ 图片上传成功!\n\n"
             f"🔗 直链地址: {direct_link}\n"
-            f"备用地址: {backup_link}\n\n"
-            f"图片可直接嵌入网页或在浏览器中打开。",
+            f"备用地址: {backup_link}\n\n",
             disable_web_page_preview=True,
             reply_to_message_id=update.message.message_id
         )
@@ -436,46 +422,31 @@ def setup_handlers(application: Application) -> None:
 
 async def main() -> None:
     """主函数"""
-    application_instance = None # Define application_instance to ensure it's in scope for finally
-    img_service_instance = None # Define img_service_instance
+    application_instance = None 
+    img_service_instance = None 
 
     try:
-        # 加载配置
         bot_token, channel_id_str, allowed_users, base_url = load_config()
-        # Convert channel_id to int. It should be a public channel ID (like -100xxxx) or a private channel numeric ID.
-        # For private channels, the bot must be an admin.
-        # Ensure channel_id is correctly formatted (e.g. for private channels, it might start with -100)
         try:
             channel_id = int(channel_id_str)
         except ValueError:
             logger.critical(f"配置错误: channel_id '{channel_id_str}' 不是有效的整数。")
             return
 
+        os.makedirs(os.path.dirname(ImageHostingService(None).db_path), exist_ok=True)
 
-        # 确保数据和日志目录存在 (日志目录由basicConfig处理, 数据目录在这里创建)
-        os.makedirs(os.path.dirname(ImageHostingService(None).db_path), exist_ok=True) # Pass None for bot temporarily
-
-        # 初始化Telegram机器人
         application_builder = Application.builder().token(bot_token)
-        # Configure connection pool size if needed, e.g. for many concurrent requests
-        # application_builder.connection_pool_size(512) 
         application_instance = application_builder.build()
-
-        # 初始化服务
         img_service_instance = ImageHostingService(application_instance.bot)
 
-        # 存储全局变量到bot_data
         application_instance.bot_data['img_service'] = img_service_instance
         application_instance.bot_data['channel_id'] = channel_id
         application_instance.bot_data['allowed_users'] = allowed_users
         application_instance.bot_data['base_url'] = base_url
-
-        # 注册消息处理器
         setup_handlers(application_instance)
 
         web_server_task = None
         try:
-            # 初始化和启动应用
             logger.info("正在初始化 Telegram Application...")
             await application_instance.initialize()
             logger.info("正在启动 Telegram Application Polling...")
@@ -484,10 +455,8 @@ async def main() -> None:
                 await application_instance.updater.start_polling()
             else:
                 logger.error("Updater 未初始化, polling 无法启动。")
-                # Potentially raise an error or exit if polling is essential
                 return
 
-            # 启动Web服务器
             logger.info("准备启动内部 Web 服务器...")
             web_server_task = asyncio.create_task(img_service_instance.run_web_server())
 
@@ -497,11 +466,8 @@ async def main() -> None:
             logger.info(f"图床基础URL: {base_url}")
             logger.info(f"已加载 {len(img_service_instance.file_records)} 个文件记录 (来自 {img_service_instance.db_path})")
 
-            # Keep the main function alive indefinitely until shutdown signal or error
-            # await asyncio.Event().wait() # This would keep it running until an unhandled exception or signal
-            # Or, if web_server_task is the primary long-running task aside from polling:
             if web_server_task:
-                 await web_server_task # This will keep main alive as long as web_server_task is running
+                 await web_server_task 
 
         except asyncio.CancelledError:
             logger.info("主任务被取消 (可能在关闭流程中).")
@@ -519,12 +485,11 @@ async def main() -> None:
                 except Exception as e_wst_cancel:
                     logger.error(f"取消Web服务器任务时发生错误: {e_wst_cancel}", exc_info=True)
             
-            if application_instance and img_service_instance: # Ensure they exist
+            if application_instance and img_service_instance: 
                  await safe_shutdown(application_instance, img_service_instance)
-            elif img_service_instance: # If only img_service was initialized
-                 await img_service_instance.stop_web_server() # Try to stop it
+            elif img_service_instance: 
+                 await img_service_instance.stop_web_server() 
             logger.info("主程序清理完成.")
-
 
     except BotConfigError as e:
         logger.critical(f"机器人配置错误: {str(e)}")
