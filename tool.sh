@@ -1460,7 +1460,6 @@ services:
       - "3001:3001"
     volumes:
       - /root/sub-store-data:/opt/app/data
-    # 健康检查部分已移除
 EOF
 
     echo -e "${YELLOW}拉取最新镜像 (xream/sub-store:latest)...${NC}"
@@ -1492,7 +1491,6 @@ EOF
         echo -e "${RED}可以使用 'docker logs sub-store' 查看容器日志。${NC}"
         # exit 1
     else
-        # 由于移除了健康检查，我们在这里假设启动后服务就是可用的
         # 可以增加一个短暂的延时，给容器一些启动时间
         echo -e "${YELLOW}等待容器启动 (约5-10秒)...${NC}"
         sleep 10 # 可以根据实际情况调整这个延时
@@ -1500,7 +1498,6 @@ EOF
         # 检查容器是否仍在运行
         if docker ps -q -f name=sub-store | grep -q .; then
             echo -e "\n${GREEN}Sub-Store 已启动！${NC}"
-            echo -e "由于已移除健康检查，请自行验证服务是否可用。"
             echo -e "Sub-Store 面板访问地址: ${CYAN}http://${public_ip}:3001${NC}"
             echo -e "Sub-Store 后端API地址: ${CYAN}http://${public_ip}:3001/${secret_key}${NC}"
             echo -e "\n${YELLOW}如果服务无法访问，请检查容器日志: ${CYAN}docker logs sub-store${NC}"
