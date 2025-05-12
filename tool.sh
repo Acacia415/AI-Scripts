@@ -1512,6 +1512,38 @@ EOF
     echo -e "  3. 删除配置文件: ${CYAN}rm -f $(pwd)/${compose_file}${NC}"
 }
 
+# ======================= 搭建TG图床 =======================
+install_tg_image_host() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/GPT-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo # Add an empty line for spacing
+
+    local install_script_url="https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/install_imghub.sh"
+    local temp_install_script="/tmp/tg_imghub_install.sh"
+
+    echo -e "${CYAN}正在下载 TG图床 安装脚本...${NC}"
+    if curl -sSL -o "$temp_install_script" "$install_script_url"; then
+        chmod +x "$temp_install_script"
+        echo -e "${GREEN}下载完成，开始执行安装脚本...${NC}"
+        # Execute the script
+        "$temp_install_script"
+        # Optionally, remove the script after execution
+        rm -f "$temp_install_script"
+        echo -e "${GREEN}TG图床 安装脚本执行完毕。${NC}"
+        # 成功时，不再有模块内部的 read 暂停
+    else
+        echo -e "${RED}下载 TG图床 安装脚本失败！${NC}"
+        # 失败时，移除了这里的 read 暂停
+        # read -n 1 -s -r -p "按任意键返回主菜单..." # 已移除
+        return 1 # 仍然返回错误码，主菜单可以根据需要处理或忽略
+    fi
+    # 确保函数末尾没有其他 read 暂停
+    # # Add a pause before returning to the main menu, if desired, after successful installation
+    # # read -n 1 -s -r -p "安装完成，按任意键返回主菜单..." # 此行保持注释或删除
+}
+
 # ======================= 脚本更新 =======================
 update_script() {
   echo -e "${YELLOW}开始更新脚本...${NC}"
@@ -1566,6 +1598,7 @@ main_menu() {
     echo -e "17. 命令行美化"
     echo -e "18. DNS解锁服务"
     echo -e "19. 安装Sub-Store"
+    echo -e "20. 搭建TG图床"
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
@@ -1647,6 +1680,10 @@ main_menu() {
         ;;
       19)  
         install_substore 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      20)  
+        install_tg_image_host 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       99)  
