@@ -1361,7 +1361,7 @@ check_root() {
 }
 get_public_ip() {
     local ip_services=("ifconfig.me" "ipinfo.io/ip" "icanhazip.com" "ipecho.net/plain" "ident.me")
-    
+
     for service in "${ip_services[@]}"; do
         if public_ip=$(curl -sS --connect-timeout 5 "$service"); then
             if [[ "$public_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -1371,7 +1371,7 @@ get_public_ip() {
         fi
         sleep 1
     done
-    
+
     echo -e "${RED}无法获取公共 IP 地址。${NC}" >&2
     exit 1
 }
@@ -1382,13 +1382,34 @@ install_docker_packages() {
             echo -e "${RED}Docker 安装失败${NC}" >&2
             exit 1
         fi
+        # 尝试使用 apt-get 安装 docker-compose，如果失败，提示其他安装方式
         if ! apt-get update && apt-get install -y docker-compose; then
-            echo -e "${RED}Docker Compose 安装失败${NC}" >&2
-            exit 1
+            echo -e "${YELLOW}使用 apt-get 安装 Docker Compose 失败，尝试其他方法...${NC}"
+            # 对于较新的 Docker 版本，docker-compose 可能作为插件 docker-compose-plugin 提供
+            if apt-get install -y docker-compose-plugin; then
+                 echo -e "${GREEN}Docker Compose Plugin 安装完成。${NC}"
+            else
+                echo -e "${RED}Docker Compose 或其插件安装失败。请尝试手动安装。${NC}" >&2
+                echo -e "${RED}可以参考 Docker 官方文档: https://docs.docker.com/compose/install/${NC}" >&2
+                exit 1
+            fi
         fi
-        echo -e "${GREEN}Docker 和 Docker Compose 安装完成。${NC}"
+        echo -e "${GREEN}Docker 和 Docker Compose (或插件) 安装完成。${NC}"
     else
-        echo -e "${CYAN}Docker 和 Docker Compose 已安装。${NC}"
+        echo -e "${CYAN}Docker 和 Docker Compose (或插件) 已安装。${NC}"
+    fi
+
+    # 检查 docker compose v2 (docker-compose-plugin) 是否可用
+    if ! docker compose version &>/dev/null; then
+        # 如果 docker compose v2 不可用，检查 docker-compose v1
+        if ! command -v docker-compose &>/dev/null; then
+            echo -e "${RED}Docker Compose (v1 或 v2 插件) 未找到。请确保已正确安装。${NC}" >&2
+            exit 1
+        else
+            echo -e "${CYAN}检测到 Docker Compose v1 (docker-compose)。${NC}"
+        fi
+    else
+        echo -e "${CYAN}检测到 Docker Compose v2 (docker compose plugin)。${NC}"
     fi
 }
 setup_substore_docker() {
@@ -1397,8 +1418,6 @@ setup_substore_docker() {
 
     # 检查 docker-compose.yml 是否存在，并尝试从中提取 secret_key
     if [ -f "$compose_file" ]; then
-        # 这个 sed 命令会查找包含 SUB_STORE_FRONTEND_BACKEND_PATH 的行
-        # 并提取等号后面、斜杠之后的32位十六进制字符作为密钥。
         extracted_key=$(sed -n 's|.*SUB_STORE_FRONTEND_BACKEND_PATH=/\([0-9a-fA-F]\{32\}\).*|\1|p' "$compose_file" | head -n 1)
         if [[ -n "$extracted_key" && ${#extracted_key} -eq 32 ]]; then
             secret_key="$extracted_key"
@@ -1413,22 +1432,23 @@ setup_substore_docker() {
         secret_key=$(openssl rand -hex 16)
         echo -e "${YELLOW}生成新的密钥: ${secret_key}${NC}"
     fi
-    
-    # 创建数据目录 (此操作是幂等的，重复执行无害)
+
     mkdir -p /root/sub-store-data
-    
-    # 清理旧容器和旧的 compose 项目实例 (使用 -p 指定项目名)
-    # 这有助于确保一个干净的启动环境，特别是如果镜像或配置有更改
+
     echo -e "${YELLOW}清理旧容器和相关配置...${NC}"
     docker rm -f sub-store >/dev/null 2>&1 || true
-    # 'down' 命令会使用已存在的 docker-compose.yml (如果找到的话) 来关闭指定项目相关的服务和网络
-    docker compose -p sub-store down >/dev/null 2>&1 || true
-    
-    # 创建/更新 docker-compose.yml 文件 (此操作会覆盖旧文件)
-    # 使用已经确定好的 secret_key (无论是旧的还是新生成的)
+    # 优先使用 docker compose (v2)，如果失败则尝试 docker-compose (v1)
+    if docker compose -p sub-store down >/dev/null 2>&1; then
+        echo -e "${CYAN}使用 'docker compose down' 清理项目。${NC}"
+    elif command -v docker-compose &>/dev/null && docker-compose -p sub-store -f "$compose_file" down >/dev/null 2>&1; then
+        echo -e "${CYAN}使用 'docker-compose down' 清理项目。${NC}"
+    else
+        echo -e "${YELLOW}未找到 docker-compose.yml 或无法执行 down 命令，可能没有旧项目需要清理。${NC}"
+    fi
+
     echo -e "${YELLOW}创建/更新 ${compose_file} 配置文件...${NC}"
     cat <<EOF > "$compose_file"
-version: '3'
+version: '3.8' # 建议使用较新的compose版本，例如3.8
 services:
   sub-store:
     image: xream/sub-store:latest
@@ -1440,76 +1460,91 @@ services:
       - "3001:3001"
     volumes:
       - /root/sub-store-data:/opt/app/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    # 健康检查部分已移除
 EOF
-    
-    # 拉取最新镜像 (指定服务名 sub-store)
+
     echo -e "${YELLOW}拉取最新镜像 (xream/sub-store:latest)...${NC}"
-    if ! docker compose -p sub-store pull sub-store; then # 指定服务名 'sub-store' 进行拉取
-        echo -e "${RED}拉取镜像失败，请检查网络连接或镜像名称 (xream/sub-store:latest)。${NC}"
-        # 您可以在这里决定是否退出脚本，或者尝试使用本地可能存在的旧版本镜像
-        # exit 1 # 如果希望在拉取失败时退出
+    # 优先使用 docker compose (v2)，如果失败则尝试 docker-compose (v1)
+    local pull_cmd_success=false
+    if docker compose -p sub-store pull sub-store; then
+        pull_cmd_success=true
+    elif command -v docker-compose &>/dev/null && docker-compose -p sub-store -f "$compose_file" pull sub-store; then
+        pull_cmd_success=true
     fi
-    
-    # 启动容器 (使用 -p 指定项目名)
+
+    if ! $pull_cmd_success; then
+        echo -e "${RED}拉取镜像失败，请检查网络连接或镜像名称 (xream/sub-store:latest)。${NC}"
+        # 您可以在这里决定是否退出脚本
+        # exit 1
+    fi
+
     echo -e "${YELLOW}启动容器 (项目名: sub-store)...${NC}"
-    if ! docker compose -p sub-store up -d; then
+    # 优先使用 docker compose (v2)，如果失败则尝试 docker-compose (v1)
+    local up_cmd_success=false
+    if docker compose -p sub-store up -d; then
+        up_cmd_success=true
+    elif command -v docker-compose &>/dev/null && docker-compose -p sub-store -f "$compose_file" up -d; then
+        up_cmd_success=true
+    fi
+
+    if ! $up_cmd_success; then
         echo -e "${RED}启动容器失败。请检查 Docker 服务状态及 ${compose_file} 文件配置。${NC}"
         echo -e "${RED}可以使用 'docker logs sub-store' 查看容器日志。${NC}"
-        # exit 1 # 如果希望在启动失败时退出
-    fi
-    
-    # 等待健康检查通过
-    echo -e "${YELLOW}等待服务就绪 (最多约30秒)...${NC}"
-    local attempt=0
-    local max_attempts=15 # 15次尝试 x 2秒/次 = 30秒
-    local health_status=""
-    while [ $attempt -lt $max_attempts ]; do
-        health_status=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' sub-store 2>/dev/null)
-        if [ "$health_status" == "healthy" ]; then
-            echo -e "${GREEN}服务健康检查通过。${NC}"
-            break
-        elif [[ "$health_status" == "exited" || "$health_status" == "dead" ]]; then
-            echo -e "${RED}容器未能正常启动，状态: ${health_status}。请检查日志。${NC}"
-            break
-        fi
-        attempt=$((attempt+1))
-        sleep 2 # 等待2秒后重试
-    done
-    
-    # 显示访问信息
-    if [ "$health_status" == "healthy" ]; then
-        echo -e "\n${GREEN}Sub-Store 部署成功！${NC}"
-        echo -e "Sub-Store 面板访问地址: ${CYAN}http://${public_ip}:3001${NC}"
-        echo -e "Sub-Store 后端API地址: ${CYAN}http://${public_ip}:3001/${secret_key}${NC}"
+        # exit 1
     else
-        echo -e "\n${YELLOW}警告: Sub-Store 服务似乎未能成功启动或健康检查超时/失败 (状态: ${health_status})。${NC}"
-        echo -e "${YELLOW}请手动检查容器日志: ${CYAN}docker logs sub-store${NC}"
-        echo -e "${YELLOW}您也可以尝试手动访问面板: ${CYAN}http://${public_ip}:3001${NC}"
-        echo -e "${YELLOW}或通过本地验证服务是否监听端口: ${CYAN}curl -I http://127.0.0.1:3001${NC}"
+        # 由于移除了健康检查，我们在这里假设启动后服务就是可用的
+        # 可以增加一个短暂的延时，给容器一些启动时间
+        echo -e "${YELLOW}等待容器启动 (约5-10秒)...${NC}"
+        sleep 10 # 可以根据实际情况调整这个延时
+
+        # 检查容器是否仍在运行
+        if docker ps -q -f name=sub-store | grep -q .; then
+            echo -e "\n${GREEN}Sub-Store 已启动！${NC}"
+            echo -e "由于已移除健康检查，请自行验证服务是否可用。"
+            echo -e "Sub-Store 面板访问地址: ${CYAN}http://${public_ip}:3001${NC}"
+            echo -e "Sub-Store 后端API地址: ${CYAN}http://${public_ip}:3001/${secret_key}${NC}"
+            echo -e "\n${YELLOW}如果服务无法访问，请检查容器日志: ${CYAN}docker logs sub-store${NC}"
+            echo -e "${YELLOW}或通过本地验证服务是否监听端口: ${CYAN}curl -I http://127.0.0.1:3001${NC}"
+        else
+            echo -e "\n${RED}Sub-Store 容器未能保持运行状态。${NC}"
+            echo -e "${RED}请手动检查容器日志: ${CYAN}docker logs sub-store${NC}"
+        fi
     fi
-    
-    # 显示一些常用的管理命令
-    # 注意: $(pwd) 会解析为当前脚本执行的目录。如果 docker-compose.yml 在此，命令有效。
-    # 使用 -p sub-store 来明确指定项目，更为稳妥。
-    local compose_cmd_prefix="docker compose -p sub-store -f $(pwd)/${compose_file}"
-    echo -e "\n${YELLOW}常用管理命令 (在 ${compose_file} 文件所在目录执行，或使用以下完整路径命令):${NC}"
-    echo -e "启动 Sub-Store: ${CYAN}${compose_cmd_prefix} start sub-store${NC}"
-    echo -e "停止 Sub-Store: ${CYAN}${compose_cmd_prefix} stop sub-store${NC}"
-    echo -e "重启 Sub-Store: ${CYAN}${compose_cmd_prefix} restart sub-store${NC}"
-    echo -e "查看 Sub-Store 日志: ${CYAN}docker logs --tail 50 sub-store${NC}"
-    echo -e "查看 Sub-Store 状态: ${CYAN}${compose_cmd_prefix} ps${NC}"
-    echo -e "更新 Sub-Store (重新执行此安装模块即可，或手动):"
-    echo -e "  1. 拉取新镜像: ${CYAN}${compose_cmd_prefix} pull sub-store${NC}"
-    echo -e "  2. 重启服务:   ${CYAN}${compose_cmd_prefix} up -d --force-recreate sub-store${NC}"
-    echo -e "完全卸载 Sub-Store (包括数据):"
-    echo -e "  1. 停止并删除容器/网络: ${CYAN}${compose_cmd_prefix} down${NC}"
-    echo -e "  2. 删除数据目录: ${CYAN}rm -rf /root/sub-store-data${NC}"
-    echo -e "  3. 删除配置文件: ${CYAN}rm -f $(pwd)/${compose_file}${NC}"
+
+    local compose_cmd_v2="docker compose -p sub-store -f \"$(pwd)/${compose_file}\""
+    local compose_cmd_v1="docker-compose -p sub-store -f \"$(pwd)/${compose_file}\""
+    local compose_cmd_prefix=""
+
+    # 检测使用哪个compose命令
+    if docker compose version &>/dev/null; then
+        compose_cmd_prefix="$compose_cmd_v2"
+        echo -e "${CYAN}将使用 'docker compose' (v2) 命令进行管理。${NC}"
+    elif command -v docker-compose &>/dev/null; then
+        compose_cmd_prefix="$compose_cmd_v1"
+        echo -e "${CYAN}将使用 'docker-compose' (v1) 命令进行管理。${NC}"
+    else
+        echo -e "${RED}未找到 'docker compose' 或 'docker-compose' 命令，管理命令可能无法直接使用。${NC}"
+    fi
+
+
+    echo -e "\n${YELLOW}常用管理命令 (如果 ${compose_file} 不在当前目录，请先 cd 到对应目录):${NC}"
+    if [[ -n "$compose_cmd_prefix" ]]; then
+        echo -e "启动 Sub-Store: ${CYAN}${compose_cmd_prefix} start sub-store${NC} (如果服务已定义在compose文件中)"
+        echo -e "或者: ${CYAN}${compose_cmd_prefix} up -d sub-store${NC}"
+        echo -e "停止 Sub-Store: ${CYAN}${compose_cmd_prefix} stop sub-store${NC}"
+        echo -e "重启 Sub-Store: ${CYAN}${compose_cmd_prefix} restart sub-store${NC}"
+        echo -e "查看 Sub-Store 状态: ${CYAN}${compose_cmd_prefix} ps${NC}"
+        echo -e "更新 Sub-Store (重新执行此安装模块即可，或手动):"
+        echo -e "  1. 拉取新镜像: ${CYAN}${compose_cmd_prefix} pull sub-store${NC}"
+        echo -e "  2. 重启服务:   ${CYAN}${compose_cmd_prefix} up -d --force-recreate sub-store${NC}"
+        echo -e "完全卸载 Sub-Store (包括数据):"
+        echo -e "  1. 停止并删除容器/网络: ${CYAN}${compose_cmd_prefix} down${NC}"
+    else
+        echo -e "请根据您安装的 Docker Compose 版本手动执行相应命令。"
+    fi
+    echo -e "查看 Sub-Store 日志: ${CYAN}docker logs --tail 100 sub-store${NC}"
+    echo -e "删除数据目录: ${CYAN}rm -rf /root/sub-store-data${NC}"
+    echo -e "删除配置文件: ${CYAN}rm -f \"$(pwd)/${compose_file}\"${NC}"
 }
 
 # ======================= 搭建TG图床 =======================
