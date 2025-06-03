@@ -889,93 +889,186 @@ modify_ip_preference() {
         echo -e "${RED}错误：请使用sudo运行此脚本${NC}"
         return 1
     fi
-
+    
     # 配置文件路径
     CONF_FILE="/etc/gai.conf"
     BACKUP_FILE="/etc/gai.conf.bak"
-
+    
+    # 确保配置文件存在
+    if [ ! -f "$CONF_FILE" ]; then
+        touch "$CONF_FILE"
+    fi
+    
     show_current_status() {
         echo -e "\n${YELLOW}当前优先级配置："
-        if grep -qE "^precedence ::ffff:0:0/96 100" $CONF_FILE; then
+        if grep -qE "^precedence ::ffff:0:0/96 100" "$CONF_FILE" 2>/dev/null; then
             echo -e "  ▸ ${GREEN}IPv4优先模式 (precedence ::ffff:0:0/96 100)${NC}"
-        elif grep -qE "^precedence ::/0 40" $CONF_FILE; then
+        elif grep -qE "^precedence ::/0 40" "$CONF_FILE" 2>/dev/null; then
             echo -e "  ▸ ${GREEN}IPv6优先模式 (precedence ::/0 40)${NC}"
         else
             echo -e "  ▸ ${YELLOW}系统默认配置${NC}"
         fi
+        
+        # 显示实际生效的设置
+        echo -e "\n${YELLOW}当前系统实际优先级："
+        if command -v getent >/dev/null 2>&1; then
+            echo "  $(getent ahostsv4 google.com 2>/dev/null | head -1 | awk '{print "IPv4: " $1}')"
+            echo "  $(getent ahostsv6 google.com 2>/dev/null | head -1 | awk '{print "IPv6: " $1}')"
+        fi
     }
-
+    
     interactive_menu() {
         clear
         echo -e "${GREEN}=== IP协议优先级设置 ==="
         echo -e "1. IPv4优先 (推荐)"
         echo -e "2. IPv6优先"
         echo -e "3. 恢复默认配置"
+        echo -e "4. 测试当前设置"
         echo -e "0. 返回主菜单"
         show_current_status
-        read -p "请输入选项 [0-3]: " choice
+        read -p "请输入选项 [0-4]: " choice
     }
-
+    
     apply_ipv4_preference() {
-        echo -e "${YELLOW}\n[1/3] 备份原配置..."
-        cp -f $CONF_FILE $BACKUP_FILE 2>/dev/null || true
-
-        echo -e "${YELLOW}[2/3] 生成新配置..."
-        cat > $CONF_FILE << EOF
-# 由网络工具箱设置 IPv4 优先
-precedence ::ffff:0:0/96 100
-#precedence ::/0 40
-EOF
-
-        echo -e "${YELLOW}[3/3] 应用配置..."
-        sysctl -p $CONF_FILE >/dev/null 2>&1 || true
-    }
-
-    apply_ipv6_preference() {
-        echo -e "${YELLOW}\n[1/3] 备份原配置..."
-        cp -f $CONF_FILE $BACKUP_FILE 2>/dev/null || true
-
-        echo -e "${YELLOW}[2/3] 生成新配置..."
-        cat > $CONF_FILE << EOF
-# 由网络工具箱设置 IPv6 优先
-precedence ::/0 40
-#precedence ::ffff:0:0/96 100
-EOF
-
-        echo -e "${YELLOW}[3/3] 应用配置..."
-    }
-
-    restore_default() {
-        if [ -f $BACKUP_FILE ]; then
-            echo -e "${YELLOW}\n[1/2] 恢复备份文件..."
-            cp -f $BACKUP_FILE $CONF_FILE
-            echo -e "${YELLOW}[2/2] 删除备份..."
-            rm -f $BACKUP_FILE
-        else
-            echo -e "${YELLOW}\n[1/1] 重置为默认配置..."
-            sed -i '/^precedence/d' $CONF_FILE
+        echo -e "${YELLOW}\n[1/4] 备份原配置..."
+        if [ -f "$CONF_FILE" ]; then
+            cp "$CONF_FILE" "$BACKUP_FILE" 2>/dev/null || true
         fi
+        
+        echo -e "${YELLOW}[2/4] 生成新配置..."
+        # 创建完整的gai.conf配置，确保IPv4优先
+        cat > "$CONF_FILE" << 'EOF'
+# 由网络工具箱设置 - IPv4 优先配置
+# IPv4地址优先级设为100（高优先级）
+precedence ::ffff:0:0/96  100
+# IPv6地址优先级设为10（低优先级）  
+precedence ::/0           10
+# 标准地址类型优先级
+precedence 2002::/16      30
+precedence ::/96          20
+precedence ::1/128        50
+EOF
+        
+        echo -e "${YELLOW}[3/4] 刷新系统缓存..."
+        # 清除DNS缓存
+        if command -v systemd-resolve >/dev/null 2>&1; then
+            systemd-resolve --flush-caches 2>/dev/null || true
+        fi
+        if command -v nscd >/dev/null 2>&1; then
+            systemctl restart nscd 2>/dev/null || true
+        fi
+        
+        echo -e "${YELLOW}[4/4] 重启网络服务..."
+        # 重启网络相关服务以确保配置生效
+        systemctl restart systemd-resolved 2>/dev/null || true
+        
+        echo -e "${GREEN}\n✅ IPv4优先配置已应用！${NC}"
     }
-
+    
+    apply_ipv6_preference() {
+        echo -e "${YELLOW}\n[1/4] 备份原配置..."
+        if [ -f "$CONF_FILE" ]; then
+            cp "$CONF_FILE" "$BACKUP_FILE" 2>/dev/null || true
+        fi
+        
+        echo -e "${YELLOW}[2/4] 生成新配置..."
+        cat > "$CONF_FILE" << 'EOF'
+# 由网络工具箱设置 - IPv6 优先配置
+# IPv6地址优先级设为40（高优先级）
+precedence ::/0           40
+# IPv4地址优先级设为10（低优先级）
+precedence ::ffff:0:0/96  10
+# 标准地址类型优先级
+precedence 2002::/16      30
+precedence ::/96          20
+precedence ::1/128        50
+EOF
+        
+        echo -e "${YELLOW}[3/4] 刷新系统缓存..."
+        if command -v systemd-resolve >/dev/null 2>&1; then
+            systemd-resolve --flush-caches 2>/dev/null || true
+        fi
+        if command -v nscd >/dev/null 2>&1; then
+            systemctl restart nscd 2>/dev/null || true
+        fi
+        
+        echo -e "${YELLOW}[4/4] 重启网络服务..."
+        systemctl restart systemd-resolved 2>/dev/null || true
+        
+        echo -e "${GREEN}\n✅ IPv6优先配置已应用！${NC}"
+    }
+    
+    restore_default() {
+        if [ -f "$BACKUP_FILE" ]; then
+            echo -e "${YELLOW}\n[1/3] 恢复备份文件..."
+            cp "$BACKUP_FILE" "$CONF_FILE"
+            echo -e "${YELLOW}[2/3] 删除备份..."
+            rm -f "$BACKUP_FILE"
+        else
+            echo -e "${YELLOW}\n[1/3] 重置为默认配置..."
+            # 创建空配置文件或删除所有precedence配置
+            > "$CONF_FILE"
+        fi
+        
+        echo -e "${YELLOW}[3/3] 重启网络服务..."
+        if command -v systemd-resolve >/dev/null 2>&1; then
+            systemd-resolve --flush-caches 2>/dev/null || true
+        fi
+        systemctl restart systemd-resolved 2>/dev/null || true
+        
+        echo -e "${GREEN}\n✅ 已恢复默认系统配置！${NC}"
+    }
+    
+    test_current_setting() {
+        echo -e "${YELLOW}\n=== 测试当前IP优先级设置 ===${NC}"
+        
+        # 测试域名解析顺序
+        test_domains=("google.com" "github.com" "cloudflare.com")
+        
+        for domain in "${test_domains[@]}"; do
+            echo -e "\n${CYAN}测试域名: $domain${NC}"
+            
+            # 获取IPv4和IPv6地址
+            ipv4_addr=$(getent ahostsv4 "$domain" 2>/dev/null | head -1 | awk '{print $1}')
+            ipv6_addr=$(getent ahostsv6 "$domain" 2>/dev/null | head -1 | awk '{print $1}')
+            
+            echo "  IPv4: ${ipv4_addr:-未获取到}"
+            echo "  IPv6: ${ipv6_addr:-未获取到}"
+            
+            # 测试默认解析结果
+            default_addr=$(getent ahosts "$domain" 2>/dev/null | head -1 | awk '{print $1}')
+            if [[ "$default_addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo -e "  ${GREEN}默认解析: $default_addr (IPv4优先)${NC}"
+            elif [[ "$default_addr" =~ : ]]; then
+                echo -e "  ${BLUE}默认解析: $default_addr (IPv6优先)${NC}"
+            else
+                echo -e "  ${RED}默认解析: 解析失败${NC}"
+            fi
+        done
+        
+        echo -e "\n${YELLOW}按任意键继续...${NC}"
+        read -n 1
+    }
+    
     while true; do
         interactive_menu
         case $choice in
             1)
                 apply_ipv4_preference
-                echo -e "${GREEN}\n✅ 已设置为IPv4优先模式！"
-                echo -e "  更改将在下次网络连接时生效${NC}"
-                sleep 2
+                echo -e "  ${YELLOW}建议重启网络连接或重启系统以确保完全生效${NC}"
+                sleep 3
                 ;;
             2)
                 apply_ipv6_preference
-                echo -e "${GREEN}\n✅ 已设置为IPv6优先模式！"
-                echo -e "  更改将在下次网络连接时生效${NC}"
-                sleep 2
+                echo -e "  ${YELLOW}建议重启网络连接或重启系统以确保完全生效${NC}"
+                sleep 3
                 ;;
             3)
                 restore_default
-                echo -e "${GREEN}\n✅ 已恢复默认系统配置！${NC}"
                 sleep 2
+                ;;
+            4)
+                test_current_setting
                 ;;
             0)
                 return
