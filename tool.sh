@@ -889,756 +889,93 @@ modify_ip_preference() {
         echo -e "${RED}错误：请使用sudo运行此脚本${NC}"
         return 1
     fi
-    
+
     # 配置文件路径
     CONF_FILE="/etc/gai.conf"
     BACKUP_FILE="/etc/gai.conf.bak"
-    
-    # 确保配置文件存在
-    if [ ! -f "$CONF_FILE" ]; then
-        touch "$CONF_FILE"
-    fi
-    
-    # 获取公网IP函数
-    get_public_ip() {
-        local ipv4_ip=""
-        local ipv6_ip=""
-        
-        # 获取IPv4公网IP（优先使用不同服务避免单点故障）
-        for service in "curl -4s https://ipv4.icanhazip.com" "curl -4s https://api.ipify.org" "dig +short myip.opendns.com @resolver1.opendns.com" "curl -4s https://checkip.amazonaws.com"; do
-            ipv4_ip=$(timeout 5 bash -c "$service" 2>/dev/null | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}
-    restart_network_services() {
-        echo "    正在重启网络服务..."
-        
-        # 清除DNS缓存
-        if command -v systemd-resolve >/dev/null 2>&1; then
-            systemd-resolve --flush-caches 2>/dev/null || true
-        fi
-        
-        # 检测系统类型并重启相应服务
-        if [ -f /etc/debian_version ]; then
-            # Debian/Ubuntu系统
-            if systemctl is-active --quiet systemd-resolved; then
-                systemctl restart systemd-resolved 2>/dev/null || true
-            fi
-            
-            if systemctl is-active --quiet systemd-networkd; then
-                systemctl restart systemd-networkd 2>/dev/null || true
-            fi
-            
-            if systemctl is-active --quiet NetworkManager; then
-                systemctl restart NetworkManager 2>/dev/null || true
-            elif systemctl is-active --quiet networking; then
-                systemctl restart networking 2>/dev/null || true
-            fi
-            
-            # Ubuntu特有：如果存在netplan
-            if command -v netplan >/dev/null 2>&1; then
-                netplan apply 2>/dev/null || true
-            fi
-            
-        else
-            # 其他Linux发行版
-            systemctl restart systemd-resolved 2>/dev/null || true
-            systemctl restart NetworkManager 2>/dev/null || systemctl restart networking 2>/dev/null || true
-        fi
-        
-        echo "    网络服务重启完成"
-    }
-    
+
     show_current_status() {
         echo -e "\n${YELLOW}当前优先级配置："
-        if grep -qE "^precedence ::ffff:0:0/96 100" "$CONF_FILE" 2>/dev/null; then
+        if grep -qE "^precedence ::ffff:0:0/96 100" $CONF_FILE; then
             echo -e "  ▸ ${GREEN}IPv4优先模式 (precedence ::ffff:0:0/96 100)${NC}"
-        elif grep -qE "^precedence ::/0 40" "$CONF_FILE" 2>/dev/null; then
+        elif grep -qE "^precedence ::/0 40" $CONF_FILE; then
             echo -e "  ▸ ${GREEN}IPv6优先模式 (precedence ::/0 40)${NC}"
         else
             echo -e "  ▸ ${YELLOW}系统默认配置${NC}"
         fi
-        
-        # 显示本机公网IP
-        echo -e "\n${YELLOW}本机公网IP地址："
-        get_public_ip
     }
-    
+
     interactive_menu() {
         clear
         echo -e "${GREEN}=== IP协议优先级设置 ==="
         echo -e "1. IPv4优先 (推荐)"
         echo -e "2. IPv6优先"
         echo -e "3. 恢复默认配置"
-        echo -e "4. 测试当前设置"
         echo -e "0. 返回主菜单"
         show_current_status
-        read -p "请输入选项 [0-4]: " choice
+        read -p "请输入选项 [0-3]: " choice
     }
-    
+
     apply_ipv4_preference() {
-        echo -e "${YELLOW}\n[1/4] 备份原配置..."
-        if [ -f "$CONF_FILE" ]; then
-            cp "$CONF_FILE" "$BACKUP_FILE" 2>/dev/null || true
-        fi
-        
-        echo -e "${YELLOW}[2/4] 生成新配置..."
-        # 创建完整的gai.conf配置，确保IPv4优先
-        cat > "$CONF_FILE" << 'EOF'
-# 由网络工具箱设置 - IPv4 优先配置
-# IPv4地址优先级设为100（高优先级）
-precedence ::ffff:0:0/96  100
-# IPv6地址优先级设为10（低优先级）  
-precedence ::/0           10
-# 标准地址类型优先级
-precedence 2002::/16      30
-precedence ::/96          20
-precedence ::1/128        50
+        echo -e "${YELLOW}\n[1/3] 备份原配置..."
+        cp -f $CONF_FILE $BACKUP_FILE 2>/dev/null || true
+
+        echo -e "${YELLOW}[2/3] 生成新配置..."
+        cat > $CONF_FILE << EOF
+# 由网络工具箱设置 IPv4 优先
+precedence ::ffff:0:0/96 100
+#precedence ::/0 40
 EOF
-        
-        echo -e "${YELLOW}[3/4] 刷新系统缓存..."
-        # 清除DNS缓存
-        if command -v systemd-resolve >/dev/null 2>&1; then
-            systemd-resolve --flush-caches 2>/dev/null || true
-        fi
-        if command -v nscd >/dev/null 2>&1; then
-            systemctl restart nscd 2>/dev/null || true
-        fi
-        
-        echo -e "${YELLOW}[4/4] 重启网络服务..."
-        # 重启网络相关服务以确保配置生效
-        restart_network_services
-        
-        echo -e "${GREEN}\n✅ IPv4优先配置已应用！${NC}"
+
+        echo -e "${YELLOW}[3/3] 应用配置..."
+        sysctl -p $CONF_FILE >/dev/null 2>&1 || true
     }
-    
+
     apply_ipv6_preference() {
-        echo -e "${YELLOW}\n[1/4] 备份原配置..."
-        if [ -f "$CONF_FILE" ]; then
-            cp "$CONF_FILE" "$BACKUP_FILE" 2>/dev/null || true
-        fi
-        
-        echo -e "${YELLOW}[2/4] 生成新配置..."
-        cat > "$CONF_FILE" << 'EOF'
-# 由网络工具箱设置 - IPv6 优先配置
-# IPv6地址优先级设为40（高优先级）
-precedence ::/0           40
-# IPv4地址优先级设为10（低优先级）
-precedence ::ffff:0:0/96  10
-# 标准地址类型优先级
-precedence 2002::/16      30
-precedence ::/96          20
-precedence ::1/128        50
+        echo -e "${YELLOW}\n[1/3] 备份原配置..."
+        cp -f $CONF_FILE $BACKUP_FILE 2>/dev/null || true
+
+        echo -e "${YELLOW}[2/3] 生成新配置..."
+        cat > $CONF_FILE << EOF
+# 由网络工具箱设置 IPv6 优先
+precedence ::/0 40
+#precedence ::ffff:0:0/96 100
 EOF
-        
-        echo -e "${YELLOW}[3/4] 刷新系统缓存..."
-        if command -v systemd-resolve >/dev/null 2>&1; then
-            systemd-resolve --flush-caches 2>/dev/null || true
-        fi
-        if command -v nscd >/dev/null 2>&1; then
-            systemctl restart nscd 2>/dev/null || true
-        fi
-        
-        echo -e "${YELLOW}[4/4] 重启网络服务..."
-        restart_network_services
-        
-        echo -e "${GREEN}\n✅ IPv6优先配置已应用！${NC}"
+
+        echo -e "${YELLOW}[3/3] 应用配置..."
     }
-    
+
     restore_default() {
-        if [ -f "$BACKUP_FILE" ]; then
-            echo -e "${YELLOW}\n[1/3] 恢复备份文件..."
-            cp "$BACKUP_FILE" "$CONF_FILE"
-            echo -e "${YELLOW}[2/3] 删除备份..."
-            rm -f "$BACKUP_FILE"
+        if [ -f $BACKUP_FILE ]; then
+            echo -e "${YELLOW}\n[1/2] 恢复备份文件..."
+            cp -f $BACKUP_FILE $CONF_FILE
+            echo -e "${YELLOW}[2/2] 删除备份..."
+            rm -f $BACKUP_FILE
         else
-            echo -e "${YELLOW}\n[1/3] 重置为默认配置..."
-            # 创建空配置文件或删除所有precedence配置
-            > "$CONF_FILE"
+            echo -e "${YELLOW}\n[1/1] 重置为默认配置..."
+            sed -i '/^precedence/d' $CONF_FILE
         fi
-        
-        echo -e "${YELLOW}[3/3] 重启网络服务..."
-        restart_network_services
-        
-        echo -e "${GREEN}\n✅ 已恢复默认系统配置！${NC}"
     }
-    
-    test_current_setting() {
-        echo -e "${YELLOW}\n=== 测试IP优先级设置效果 ===${NC}"
-        
-        # 显示当前公网IP
-        echo -e "\n${CYAN}1. 本机公网IP地址：${NC}"
-        get_public_ip
-        
-        # 测试域名解析优先级
-        echo -e "\n${CYAN}2. 域名解析优先级测试：${NC}"
-        test_domains=("google.com" "github.com" "cloudflare.com")
-        
-        for domain in "${test_domains[@]}"; do
-            echo -e "\n  ${YELLOW}测试域名: $domain${NC}"
-            
-            # 获取IPv4和IPv6地址
-            local ipv4_addr=$(dig +short "$domain" A 2>/dev/null | head -1)
-            local ipv6_addr=$(dig +short "$domain" AAAA 2>/dev/null | head -1)
-            
-            echo "    IPv4解析: ${ipv4_addr:-未获取到}"
-            echo "    IPv6解析: ${ipv6_addr:-未获取到}"
-            
-            # 测试系统默认解析顺序
-            if command -v getent >/dev/null 2>&1; then
-                local default_addr=$(getent ahosts "$domain" 2>/dev/null | head -1 | awk '{print $1}')
-                if [[ "$default_addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                    echo -e "    ${GREEN}系统解析优先: IPv4 ($default_addr)${NC}"
-                elif [[ "$default_addr" =~ : ]]; then
-                    echo -e "    ${BLUE}系统解析优先: IPv6 ($default_addr)${NC}"
-                else
-                    echo -e "    ${RED}系统解析: 失败${NC}"
-                fi
-            fi
-        done
-        
-        # 测试实际网络连接优先级
-        echo -e "\n${CYAN}3. 网络连接优先级验证：${NC}"
-        
-        # 使用curl测试连接优先级
-        echo "  测试连接到双栈网站..."
-        
-        # 强制IPv4连接测试
-        ipv4_time=$(timeout 5 curl -4 -s -w "%{time_total}" -o /dev/null https://www.google.com 2>/dev/null || echo "失败")
-        echo "    IPv4连接时间: ${ipv4_time}秒"
-        
-        # 强制IPv6连接测试  
-        ipv6_time=$(timeout 5 curl -6 -s -w "%{time_total}" -o /dev/null https://www.google.com 2>/dev/null || echo "失败")
-        echo "    IPv6连接时间: ${ipv6_time}秒"
-        
-        # 默认连接测试
-        default_time=$(timeout 5 curl -s -w "%{time_total}" -o /dev/null https://www.google.com 2>/dev/null || echo "失败")
-        echo "    默认连接时间: ${default_time}秒"
-        
-        # 分析结果
-        if [ "$default_time" != "失败" ] && [ "$ipv4_time" != "失败" ] && [ "$ipv6_time" != "失败" ]; then
-            # 简单比较，不使用bc命令
-            if [ "$default_time" = "$ipv4_time" ] || [ "${default_time%.*}" = "${ipv4_time%.*}" ]; then
-                echo -e "    ${GREEN}结论: 当前系统优先使用IPv4连接${NC}"
-            elif [ "$default_time" = "$ipv6_time" ] || [ "${default_time%.*}" = "${ipv6_time%.*}" ]; then
-                echo -e "    ${BLUE}结论: 当前系统优先使用IPv6连接${NC}"
-            else
-                echo -e "    ${YELLOW}结论: 无法确定连接优先级${NC}"
-            fi
-        else
-            echo -e "    ${YELLOW}结论: 无法确定连接优先级${NC}"
-        fi
-        
-        echo -e "\n${YELLOW}按任意键继续...${NC}"
-        read -n 1
-    }
-    
+
     while true; do
         interactive_menu
         case $choice in
             1)
                 apply_ipv4_preference
-                echo -e "  ${YELLOW}建议重启网络连接或重启系统以确保完全生效${NC}"
-                sleep 3
+                echo -e "${GREEN}\n✅ 已设置为IPv4优先模式！"
+                echo -e "  更改将在下次网络连接时生效${NC}"
+                sleep 2
                 ;;
             2)
                 apply_ipv6_preference
-                echo -e "  ${YELLOW}建议重启网络连接或重启系统以确保完全生效${NC}"
-                sleep 3
+                echo -e "${GREEN}\n✅ 已设置为IPv6优先模式！"
+                echo -e "  更改将在下次网络连接时生效${NC}"
+                sleep 2
                 ;;
             3)
                 restore_default
+                echo -e "${GREEN}\n✅ 已恢复默认系统配置！${NC}"
                 sleep 2
-                ;;
-            4)
-                test_current_setting
-                ;;
-            0)
-                return
-                ;;
-            *)
-                echo -e "${RED}无效选项，请重新输入${NC}"
-                sleep 1
-                ;;
-        esac
-    done
-} | head -1)
-            [ -n "$ipv4_ip" ] && break
-        done
-        
-        # 获取IPv6公网IP
-        for service in "curl -6s https://ipv6.icanhazip.com" "curl -6s https://api6.ipify.org" "dig +short myip.opendns.com @resolver1.opendns.com AAAA"; do
-            ipv6_ip=$(timeout 5 bash -c "$service" 2>/dev/null | grep -E '^[0-9a-fA-F:]+
-    restart_network_services() {
-        echo "    正在重启网络服务..."
-        
-        # 清除DNS缓存
-        if command -v systemd-resolve >/dev/null 2>&1; then
-            systemd-resolve --flush-caches 2>/dev/null || true
-        fi
-        
-        # 检测系统类型并重启相应服务
-        if [ -f /etc/debian_version ]; then
-            # Debian/Ubuntu系统
-            if systemctl is-active --quiet systemd-resolved; then
-                systemctl restart systemd-resolved 2>/dev/null || true
-            fi
-            
-            if systemctl is-active --quiet systemd-networkd; then
-                systemctl restart systemd-networkd 2>/dev/null || true
-            fi
-            
-            if systemctl is-active --quiet NetworkManager; then
-                systemctl restart NetworkManager 2>/dev/null || true
-            elif systemctl is-active --quiet networking; then
-                systemctl restart networking 2>/dev/null || true
-            fi
-            
-            # Ubuntu特有：如果存在netplan
-            if command -v netplan >/dev/null 2>&1; then
-                netplan apply 2>/dev/null || true
-            fi
-            
-        else
-            # 其他Linux发行版
-            systemctl restart systemd-resolved 2>/dev/null || true
-            systemctl restart NetworkManager 2>/dev/null || systemctl restart networking 2>/dev/null || true
-        fi
-        
-        echo "    网络服务重启完成"
-    }
-    
-    show_current_status() {
-        echo -e "\n${YELLOW}当前优先级配置："
-        if grep -qE "^precedence ::ffff:0:0/96 100" "$CONF_FILE" 2>/dev/null; then
-            echo -e "  ▸ ${GREEN}IPv4优先模式 (precedence ::ffff:0:0/96 100)${NC}"
-        elif grep -qE "^precedence ::/0 40" "$CONF_FILE" 2>/dev/null; then
-            echo -e "  ▸ ${GREEN}IPv6优先模式 (precedence ::/0 40)${NC}"
-        else
-            echo -e "  ▸ ${YELLOW}系统默认配置${NC}"
-        fi
-        
-        # 显示本机公网IP
-        echo -e "\n${YELLOW}本机公网IP地址："
-        get_public_ip
-    }
-    
-    interactive_menu() {
-        clear
-        echo -e "${GREEN}=== IP协议优先级设置 ==="
-        echo -e "1. IPv4优先 (推荐)"
-        echo -e "2. IPv6优先"
-        echo -e "3. 恢复默认配置"
-        echo -e "4. 测试当前设置"
-        echo -e "0. 返回主菜单"
-        show_current_status
-        read -p "请输入选项 [0-4]: " choice
-    }
-    
-    apply_ipv4_preference() {
-        echo -e "${YELLOW}\n[1/4] 备份原配置..."
-        if [ -f "$CONF_FILE" ]; then
-            cp "$CONF_FILE" "$BACKUP_FILE" 2>/dev/null || true
-        fi
-        
-        echo -e "${YELLOW}[2/4] 生成新配置..."
-        # 创建完整的gai.conf配置，确保IPv4优先
-        cat > "$CONF_FILE" << 'EOF'
-# 由网络工具箱设置 - IPv4 优先配置
-# IPv4地址优先级设为100（高优先级）
-precedence ::ffff:0:0/96  100
-# IPv6地址优先级设为10（低优先级）  
-precedence ::/0           10
-# 标准地址类型优先级
-precedence 2002::/16      30
-precedence ::/96          20
-precedence ::1/128        50
-EOF
-        
-        echo -e "${YELLOW}[3/4] 刷新系统缓存..."
-        # 清除DNS缓存
-        if command -v systemd-resolve >/dev/null 2>&1; then
-            systemd-resolve --flush-caches 2>/dev/null || true
-        fi
-        if command -v nscd >/dev/null 2>&1; then
-            systemctl restart nscd 2>/dev/null || true
-        fi
-        
-        echo -e "${YELLOW}[4/4] 重启网络服务..."
-        # 重启网络相关服务以确保配置生效
-        restart_network_services
-        
-        echo -e "${GREEN}\n✅ IPv4优先配置已应用！${NC}"
-    }
-    
-    apply_ipv6_preference() {
-        echo -e "${YELLOW}\n[1/4] 备份原配置..."
-        if [ -f "$CONF_FILE" ]; then
-            cp "$CONF_FILE" "$BACKUP_FILE" 2>/dev/null || true
-        fi
-        
-        echo -e "${YELLOW}[2/4] 生成新配置..."
-        cat > "$CONF_FILE" << 'EOF'
-# 由网络工具箱设置 - IPv6 优先配置
-# IPv6地址优先级设为40（高优先级）
-precedence ::/0           40
-# IPv4地址优先级设为10（低优先级）
-precedence ::ffff:0:0/96  10
-# 标准地址类型优先级
-precedence 2002::/16      30
-precedence ::/96          20
-precedence ::1/128        50
-EOF
-        
-        echo -e "${YELLOW}[3/4] 刷新系统缓存..."
-        if command -v systemd-resolve >/dev/null 2>&1; then
-            systemd-resolve --flush-caches 2>/dev/null || true
-        fi
-        if command -v nscd >/dev/null 2>&1; then
-            systemctl restart nscd 2>/dev/null || true
-        fi
-        
-        echo -e "${YELLOW}[4/4] 重启网络服务..."
-        restart_network_services
-        
-        echo -e "${GREEN}\n✅ IPv6优先配置已应用！${NC}"
-    }
-    
-    restore_default() {
-        if [ -f "$BACKUP_FILE" ]; then
-            echo -e "${YELLOW}\n[1/3] 恢复备份文件..."
-            cp "$BACKUP_FILE" "$CONF_FILE"
-            echo -e "${YELLOW}[2/3] 删除备份..."
-            rm -f "$BACKUP_FILE"
-        else
-            echo -e "${YELLOW}\n[1/3] 重置为默认配置..."
-            # 创建空配置文件或删除所有precedence配置
-            > "$CONF_FILE"
-        fi
-        
-        echo -e "${YELLOW}[3/3] 重启网络服务..."
-        restart_network_services
-        
-        echo -e "${GREEN}\n✅ 已恢复默认系统配置！${NC}"
-    }
-    
-    test_current_setting() {
-        echo -e "${YELLOW}\n=== 测试当前IP优先级设置 ===${NC}"
-        
-        # 测试域名解析顺序
-        test_domains=("google.com" "github.com" "cloudflare.com")
-        
-        for domain in "${test_domains[@]}"; do
-            echo -e "\n${CYAN}测试域名: $domain${NC}"
-            
-            # 获取IPv4和IPv6地址
-            ipv4_addr=$(getent ahostsv4 "$domain" 2>/dev/null | head -1 | awk '{print $1}')
-            ipv6_addr=$(getent ahostsv6 "$domain" 2>/dev/null | head -1 | awk '{print $1}')
-            
-            echo "  IPv4: ${ipv4_addr:-未获取到}"
-            echo "  IPv6: ${ipv6_addr:-未获取到}"
-            
-            # 测试默认解析结果
-            default_addr=$(getent ahosts "$domain" 2>/dev/null | head -1 | awk '{print $1}')
-            if [[ "$default_addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                echo -e "  ${GREEN}默认解析: $default_addr (IPv4优先)${NC}"
-            elif [[ "$default_addr" =~ : ]]; then
-                echo -e "  ${BLUE}默认解析: $default_addr (IPv6优先)${NC}"
-            else
-                echo -e "  ${RED}默认解析: 解析失败${NC}"
-            fi
-        done
-        
-        echo -e "\n${YELLOW}按任意键继续...${NC}"
-        read -n 1
-    }
-    
-    while true; do
-        interactive_menu
-        case $choice in
-            1)
-                apply_ipv4_preference
-                echo -e "  ${YELLOW}建议重启网络连接或重启系统以确保完全生效${NC}"
-                sleep 3
-                ;;
-            2)
-                apply_ipv6_preference
-                echo -e "  ${YELLOW}建议重启网络连接或重启系统以确保完全生效${NC}"
-                sleep 3
-                ;;
-            3)
-                restore_default
-                sleep 2
-                ;;
-            4)
-                test_current_setting
-                ;;
-            0)
-                return
-                ;;
-            *)
-                echo -e "${RED}无效选项，请重新输入${NC}"
-                sleep 1
-                ;;
-        esac
-    done
-} | head -1)
-            [ -n "$ipv6_ip" ] && break
-        done
-        
-        # 显示结果
-        if [ -n "$ipv4_ip" ]; then
-            echo -e "  ${GREEN}IPv4: $ipv4_ip${NC}"
-        else
-            echo -e "  ${RED}IPv4: 获取失败或不支持${NC}"
-        fi
-        
-        if [ -n "$ipv6_ip" ]; then
-            echo -e "  ${BLUE}IPv6: $ipv6_ip${NC}"
-        else
-            echo -e "  ${RED}IPv6: 获取失败或不支持${NC}"
-        fi
-        
-        # 测试默认连接优先级
-        echo -e "\n${YELLOW}网络连接优先级测试："
-        test_connection_priority
-    }
-    
-    # 测试连接优先级
-    test_connection_priority() {
-        # 使用双栈域名测试实际连接优先级
-        local dual_stack_domain="google.com"
-        
-        # 获取域名的IPv4和IPv6地址
-        local ipv4_addr=$(dig +short $dual_stack_domain A | head -1)
-        local ipv6_addr=$(dig +short $dual_stack_domain AAAA | head -1)
-        
-        if [ -n "$ipv4_addr" ] && [ -n "$ipv6_addr" ]; then
-            echo "  域名 $dual_stack_domain 解析结果:"
-            echo "    IPv4: $ipv4_addr"
-            echo "    IPv6: $ipv6_addr"
-            
-            # 测试默认连接使用哪个IP版本
-            local default_connect=$(timeout 3 curl -s --connect-timeout 2 http://$dual_stack_domain 2>/dev/null | head -c 1)
-            if [ $? -eq 0 ]; then
-                # 通过netstat或ss查看建立的连接
-                local active_conn=$(ss -tn 2>/dev/null | grep ":80" | head -1)
-                if [[ "$active_conn" =~ \[.*\]: ]]; then
-                    echo -e "    ${BLUE}实际连接: IPv6优先${NC}"
-                elif [[ "$active_conn" =~ [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:80 ]]; then
-                    echo -e "    ${GREEN}实际连接: IPv4优先${NC}"
-                else
-                    echo -e "    ${YELLOW}无法确定连接类型${NC}"
-                fi
-            else
-                echo -e "    ${YELLOW}连接测试失败${NC}"
-            fi
-        else
-            echo -e "  ${RED}域名解析测试失败${NC}"
-        fi
-    }
-    
-    # 重启网络服务函数
-    restart_network_services() {
-        echo "    正在重启网络服务..."
-        
-        # 清除DNS缓存
-        if command -v systemd-resolve >/dev/null 2>&1; then
-            systemd-resolve --flush-caches 2>/dev/null || true
-        fi
-        
-        # 检测系统类型并重启相应服务
-        if [ -f /etc/debian_version ]; then
-            # Debian/Ubuntu系统
-            if systemctl is-active --quiet systemd-resolved; then
-                systemctl restart systemd-resolved 2>/dev/null || true
-            fi
-            
-            if systemctl is-active --quiet systemd-networkd; then
-                systemctl restart systemd-networkd 2>/dev/null || true
-            fi
-            
-            if systemctl is-active --quiet NetworkManager; then
-                systemctl restart NetworkManager 2>/dev/null || true
-            elif systemctl is-active --quiet networking; then
-                systemctl restart networking 2>/dev/null || true
-            fi
-            
-            # Ubuntu特有：如果存在netplan
-            if command -v netplan >/dev/null 2>&1; then
-                netplan apply 2>/dev/null || true
-            fi
-            
-        else
-            # 其他Linux发行版
-            systemctl restart systemd-resolved 2>/dev/null || true
-            systemctl restart NetworkManager 2>/dev/null || systemctl restart networking 2>/dev/null || true
-        fi
-        
-        echo "    网络服务重启完成"
-    }
-    
-    show_current_status() {
-        echo -e "\n${YELLOW}当前优先级配置："
-        if grep -qE "^precedence ::ffff:0:0/96 100" "$CONF_FILE" 2>/dev/null; then
-            echo -e "  ▸ ${GREEN}IPv4优先模式 (precedence ::ffff:0:0/96 100)${NC}"
-        elif grep -qE "^precedence ::/0 40" "$CONF_FILE" 2>/dev/null; then
-            echo -e "  ▸ ${GREEN}IPv6优先模式 (precedence ::/0 40)${NC}"
-        else
-            echo -e "  ▸ ${YELLOW}系统默认配置${NC}"
-        fi
-        
-        # 显示本机公网IP
-        echo -e "\n${YELLOW}本机公网IP地址："
-        get_public_ip
-    }
-    
-    interactive_menu() {
-        clear
-        echo -e "${GREEN}=== IP协议优先级设置 ==="
-        echo -e "1. IPv4优先 (推荐)"
-        echo -e "2. IPv6优先"
-        echo -e "3. 恢复默认配置"
-        echo -e "4. 测试当前设置"
-        echo -e "0. 返回主菜单"
-        show_current_status
-        read -p "请输入选项 [0-4]: " choice
-    }
-    
-    apply_ipv4_preference() {
-        echo -e "${YELLOW}\n[1/4] 备份原配置..."
-        if [ -f "$CONF_FILE" ]; then
-            cp "$CONF_FILE" "$BACKUP_FILE" 2>/dev/null || true
-        fi
-        
-        echo -e "${YELLOW}[2/4] 生成新配置..."
-        # 创建完整的gai.conf配置，确保IPv4优先
-        cat > "$CONF_FILE" << 'EOF'
-# 由网络工具箱设置 - IPv4 优先配置
-# IPv4地址优先级设为100（高优先级）
-precedence ::ffff:0:0/96  100
-# IPv6地址优先级设为10（低优先级）  
-precedence ::/0           10
-# 标准地址类型优先级
-precedence 2002::/16      30
-precedence ::/96          20
-precedence ::1/128        50
-EOF
-        
-        echo -e "${YELLOW}[3/4] 刷新系统缓存..."
-        # 清除DNS缓存
-        if command -v systemd-resolve >/dev/null 2>&1; then
-            systemd-resolve --flush-caches 2>/dev/null || true
-        fi
-        if command -v nscd >/dev/null 2>&1; then
-            systemctl restart nscd 2>/dev/null || true
-        fi
-        
-        echo -e "${YELLOW}[4/4] 重启网络服务..."
-        # 重启网络相关服务以确保配置生效
-        restart_network_services
-        
-        echo -e "${GREEN}\n✅ IPv4优先配置已应用！${NC}"
-    }
-    
-    apply_ipv6_preference() {
-        echo -e "${YELLOW}\n[1/4] 备份原配置..."
-        if [ -f "$CONF_FILE" ]; then
-            cp "$CONF_FILE" "$BACKUP_FILE" 2>/dev/null || true
-        fi
-        
-        echo -e "${YELLOW}[2/4] 生成新配置..."
-        cat > "$CONF_FILE" << 'EOF'
-# 由网络工具箱设置 - IPv6 优先配置
-# IPv6地址优先级设为40（高优先级）
-precedence ::/0           40
-# IPv4地址优先级设为10（低优先级）
-precedence ::ffff:0:0/96  10
-# 标准地址类型优先级
-precedence 2002::/16      30
-precedence ::/96          20
-precedence ::1/128        50
-EOF
-        
-        echo -e "${YELLOW}[3/4] 刷新系统缓存..."
-        if command -v systemd-resolve >/dev/null 2>&1; then
-            systemd-resolve --flush-caches 2>/dev/null || true
-        fi
-        if command -v nscd >/dev/null 2>&1; then
-            systemctl restart nscd 2>/dev/null || true
-        fi
-        
-        echo -e "${YELLOW}[4/4] 重启网络服务..."
-        restart_network_services
-        
-        echo -e "${GREEN}\n✅ IPv6优先配置已应用！${NC}"
-    }
-    
-    restore_default() {
-        if [ -f "$BACKUP_FILE" ]; then
-            echo -e "${YELLOW}\n[1/3] 恢复备份文件..."
-            cp "$BACKUP_FILE" "$CONF_FILE"
-            echo -e "${YELLOW}[2/3] 删除备份..."
-            rm -f "$BACKUP_FILE"
-        else
-            echo -e "${YELLOW}\n[1/3] 重置为默认配置..."
-            # 创建空配置文件或删除所有precedence配置
-            > "$CONF_FILE"
-        fi
-        
-        echo -e "${YELLOW}[3/3] 重启网络服务..."
-        restart_network_services
-        
-        echo -e "${GREEN}\n✅ 已恢复默认系统配置！${NC}"
-    }
-    
-    test_current_setting() {
-        echo -e "${YELLOW}\n=== 测试当前IP优先级设置 ===${NC}"
-        
-        # 测试域名解析顺序
-        test_domains=("google.com" "github.com" "cloudflare.com")
-        
-        for domain in "${test_domains[@]}"; do
-            echo -e "\n${CYAN}测试域名: $domain${NC}"
-            
-            # 获取IPv4和IPv6地址
-            ipv4_addr=$(getent ahostsv4 "$domain" 2>/dev/null | head -1 | awk '{print $1}')
-            ipv6_addr=$(getent ahostsv6 "$domain" 2>/dev/null | head -1 | awk '{print $1}')
-            
-            echo "  IPv4: ${ipv4_addr:-未获取到}"
-            echo "  IPv6: ${ipv6_addr:-未获取到}"
-            
-            # 测试默认解析结果
-            default_addr=$(getent ahosts "$domain" 2>/dev/null | head -1 | awk '{print $1}')
-            if [[ "$default_addr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                echo -e "  ${GREEN}默认解析: $default_addr (IPv4优先)${NC}"
-            elif [[ "$default_addr" =~ : ]]; then
-                echo -e "  ${BLUE}默认解析: $default_addr (IPv6优先)${NC}"
-            else
-                echo -e "  ${RED}默认解析: 解析失败${NC}"
-            fi
-        done
-        
-        echo -e "\n${YELLOW}按任意键继续...${NC}"
-        read -n 1
-    }
-    
-    while true; do
-        interactive_menu
-        case $choice in
-            1)
-                apply_ipv4_preference
-                echo -e "  ${YELLOW}建议重启网络连接或重启系统以确保完全生效${NC}"
-                sleep 3
-                ;;
-            2)
-                apply_ipv6_preference
-                echo -e "  ${YELLOW}建议重启网络连接或重启系统以确保完全生效${NC}"
-                sleep 3
-                ;;
-            3)
-                restore_default
-                sleep 2
-                ;;
-            4)
-                test_current_setting
                 ;;
             0)
                 return
@@ -1650,7 +987,6 @@ EOF
         esac
     done
 }
-
 # ======================= TCP性能优化 =======================
 install_magic_tcp() {
     clear
