@@ -1128,14 +1128,25 @@ EOF
     return 0
 }
 
-# 服务端安装（已优化，增加自动配置）
+# 服务端安装（已修正语法错误）
 install_dns_unlock_server() {
     clear
     echo -e "${YELLOW}--- DNS解锁服务 安装/更新 ---${NC}"
+    
+    # --- 已修正的部分 ---
     echo -e "${CYAN}INFO: 正在检查核心依赖 (wget, lsof, curl)...${NC}"
     for cmd in wget lsof curl; do
-        if ! command -v $cmd &> /dev/null; sudo apt-get update && sudo apt-get install -y $cmd; fi
+        if ! command -v "$cmd" &> /dev/null; then
+            echo -e "${YELLOW}WARNING: 命令 '$cmd' 未找到，正在尝试安装...${NC}"
+            sudo apt-get update && sudo apt-get install -y "$cmd"
+            if ! command -v "$cmd" &> /dev/null; then
+                echo -e "${RED}ERROR: 依赖 '$cmd' 安装失败。请手动安装后重试。${NC}"
+                return 1
+            fi
+        fi
     done
+    # --- 修正结束 ---
+
     if ! check_and_free_port_53; then return 1; fi
 
     echo -e "${CYAN}INFO: 正在下载并执行一键安装脚本...${NC}"
@@ -1144,7 +1155,6 @@ install_dns_unlock_server() {
         echo -e "${CYAN}INFO: 即将开始自动化配置增强...${NC}"
         
         # --- 自动配置开始 ---
-        # 1. 获取公网IP
         echo -e "${CYAN}INFO: 正在获取本机公网IP地址...${NC}"
         PUBLIC_IP=$(curl -4s ip.sb || curl -4s ifconfig.me)
         if [[ -z "$PUBLIC_IP" ]]; then
@@ -1155,11 +1165,10 @@ install_dns_unlock_server() {
         echo -e "${GREEN}INFO: 获取到公网IP地址: ${PUBLIC_IP}${NC}"
         echo
 
-        # 2. 修改 Dnsmasq 配置
         DNSMASQ_CONFIG_FILE="/etc/dnsmasq.d/custom_netflix.conf"
         echo -e "${CYAN}INFO: 正在更新 Dnsmasq 配置文件 (${DNSMASQ_CONFIG_FILE})...${NC}"
         if [ -f "$DNSMASQ_CONFIG_FILE" ] && ! grep -q "chatgpt.com" "$DNSMASQ_CONFIG_FILE"; then
-            tee -a "$DNSMASQ_CONFIG_FILE" > /dev/null <<EOF
+            sudo tee -a "$DNSMASQ_CONFIG_FILE" > /dev/null <<EOF
 
 # Custom additions for ChatGPT/TikTok etc.
 address=/chatgpt.com/${PUBLIC_IP}
@@ -1183,7 +1192,6 @@ EOF
         fi
         echo
 
-        # 3. 修改 SNI Proxy 配置
         SNIPROXY_CONFIG_FILE="/etc/sniproxy.conf"
         echo -e "${CYAN}INFO: 正在更新 SNI Proxy 配置文件 (${SNIPROXY_CONFIG_FILE})...${NC}"
         if [ -f "$SNIPROXY_CONFIG_FILE" ] && ! grep -q "chatgpt\\.com" "$SNIPROXY_CONFIG_FILE"; then
@@ -1205,7 +1213,6 @@ EOF
 EOF
 )
             TEMP_FILE=$(mktemp)
-            # 使用 tac 和 sed 在最后一个 '}' 前插入内容，非常稳定
             tac "$SNIPROXY_CONFIG_FILE" | sed "0,/^}/s/^}/${SNIPROXY_ADDITIONS}\n}/" | tac > "$TEMP_FILE"
             if sudo mv "$TEMP_FILE" "$SNIPROXY_CONFIG_FILE"; then
                 echo -e "${CYAN}INFO: 正在重启 SNI Proxy 服务...${NC}"
@@ -1217,7 +1224,6 @@ EOF
             echo -e "${YELLOW}WARNING: SNI Proxy 配置文件未找到或已包含相关配置，跳过此步骤。${NC}"
         fi
         # --- 自动配置结束 ---
-
     else
         echo -e "${RED}ERROR: 基础服务安装脚本下载或执行失败。${NC}"
     fi
