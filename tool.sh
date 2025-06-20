@@ -1584,8 +1584,8 @@ optimize_tcp_performance() {
     echo # Add an empty line for spacing
     echo -e "此脚本将通过以下步骤优化系统的TCP性能："
     echo -e "1. 自动备份当前的 sysctl.conf 和 sysctl.d 目录。"
-    echo -e "2. 检查并注释掉与BBR相关的旧配置。"
-    echo -e "3. 添加最新的BBR和fq配置以提升网络吞吐量。"
+    echo -e "2. 检查并注释掉与BBR及网络性能相关的旧配置。"
+    echo -e "3. 添加最新的BBR、fq及其他网络优化配置。"
     echo -e "4. 提醒您手动检查 sysctl.d 目录中的潜在冲突。"
     echo
 
@@ -1602,15 +1602,24 @@ optimize_tcp_performance() {
     echo -e "${GREEN}内核版本 ${kernel_version}，满足要求。${NC}"
     echo
 
-    # --- 要添加或更新的参数列表 ---
+    # --- 要添加或更新的参数列表 (已更新) ---
     local params=(
-        "net.core.default_qdisc"
-        "net.ipv4.tcp_congestion_control"
-        "net.core.rmem_max"
-        "net.core.wmem_max"
-        "net.core.netdev_max_backlog"
+        "net.ipv4.tcp_fastopen"
+        "net.ipv4.tcp_fastopen_blackhole_timeout_sec"
+        "net.ipv4.tcp_slow_start_after_idle"
+        "net.ipv4.tcp_collapse_max_bytes"
+        "net.ipv4.tcp_notsent_lowat"
+        "net.ipv4.tcp_syn_retries"
+        "net.ipv4.tcp_moderate_rcvbuf"
+        "net.ipv4.tcp_adv_win_scale"
         "net.ipv4.tcp_rmem"
         "net.ipv4.tcp_wmem"
+        "net.core.rmem_default"
+        "net.core.wmem_default"
+        "net.core.rmem_max"
+        "net.core.wmem_max"
+        "net.core.default_qdisc"
+        "net.ipv4.tcp_congestion_control"
     )
 
     # --- 1. 执行备份 ---
@@ -1631,18 +1640,28 @@ optimize_tcp_performance() {
     echo -e "${GREEN}INFO: 旧配置注释完成。${NC}"
     echo
 
-    # --- 3. 追加新的配置到 /etc/sysctl.conf ---
+    # --- 3. 追加新的配置到 /etc/sysctl.conf (已更新) ---
     echo -e "${CYAN}INFO: 正在将新的网络优化配置追加到文件末尾...${NC}"
     sudo tee -a /etc/sysctl.conf > /dev/null << EOF
 
 # --- BBR and Network Optimization Settings Added by Toolbox on $(date +%Y-%m-%d) ---
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_fastopen_blackhole_timeout_sec=0
+net.ipv4.tcp_slow_start_after_idle=0
+#net.ipv4.tcp_collapse_max_bytes=6291456
+#net.ipv4.tcp_notsent_lowat=16384
+#net.ipv4.tcp_notsent_lowat=4294967295
+net.ipv4.tcp_syn_retries=3
+net.ipv4.tcp_moderate_rcvbuf=1
+net.ipv4.tcp_adv_win_scale=1
+net.ipv4.tcp_rmem=4096 26214400 104857600
+net.ipv4.tcp_wmem=4096 26214400 104857600
+net.core.rmem_default=26214400
+net.core.wmem_default=26214400
+net.core.rmem_max=104857600
+net.core.wmem_max=104857600
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
-net.core.rmem_max=67108864
-net.core.wmem_max=67108864
-net.core.netdev_max_backlog=250000
-net.ipv4.tcp_rmem=4096 87380 67108864
-net.ipv4.tcp_wmem=4096 65536 67108864
 # --- End of BBR Settings ---
 EOF
     echo -e "${GREEN}INFO: 新配置追加完成。${NC}"
