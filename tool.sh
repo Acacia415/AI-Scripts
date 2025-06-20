@@ -1128,12 +1128,11 @@ EOF
     return 0
 }
 
-# 服务端安装（已修正语法错误）
+# 服务端安装（已使用更安全的配置修改方法）
 install_dns_unlock_server() {
     clear
     echo -e "${YELLOW}--- DNS解锁服务 安装/更新 ---${NC}"
     
-    # --- 已修正的部分 ---
     echo -e "${CYAN}INFO: 正在检查核心依赖 (wget, lsof, curl)...${NC}"
     for cmd in wget lsof curl; do
         if ! command -v "$cmd" &> /dev/null; then
@@ -1145,7 +1144,6 @@ install_dns_unlock_server() {
             fi
         fi
     done
-    # --- 修正结束 ---
 
     if ! check_and_free_port_53; then return 1; fi
 
@@ -1192,10 +1190,12 @@ EOF
         fi
         echo
 
+        # --- SNI Proxy 修改（已重写为更安全的方式） ---
         SNIPROXY_CONFIG_FILE="/etc/sniproxy.conf"
         echo -e "${CYAN}INFO: 正在更新 SNI Proxy 配置文件 (${SNIPROXY_CONFIG_FILE})...${NC}"
         if [ -f "$SNIPROXY_CONFIG_FILE" ] && ! grep -q "chatgpt\\.com" "$SNIPROXY_CONFIG_FILE"; then
-            SNIPROXY_ADDITIONS=$(cat <<'EOF'
+            ADDITIONS_FILE=$(mktemp)
+            cat <<'EOF' > "$ADDITIONS_FILE"
     # Custom additions for ChatGPT/TikTok etc.
     .*chatgpt\.com$ *
     .*cdn\.usefathom\.com$ *
@@ -1211,15 +1211,24 @@ EOF
     .*tiktokcdn\.com$ *
     .*tiktokv\.com$ *
 EOF
-)
-            TEMP_FILE=$(mktemp)
-            tac "$SNIPROXY_CONFIG_FILE" | sed "0,/^}/s/^}/${SNIPROXY_ADDITIONS}\n}/" | tac > "$TEMP_FILE"
-            if sudo mv "$TEMP_FILE" "$SNIPROXY_CONFIG_FILE"; then
-                echo -e "${CYAN}INFO: 正在重启 SNI Proxy 服务...${NC}"
-                if sudo systemctl restart sniproxy; then echo -e "${GREEN}SUCCESS: SNI Proxy 配置更新并重启成功。${NC}"; else echo -e "${RED}ERROR: SNI Proxy 服务重启失败。${NC}"; fi
+            LINE_NUM=$(grep -n "}" "$SNIPROXY_CONFIG_FILE" | tail -n 1 | cut -d: -f1)
+            if [[ -n "$LINE_NUM" ]]; then
+                TEMP_CONFIG=$(mktemp)
+                head -n $((LINE_NUM - 1)) "$SNIPROXY_CONFIG_FILE" > "$TEMP_CONFIG"
+                cat "$ADDITIONS_FILE" >> "$TEMP_CONFIG"
+                tail -n +$LINE_NUM "$SNIPROXY_CONFIG_FILE" >> "$TEMP_CONFIG"
+                
+                if sudo mv "$TEMP_CONFIG" "$SNIPROXY_CONFIG_FILE"; then
+                    echo -e "${GREEN}SUCCESS: SNI Proxy 配置文件已更新。${NC}"
+                    echo -e "${CYAN}INFO: 正在重启 SNI Proxy 服务...${NC}"
+                    if sudo systemctl restart sniproxy; then echo -e "${GREEN}SUCCESS: SNI Proxy 服务重启成功。${NC}"; else echo -e "${RED}ERROR: SNI Proxy 服务重启失败。${NC}"; fi
+                else
+                    echo -e "${RED}ERROR: 写入 SNI Proxy 配置文件失败。${NC}"
+                fi
             else
-                echo -e "${RED}ERROR: 写入 SNI Proxy 配置文件失败。${NC}"
+                echo -e "${RED}ERROR: 无法在 ${SNIPROXY_CONFIG_FILE} 中找到插入点 '}'。${NC}"
             fi
+            rm -f "$ADDITIONS_FILE"
         else
             echo -e "${YELLOW}WARNING: SNI Proxy 配置文件未找到或已包含相关配置，跳过此步骤。${NC}"
         fi
