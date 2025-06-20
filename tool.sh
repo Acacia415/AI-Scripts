@@ -1091,258 +1091,214 @@ install_shell_beautify() {
 }
 
 # ======================= DNS解锁管理 =======================
-dns_unlock_menu() {
-  while true; do
-    clear
-    echo -e "${YELLOW}════════════ DNS解锁服务管理 ════════════${NC}"
-    echo -e "1. 安装服务端 (DNS解锁服务器)"
-    echo -e "2. 卸载服务端"
-    echo -e "3. 设置客户端"
-    echo -e "4. 卸载客户端"
-    echo -e "5. IP白名单管理"
-    echo -e "0. 返回主菜单"
-    echo -e "${YELLOW}════════════════════════════════════════${NC}"
-    read -p "请输入选项: " sub_choice
 
-    case $sub_choice in
-      1)
-        install_dns_unlock_server
-        read -n 1 -s -r -p "按任意键返回..."
-        ;;
-      2)
-        uninstall_dns_unlock_server
-        read -n 1 -s -r -p "按任意键返回..."
-        ;;
-      3)
-        setup_dns_client
-        read -n 1 -s -r -p "按任意键返回..."
-        ;;
-      4)
-        uninstall_dns_client
-        read -n 1 -s -r -p "按任意键返回..."
-        ;;
-      5)
-        manage_iptables_rules
-        read -n 1 -s -r -p "按任意键返回..."
-        ;;
-      0)
-        break
-        ;;
-      *)
-        echo -e "${RED}无效选项，请重新输入${NC}"
+# 帮助函数：检查并尝试释放被 systemd-resolved 占用的 53 端口
+check_and_free_port_53() {
+    echo -e "${CYAN}INFO: 正在检查端口 53 是否被占用...${NC}"
+    if sudo lsof -i :53 -sTCP:LISTEN -P -n > /dev/null || sudo lsof -i :53 -sUDP:LISTEN -P -n > /dev/null; then
+        echo -e "${YELLOW}WARNING: 端口 53 (DNS) 已被占用，很可能由 systemd-resolved 导致。${NC}"
+        echo -e "${CYAN}INFO: 正在尝试自动修改配置以释放端口...${NC}"
+        sudo systemctl stop systemd-resolved
+        if [ -f /etc/systemd/resolved.conf ]; then
+            sudo sed -i -E 's/^#?(DNS=).*/\18.8.8.8/' /etc/systemd/resolved.conf
+            sudo sed -i -E 's/^#?(DNSStubListener=).*/\1no/' /etc/systemd/resolved.conf
+            if ! grep -q "DNSStubListener=no" /etc/systemd/resolved.conf; then
+                echo "DNSStubListener=no" | sudo tee -a /etc/systemd/resolved.conf > /dev/null
+            fi
+        else
+            sudo tee /etc/systemd/resolved.conf > /dev/null <<EOF
+[Resolve]
+DNS=8.8.8.8
+DNSStubListener=no
+EOF
+        fi
+        sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+        sudo systemctl restart systemd-resolved
         sleep 1
-        ;;
-    esac
-  done
+        if sudo lsof -i :53 -sTCP:LISTEN -P -n > /dev/null || sudo lsof -i :53 -sUDP:LISTEN -P -n > /dev/null; then
+            echo -e "${RED}ERROR: 自动释放端口 53 失败。请手动排查问题后重试。${NC}"
+            return 1
+        else
+            echo -e "${GREEN}SUCCESS: 端口 53 已成功释放。${NC}"
+        fi
+    else
+        echo -e "${GREEN}INFO: 端口 53 未被占用，可以继续安装。${NC}"
+    fi
+    echo
+    return 0
 }
 
-# 安装服务端（优化版）
+# 服务端安装（使用一键脚本）
 install_dns_unlock_server() {
-  clear
-  echo -e "${YELLOW}正在安装DNS解锁服务端...${NC}"
-  
-  # 禁用系统DNS服务
-  sudo systemctl stop systemd-resolved 2>/dev/null
-  sudo systemctl disable systemd-resolved 2>/dev/null
-  sudo systemctl mask systemd-resolved 2>/dev/null
-  sudo rm -f /etc/resolv.conf
-  echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
-
-  # 安装基础依赖
-  sudo apt-get update
-  sudo apt-get install -y dnsmasq build-essential libev-dev libpcre3-dev libudns-dev autoconf
-
-  # 编译安装SNI Proxy
-  wget -q https://github.com/dlundquist/sniproxy/archive/refs/tags/0.6.1.tar.gz
-  tar -zxvf 0.6.1.tar.gz
-  cd sniproxy-0.6.1
-  ./autogen.sh && ./configure && make
-  sudo make install
-  cd ..
-
-  # 配置DNSmasq
-  LOCAL_IP=$(curl -4s ip.sb)
-  sudo tee /etc/dnsmasq.d/custom.conf <<EOF
-server=8.8.8.8
-address=/chatgpt.com/$LOCAL_IP
-address=/netflix.com/$LOCAL_IP
-address=/example.com/$LOCAL_IP
-EOF
-  sudo systemctl restart dnsmasq
-
-  # 配置SNI Proxy
-  sudo tee /etc/sniproxy.conf <<EOF
-user daemon
-pidfile /var/run/sniproxy.pid
-
-listen 80 {
-    proto http
-}
-
-listen 443 {
-    proto tls
-}
-
-table {
-    .*chatgpt\.com$ *
-    .*netflix\.com$ *
-    .*example\.com$ *
-}
-EOF
-
-  # 创建systemd服务
-  sudo tee /etc/systemd/system/sniproxy.service <<EOF
-[Unit]
-Description=SNI Proxy
-After=network.target
-
-[Service]
-ExecStart=/usr/local/sbin/sniproxy -c /etc/sniproxy.conf
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  sudo systemctl daemon-reload
-  sudo systemctl enable sniproxy --now
-
-  # 初始防火墙规则（保留原有限制逻辑）
-  sudo iptables -I INPUT -p tcp --dport 53 -j DROP
-  sudo iptables -I INPUT -p tcp --dport 80,443 -j DROP
-  sudo netfilter-persistent save
-
-  echo -e "${GREEN}服务端安装完成！${NC}"
-}
-
-# IP白名单管理（增强版）
-manage_iptables_rules() {
-  while true; do
     clear
-    echo -e "${YELLOW}════════ IP白名单管理 ════════${NC}"
-    echo -e "1. 添加白名单IP（全端口）"
-    echo -e "2. 添加白名单IP（指定端口）"
-    echo -e "3. 移除白名单IP"
-    echo -e "0. 返回上级"
-    echo -e "${YELLOW}═════════════════════════════${NC}"
-    read -p "请选择: " rule_choice
+    echo -e "${YELLOW}--- DNS解锁服务 安装/更新 ---${NC}"
+    echo -e "${CYAN}INFO: 正在检查核心依赖 (wget, lsof)...${NC}"
+    for cmd in wget lsof; do
+        if ! command -v $cmd &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y $cmd
+        fi
+    done
+    if ! check_and_free_port_53; then return 1; fi
 
-    case $rule_choice in
-      1)
-        read -p "请输入允许的IP地址（多个用空格分隔）: " ips
-        for ip in $ips; do
-          sudo iptables -I INPUT -s $ip -p tcp -m multiport --dports 53,80,443 -j ACCEPT
-        done
-        sudo netfilter-persistent save
-        echo -e "${GREEN}全端口白名单已添加！${NC}"
-        ;;
-      2)
-        read -p "请输入端口号（多个用逗号分隔）: " ports
-        read -p "请输入允许的IP地址（多个用空格分隔）: " ips
-        for ip in $ips; do
-          sudo iptables -I INPUT -s $ip -p tcp -m multiport --dports ${ports//,/ } -j ACCEPT
-        done
-        sudo netfilter-persistent save
-        echo -e "${GREEN}指定端口白名单已添加！${NC}"
-        ;;
-      3)
-        echo -e "${CYAN}当前规则列表：${NC}"
-        sudo iptables -L INPUT -v -n --line-numbers | grep ACCEPT
-        read -p "请输入要删除的规则行号: " line_num
-        sudo iptables -D INPUT $line_num
-        sudo netfilter-persistent save
-        echo -e "${GREEN}规则已删除！${NC}"
-        ;;
-      0)
-        break
-        ;;
-      *)
-        echo -e "${RED}无效输入！${NC}"
-        sleep 1
-        ;;
-    esac
-    read -n 1 -s -r -p "按任意键继续..."
-  done
+    echo -e "${CYAN}INFO: 正在下载并执行一键安装脚本...${NC}"
+    if wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh && sudo bash dnsmasq_sniproxy.sh -f; then
+        echo -e "${GREEN}SUCCESS: DNS解锁服务安装脚本执行完成。${NC}"
+    else
+        echo -e "${RED}ERROR: 安装脚本下载或执行失败。${NC}"
+    fi
+    rm -f dnsmasq_sniproxy.sh
 }
 
-# 卸载服务端（增强版）
+# 服务端卸载（使用一键脚本）
 uninstall_dns_unlock_server() {
-  clear
-  echo -e "${YELLOW}正在卸载服务端组件...${NC}"
-  
-  # 停止服务
-  sudo systemctl stop dnsmasq
-  sudo systemctl stop sniproxy
-
-  # 移除服务
-  sudo systemctl disable dnsmasq 2>/dev/null
-  sudo systemctl disable sniproxy 2>/dev/null
-  sudo rm -f /etc/systemd/system/sniproxy.service
-  sudo systemctl daemon-reload
-
-  # 删除配置文件
-  sudo rm -rf /etc/dnsmasq.d/custom.conf
-  sudo rm -f /etc/sniproxy.conf
-
-  # 卸载软件
-  sudo apt-get remove -y dnsmasq
-  sudo rm -f /usr/local/sbin/sniproxy
-
-  # 恢复DNS设置
-  sudo rm -f /etc/resolv.conf
-  echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
-  sudo systemctl unmask systemd-resolved 2>/dev/null
-  sudo systemctl start systemd-resolved 2>/dev/null
-
-  # 清理防火墙规则
-  sudo iptables -D INPUT -p tcp --dport 53 -j DROP 2>/dev/null
-  sudo iptables -D INPUT -p tcp --dport 80 -j DROP 2>/dev/null
-  sudo iptables -D INPUT -p tcp --dport 443 -j DROP 2>/dev/null
-  sudo netfilter-persistent save
-
-  echo -e "${GREEN}服务端已彻底卸载！${NC}"
+    clear
+    echo -e "${YELLOW}--- DNS解锁服务 卸载 ---${NC}"
+    if ! command -v wget &> /dev/null; then
+        sudo apt-get update && sudo apt-get install -y wget
+    fi
+    echo -e "${CYAN}INFO: 正在下载并执行一键卸载脚本...${NC}"
+    if wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh && sudo bash dnsmasq_sniproxy.sh -u; then
+        echo -e "${GREEN}SUCCESS: DNS解锁服务卸载脚本执行完成。${NC}"
+    else
+        echo -e "${RED}ERROR: 卸载脚本下载或执行失败。${NC}"
+    fi
+    rm -f dnsmasq_sniproxy.sh
 }
 
-# 客户端设置（兼容性增强）
+# 客户端设置（重写版）
 setup_dns_client() {
-  clear
-  read -p "请输入解锁服务器的IP地址: " server_ip
-  
-  # 备份原配置
-  sudo cp /etc/resolv.conf /etc/resolv.conf.bak
-  
-  # 针对不同系统处理
-  if grep -q "Ubuntu" /etc/os-release; then
-    sudo systemctl stop systemd-resolved
-    sudo rm -f /etc/resolv.conf
-    echo "nameserver $server_ip" | sudo tee /etc/resolv.conf
-    sudo chattr +i /etc/resolv.conf
-  else
-    sudo sed -i "/^# Generated by NetworkManager/d" /etc/resolv.conf
-    echo "nameserver $server_ip" | sudo tee /etc/resolv.conf
-    sudo chattr +i /etc/resolv.conf 2>/dev/null || \
-    (echo -e "${YELLOW}无法锁定DNS设置，建议手动配置网络管理器${NC}")
-  fi
-  
-  echo -e "${GREEN}客户端设置完成！${NC}"
+    clear
+    echo -e "${YELLOW}--- 设置 DNS 客户端 ---${NC}"
+    read -p "请输入您的 DNS 解锁服务器的 IP 地址: " server_ip
+    if ! [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${RED}错误: 您输入的不是一个有效的 IP 地址。${NC}"
+        return 1
+    fi
+
+    echo -e "${CYAN}INFO: 正在备份当前的 DNS 配置...${NC}"
+    if [ -f /etc/resolv.conf ]; then
+        sudo chattr -i /etc/resolv.conf 2>/dev/null
+        sudo mv /etc/resolv.conf "/etc/resolv.conf.bak_$(date +%Y%m%d_%H%M%S)"
+        echo -e "${GREEN}INFO: 原有配置已备份至 /etc/resolv.conf.bak_...${NC}"
+    fi
+
+    echo -e "${CYAN}INFO: 正在写入新的 DNS 配置...${NC}"
+    echo "nameserver $server_ip" | sudo tee /etc/resolv.conf > /dev/null
+
+    echo -e "${CYAN}INFO: 正在锁定 DNS 配置文件以防被覆盖...${NC}"
+    if sudo chattr +i /etc/resolv.conf; then
+        echo -e "${GREEN}SUCCESS: 客户端 DNS 已成功设置为 ${server_ip} 并已锁定！${NC}"
+    else
+        echo -e "${RED}ERROR: 锁定 /etc/resolv.conf 文件失败。${NC}"
+    fi
 }
 
-# 客户端卸载（兼容性增强）
+# 客户端卸载（重写版）
 uninstall_dns_client() {
-  clear
-  sudo chattr -i /etc/resolv.conf 2>/dev/null
-  if [ -f /etc/resolv.conf.bak ]; then
-    sudo mv /etc/resolv.conf.bak /etc/resolv.conf
-  else
-    echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
-  fi
-  
-  # 恢复Ubuntu系统服务
-  if grep -q "Ubuntu" /etc/os-release; then
-    sudo systemctl start systemd-resolved
-  fi
-  
-  echo -e "${GREEN}客户端配置已恢复！${NC}"
+    clear
+    echo -e "${YELLOW}--- 卸载/还原 DNS 客户端设置 ---${NC}"
+    echo -e "${CYAN}INFO: 正在解锁 DNS 配置文件...${NC}"
+    sudo chattr -i /etc/resolv.conf 2>/dev/null
+    
+    local latest_backup
+    latest_backup=$(ls -t /etc/resolv.conf.bak_* 2>/dev/null | head -n 1)
+
+    if [[ -f "$latest_backup" ]]; then
+        echo -e "${CYAN}INFO: 正在从备份文件 $latest_backup 还原...${NC}"
+        sudo mv "$latest_backup" /etc/resolv.conf
+        echo -e "${GREEN}SUCCESS: DNS 配置已成功从备份还原。${NC}"
+    else
+        echo -e "${YELLOW}WARNING: 未找到备份文件。正在设置为通用 DNS (8.8.8.8)...${NC}"
+        echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
+        echo -e "${GREEN}SUCCESS: DNS 已设置为通用公共服务器。${NC}"
+    fi
+}
+
+# IP白名单管理（重写版）
+manage_iptables_rules() {
+    if ! dpkg -l | grep -q 'iptables-persistent'; then
+        echo -e "${YELLOW}WARNING: 'iptables-persistent' 未安装，规则可能无法自动持久化。${NC}"
+        read -p "是否现在尝试安装? (y/N): " install_confirm
+        if [[ "$install_confirm" =~ ^[yY]$ ]]; then
+            sudo apt-get update && sudo apt-get install -y iptables-persistent
+        fi
+    fi
+
+    while true; do
+        clear
+        echo -e "${YELLOW}═════════ IP 白名单管理 (端口 53) ═════════${NC}"
+        echo -e "管理 TCP/UDP 端口 53 的访问权限。"
+        echo -e "${CYAN}当前生效的 Port 53 规则:${NC}"
+        sudo iptables -L INPUT -v -n --line-numbers | grep -E 'dpt:53|dpts.*53' || echo -e "  (无相关规则)"
+        echo -e "${YELLOW}────────────────────────────────────────────${NC}"
+        echo "1. 添加白名单IP (允许访问)"
+        echo "2. 删除白名单IP (根据行号)"
+        echo "3. 应用 '默认拒绝' 规则 (推荐)"
+        echo "0. 返回上级菜单"
+        echo -e "${YELLOW}════════════════════════════════════════════${NC}"
+        read -p "请输入选项: " rule_choice
+
+        case $rule_choice in
+        1)
+            read -p "请输入要加入白名单的IP (多个用空格隔开): " ips
+            if [[ -z "$ips" ]]; then continue; fi
+            for ip in $ips; do
+                sudo iptables -I INPUT -s "$ip" -p tcp --dport 53 -j ACCEPT
+                sudo iptables -I INPUT -s "$ip" -p udp --dport 53 -j ACCEPT
+                echo -e "${GREEN}IP $ip 已添加至 TCP/UDP 端口 53 白名单。${NC}"
+            done
+            sudo netfilter-persistent save && echo -e "${GREEN}防火墙规则已保存。${NC}" || echo -e "${RED}防火墙规则保存失败。${NC}"
+            read -n 1 -s -r -p "按任意键继续..."
+            ;;
+        2)
+            read -p "请输入要删除的规则的行号: " line_num
+            if ! [[ "$line_num" =~ ^[0-9]+$ ]]; then continue; fi
+            sudo iptables -D INPUT "$line_num"
+            sudo netfilter-persistent save && echo -e "${GREEN}规则 ${line_num} 已删除并保存。${NC}" || echo -e "${RED}防火墙规则保存失败。${NC}"
+            read -n 1 -s -r -p "按任意键继续..."
+            ;;
+        3)
+            echo -e "${CYAN}INFO: 这将确保所有不在白名单的IP无法访问端口 53。${NC}"
+            if ! sudo iptables -C INPUT -p tcp --dport 53 -j DROP &>/dev/null; then
+                sudo iptables -A INPUT -p tcp --dport 53 -j DROP
+            fi
+            if ! sudo iptables -C INPUT -p udp --dport 53 -j DROP &>/dev/null; then
+                sudo iptables -A INPUT -p udp --dport 53 -j DROP
+            fi
+            echo -e "${GREEN}'默认拒绝' 规则已应用/确认存在。${NC}"
+            sudo netfilter-persistent save && echo -e "${GREEN}防火墙规则已保存。${NC}" || echo -e "${RED}防火墙规则保存失败。${NC}"
+            read -n 1 -s -r -p "按任意键继续..."
+            ;;
+        0) break ;;
+        *) echo -e "${RED}无效选项!${NC}"; sleep 1;;
+        esac
+    done
+}
+
+# 主菜单函数
+dns_unlock_menu() {
+    while true; do
+        clear
+        echo -e "${YELLOW}════════════ DNS解锁服务管理 ════════════${NC}"
+        echo -e "1. 安装服务端 (DNS解锁服务器)"
+        echo -e "2. 卸载服务端"
+        echo -e "3. 设置客户端 (在需要解锁的设备上运行)"
+        echo -e "4. 卸载/还原客户端"
+        echo -e "5. IP白名单管理 (在服务端运行)"
+        echo -e "0. 返回主菜单"
+        echo -e "${YELLOW}════════════════════════════════════════${NC}"
+        read -p "请输入选项: " sub_choice
+
+        case $sub_choice in
+        1) install_dns_unlock_server; read -n 1 -s -r -p "按任意键返回..." ;;
+        2) uninstall_dns_unlock_server; read -n 1 -s -r -p "按任意键返回..." ;;
+        3) setup_dns_client; read -n 1 -s -r -p "按任意键返回..." ;;
+        4) uninstall_dns_client; read -n 1 -s -r -p "按任意键返回..." ;;
+        5) manage_iptables_rules ;;
+        0) break ;;
+        *) echo -e "${RED}无效选项，请重新输入${NC}"; sleep 1 ;;
+        esac
+    done
 }
 
 # ======================= Sub-Store安装模块 =======================
