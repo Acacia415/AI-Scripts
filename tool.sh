@@ -1090,7 +1090,7 @@ install_shell_beautify() {
     fi
 }
 
-# ======================= DNS解锁管理 =======================
+# ======================= DNS解锁管理 (完整功能版) =======================
 
 # 帮助函数：检查并尝试释放被 systemd-resolved 占用的 53 端口
 check_and_free_port_53() {
@@ -1128,26 +1128,102 @@ EOF
     return 0
 }
 
-# 服务端安装（使用一键脚本）
+# 服务端安装（已优化，增加自动配置）
 install_dns_unlock_server() {
     clear
     echo -e "${YELLOW}--- DNS解锁服务 安装/更新 ---${NC}"
-    echo -e "${CYAN}INFO: 正在检查核心依赖 (wget, lsof)...${NC}"
-    for cmd in wget lsof; do
-        if ! command -v $cmd &> /dev/null; then
-            sudo apt-get update && sudo apt-get install -y $cmd
-        fi
+    echo -e "${CYAN}INFO: 正在检查核心依赖 (wget, lsof, curl)...${NC}"
+    for cmd in wget lsof curl; do
+        if ! command -v $cmd &> /dev/null; sudo apt-get update && sudo apt-get install -y $cmd; fi
     done
     if ! check_and_free_port_53; then return 1; fi
 
     echo -e "${CYAN}INFO: 正在下载并执行一键安装脚本...${NC}"
     if wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh && sudo bash dnsmasq_sniproxy.sh -f; then
-        echo -e "${GREEN}SUCCESS: DNS解锁服务安装脚本执行完成。${NC}"
+        echo -e "${GREEN}SUCCESS: 基础服务安装完成。${NC}"
+        echo -e "${CYAN}INFO: 即将开始自动化配置增强...${NC}"
+        
+        # --- 自动配置开始 ---
+        # 1. 获取公网IP
+        echo -e "${CYAN}INFO: 正在获取本机公网IP地址...${NC}"
+        PUBLIC_IP=$(curl -4s ip.sb || curl -4s ifconfig.me)
+        if [[ -z "$PUBLIC_IP" ]]; then
+            echo -e "${RED}ERROR: 无法获取公网IP地址。无法继续配置。${NC}"
+            rm -f dnsmasq_sniproxy.sh
+            return 1
+        fi
+        echo -e "${GREEN}INFO: 获取到公网IP地址: ${PUBLIC_IP}${NC}"
+        echo
+
+        # 2. 修改 Dnsmasq 配置
+        DNSMASQ_CONFIG_FILE="/etc/dnsmasq.d/custom_netflix.conf"
+        echo -e "${CYAN}INFO: 正在更新 Dnsmasq 配置文件 (${DNSMASQ_CONFIG_FILE})...${NC}"
+        if [ -f "$DNSMASQ_CONFIG_FILE" ] && ! grep -q "chatgpt.com" "$DNSMASQ_CONFIG_FILE"; then
+            tee -a "$DNSMASQ_CONFIG_FILE" > /dev/null <<EOF
+
+# Custom additions for ChatGPT/TikTok etc.
+address=/chatgpt.com/${PUBLIC_IP}
+address=/cdn.usefathom.com/${PUBLIC_IP}
+address=/anthropic.com/${PUBLIC_IP}
+address=/claude.ai/${PUBLIC_IP}
+address=/byteoversea.com/${PUBLIC_IP}
+address=/ibytedtos.com/${PUBLIC_IP}
+address=/ipstatp.com/${PUBLIC_IP}
+address=/muscdn.com/${PUBLIC_IP}
+address=/musical.ly/${PUBLIC_IP}
+address=/tiktok.com/${PUBLIC_IP}
+address=/tik-tokapi.com/${PUBLIC_IP}
+address=/tiktokcdn.com/${PUBLIC_IP}
+address=/tiktokv.com/${PUBLIC_IP}
+EOF
+            echo -e "${CYAN}INFO: 正在重启 Dnsmasq 服务...${NC}"
+            if sudo systemctl restart dnsmasq; then echo -e "${GREEN}SUCCESS: Dnsmasq 配置更新并重启成功。${NC}"; else echo -e "${RED}ERROR: Dnsmasq 服务重启失败。${NC}"; fi
+        else
+            echo -e "${YELLOW}WARNING: Dnsmasq 配置文件未找到或已包含相关配置，跳过此步骤。${NC}"
+        fi
+        echo
+
+        # 3. 修改 SNI Proxy 配置
+        SNIPROXY_CONFIG_FILE="/etc/sniproxy.conf"
+        echo -e "${CYAN}INFO: 正在更新 SNI Proxy 配置文件 (${SNIPROXY_CONFIG_FILE})...${NC}"
+        if [ -f "$SNIPROXY_CONFIG_FILE" ] && ! grep -q "chatgpt\\.com" "$SNIPROXY_CONFIG_FILE"; then
+            SNIPROXY_ADDITIONS=$(cat <<'EOF'
+    # Custom additions for ChatGPT/TikTok etc.
+    .*chatgpt\.com$ *
+    .*cdn\.usefathom\.com$ *
+    .*anthropic\.com$ *
+    .*claude\.ai$ *
+    .*byteoversea\.com$ *
+    .*ibytedtos\.com$ *
+    .*ipstatp\.com$ *
+    .*muscdn\.com$ *
+    .*musical\.ly$ *
+    .*tiktok\.com$ *
+    .*tik-tokapi\.com$ *
+    .*tiktokcdn\.com$ *
+    .*tiktokv\.com$ *
+EOF
+)
+            TEMP_FILE=$(mktemp)
+            # 使用 tac 和 sed 在最后一个 '}' 前插入内容，非常稳定
+            tac "$SNIPROXY_CONFIG_FILE" | sed "0,/^}/s/^}/${SNIPROXY_ADDITIONS}\n}/" | tac > "$TEMP_FILE"
+            if sudo mv "$TEMP_FILE" "$SNIPROXY_CONFIG_FILE"; then
+                echo -e "${CYAN}INFO: 正在重启 SNI Proxy 服务...${NC}"
+                if sudo systemctl restart sniproxy; then echo -e "${GREEN}SUCCESS: SNI Proxy 配置更新并重启成功。${NC}"; else echo -e "${RED}ERROR: SNI Proxy 服务重启失败。${NC}"; fi
+            else
+                echo -e "${RED}ERROR: 写入 SNI Proxy 配置文件失败。${NC}"
+            fi
+        else
+            echo -e "${YELLOW}WARNING: SNI Proxy 配置文件未找到或已包含相关配置，跳过此步骤。${NC}"
+        fi
+        # --- 自动配置结束 ---
+
     else
-        echo -e "${RED}ERROR: 安装脚本下载或执行失败。${NC}"
+        echo -e "${RED}ERROR: 基础服务安装脚本下载或执行失败。${NC}"
     fi
     rm -f dnsmasq_sniproxy.sh
 }
+
 
 # 服务端卸载（使用一键脚本）
 uninstall_dns_unlock_server() {
