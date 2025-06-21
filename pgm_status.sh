@@ -32,8 +32,8 @@ send_test_notification() {
     local chat_id=$2
     local hostname=$(hostname)
     
-    # Modified notification text
-    local message="✅ *PagerMaid 监控通知* %0A在服务器: \`$hostname\`%0A您已成功为服务 \`${PAGERMAID_SERVICE_NAME}\` 配置 Telegram 通知功能！"
+    # Modified notification text (single line)
+    local message="✅ *PagerMaid 监控通知* 在服务器: \`$hostname\` 您已成功为服务 \`${PAGERMAID_SERVICE_NAME}\` 配置 Telegram 通知功能！"
     
     print_msg "yellow" "正在发送测试通知到您的 Telegram Bot..."
     
@@ -102,8 +102,8 @@ if ! systemctl is-active --quiet \$PAGERMAID_SERVICE; then
     echo "\$(date): Health check FAILED! Service '\$PAGERMAID_SERVICE' is not active. Restarting..."
     if [[ -n "\$BOT_TOKEN" && -n "\$CHAT_ID" ]]; then
         HOSTNAME=\$(hostname)
-        # Modified notification text
-        MESSAGE="🚨 *PagerMaid 监控通知* %0A在服务器: \`\$HOSTNAME\`%0A检测到服务 \`\$PAGERMAID_SERVICE\` 处于**停止状态**，已自动触发重启。"
+        # Modified notification text (single line)
+        MESSAGE="🚨 *PagerMaid 监控通知* 在服务器: \`\$HOSTNAME\` 检测到服务 \`\$PAGERMAID_SERVICE\` 处于**停止状态**，已自动触发重启。"
         send_telegram_notification "\$MESSAGE"
     fi
     /usr/bin/systemctl restart \$PAGERMAID_SERVICE
@@ -134,8 +134,8 @@ if [[ \$(journalctl -u \$PAGERMAID_SERVICE --since "\$since_time" --output=cat -
         echo "\$(date): Health check FAILED! No log activity for '\$PAGERMAID_SERVICE' and process state is '\$PROC_STATE'. Restarting..."
         if [[ -n "\$BOT_TOKEN" && -n "\$CHAT_ID" ]]; then
             HOSTNAME=\$(hostname)
-            # Modified notification text
-            MESSAGE="🚨 *PagerMaid 监控通知* %0A在服务器: \`\$HOSTNAME\`%0A检测到服务 \`\$PAGERMAID_SERVICE\` **无响应（状态: \$PROC_STATE）**，已自动触发重启。"
+            # Modified notification text (single line)
+            MESSAGE="🚨 *PagerMaid 监控通知* 在服务器: \`\$HOSTNAME\` 检测到服务 \`\$PAGERMAID_SERVICE\` **无响应（状态: \$PROC_STATE）**，已自动触发重启。"
             send_telegram_notification "\$MESSAGE"
         fi
         /usr/bin/systemctl restart \$PAGERMAID_SERVICE
@@ -250,7 +250,7 @@ uninstall_watchdog() {
 main() {
     clear
     print_msg "green" "============================================="
-    print_msg "green" "        PagerMaid 监控脚本 "
+    print_msg "green" "        PagerMaid 监控脚本"
     print_msg "green" "============================================="
     echo
     
