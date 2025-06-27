@@ -126,8 +126,10 @@ if [[ \$(journalctl -u \$PAGERMAID_SERVICE --since "\$since_time" --output=cat -
     PID=\$(systemctl show -p MainPID --value \$PAGERMAID_SERVICE)
     if [[ \$PID -gt 0 ]]; then
         PROC_STATE=\$(ps -o state= -p \$PID)
-        if [[ "\$PROC_STATE" == "S" ]]; then
-            echo "\$(date): Health check PASSED. No new logs, but process for '\$PAGERMAID_SERVICE' is in a healthy idle state (Sleeping)."
+        # THE KEY FIX IS HERE: Check if the state code STARTS WITH 'S'.
+        # This covers 'S' (sleeping), 'Sl' (multi-threaded), 'S+' (foreground), etc.
+        if [[ "\$PROC_STATE" == S* ]]; then
+            echo "\$(date): Health check PASSED. No new logs, but process for '\$PAGERMAID_SERVICE' is in a healthy idle state (State: \$PROC_STATE)."
             exit 0
         fi
         
@@ -257,7 +259,7 @@ main() {
     if [ -f "${HEALTH_CHECK_SCRIPT_PATH}" ]; then
         print_msg "yellow" "检测到您已经安装了监控脚本。"
         echo "请选择您要执行的操作："
-        echo "  1) 重新安装 (覆盖配置)"
+        echo "  1) 安装 (覆盖配置)"
         echo "  2) 卸载监控"
         echo "  3) 退出"
         read -p "请输入选项 [1-3]: " choice
