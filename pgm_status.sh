@@ -259,7 +259,7 @@ main() {
     if [ -f "${HEALTH_CHECK_SCRIPT_PATH}" ]; then
         print_msg "yellow" "检测到您已经安装了监控脚本。"
         echo "请选择您要执行的操作："
-        echo "  1) 安装 (覆盖配置)"
+        echo "  1) 重新安装 (覆盖配置)"
         echo "  2) 卸载监控"
         echo "  3) 退出"
         read -p "请输入选项 [1-3]: " choice
