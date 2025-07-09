@@ -1393,71 +1393,6 @@ dns_unlock_menu() {
 }
 
 # ======================= Sub-Store安装模块 =======================
-install_substore() {
-  check_root
-  public_ip=$(get_public_ip)
-  install_docker_packages
-  setup_substore_docker
-}
-check_root() {
-    if [ "$(id -u)" != "0" ]; then
-        echo -e "${RED}运行脚本需要 root 权限${NC}" >&2
-        exit 1
-    fi
-}
-get_public_ip() {
-    local ip_services=("ifconfig.me" "ipinfo.io/ip" "icanhazip.com" "ipecho.net/plain" "ident.me")
-
-    for service in "${ip_services[@]}"; do
-        if public_ip=$(curl -sS --connect-timeout 5 "$service"); then
-            if [[ "$public_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                echo "$public_ip"
-                return 0
-            fi
-        fi
-        sleep 1
-    done
-
-    echo -e "${RED}无法获取公共 IP 地址。${NC}" >&2
-    exit 1
-}
-install_docker_packages() {
-    if ! command -v docker &> /dev/null; then
-        echo -e "${YELLOW}正在安装 Docker 和 Docker Compose...${NC}"
-        if ! curl -fsSL https://get.docker.com | bash; then
-            echo -e "${RED}Docker 安装失败${NC}" >&2
-            exit 1
-        fi
-        # 尝试使用 apt-get 安装 docker-compose，如果失败，提示其他安装方式
-        if ! apt-get update && apt-get install -y docker-compose; then
-            echo -e "${YELLOW}使用 apt-get 安装 Docker Compose 失败，尝试其他方法...${NC}"
-            # 对于较新的 Docker 版本，docker-compose 可能作为插件 docker-compose-plugin 提供
-            if apt-get install -y docker-compose-plugin; then
-                 echo -e "${GREEN}Docker Compose Plugin 安装完成。${NC}"
-            else
-                echo -e "${RED}Docker Compose 或其插件安装失败。请尝试手动安装。${NC}" >&2
-                echo -e "${RED}可以参考 Docker 官方文档: https://docs.docker.com/compose/install/${NC}" >&2
-                exit 1
-            fi
-        fi
-        echo -e "${GREEN}Docker 和 Docker Compose (或插件) 安装完成。${NC}"
-    else
-        echo -e "${CYAN}Docker 和 Docker Compose (或插件) 已安装。${NC}"
-    fi
-
-    # 检查 docker compose v2 (docker-compose-plugin) 是否可用
-    if ! docker compose version &>/dev/null; then
-        # 如果 docker compose v2 不可用，检查 docker-compose v1
-        if ! command -v docker-compose &>/dev/null; then
-            echo -e "${RED}Docker Compose (v1 或 v2 插件) 未找到。请确保已正确安装。${NC}" >&2
-            exit 1
-        else
-            echo -e "${CYAN}检测到 Docker Compose v1 (docker-compose)。${NC}"
-        fi
-    else
-        echo -e "${CYAN}检测到 Docker Compose v2 (docker compose plugin)。${NC}"
-    fi
-}
 setup_substore_docker() {
     local secret_key
     local compose_file="docker-compose.yml" # 定义 docker-compose 文件名
@@ -1548,6 +1483,13 @@ EOF
             echo -e "Sub-Store 后端API地址: ${CYAN}http://${public_ip}:3001/${secret_key}${NC}"
             echo -e "\n${YELLOW}如果服务无法访问，请检查容器日志: ${CYAN}docker logs sub-store${NC}"
             echo -e "${YELLOW}或通过本地验证服务是否监听端口: ${CYAN}curl -I http://127.0.0.1:3001${NC}"
+
+            # ==========================================================
+            # ==                  【新增的清理功能】                  ==
+            # ==========================================================
+            echo -e "\n${YELLOW}清理旧的悬空镜像...${NC}"
+            docker image prune -f
+
         else
             echo -e "\n${RED}Sub-Store 容器未能保持运行状态。${NC}"
             echo -e "${RED}请手动检查容器日志: ${CYAN}docker logs sub-store${NC}"
@@ -1589,7 +1531,6 @@ EOF
     echo -e "删除数据目录: ${CYAN}rm -rf /root/sub-store-data${NC}"
     echo -e "删除配置文件: ${CYAN}rm -f \"$(pwd)/${compose_file}\"${NC}"
 }
-
 # ======================= 搭建TG图床 =======================
 install_tg_image_host() {
     clear
