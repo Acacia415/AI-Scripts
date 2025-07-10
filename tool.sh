@@ -497,10 +497,10 @@ install_hysteria2() {
 install_ss_rust() {
     clear
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    echo -e "${CYAN}脚本来源：https://github.com/shadowsocks/shadowsocks-rust${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/xOS/Shadowsocks-Rust${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    if wget -O ss-rust.sh --no-check-certificate https://git.io/Shadowsocks-Rust.sh; then
+    if wget -O ss-rust.sh --no-check-certificate https://raw.githubusercontent.com/xOS/Shadowsocks-Rust/master/ss-rust.sh; then
         chmod +x ss-rust.sh
         ./ss-rust.sh
         rm -f ss-rust.sh  # 清理安装脚本
