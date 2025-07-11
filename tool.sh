@@ -1393,7 +1393,7 @@ dns_unlock_menu() {
 }
 
 # ======================= Sub-Store安装模块 =======================
-setup_substore_docker() {
+install_substore() {
     local secret_key
     local compose_file="docker-compose.yml" # 定义 docker-compose 文件名
 
