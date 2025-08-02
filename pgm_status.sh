@@ -1,10 +1,9 @@
 #!/bin/bash
-
-# PagerMaid Watchdog Installer (Universal Version)
 #
+# PagerMaid Watchdog Installer (Universal & Optimized Version)
 # This script installs a systemd timer to periodically check a user-defined
-# service. It restarts the service if it's found to be inactive or
-# unresponsive (hung), and can send notifications via Telegram.
+# service. It restarts the service if it's found to be inactive or in a
+# zombie state, and can send notifications via Telegram.
 
 # --- Configuration ---
 HEALTH_CHECK_SCRIPT_PATH="/usr/local/bin/check_pagermaid_health.sh"
@@ -31,8 +30,6 @@ send_test_notification() {
     local bot_token=$1
     local chat_id=$2
     local hostname=$(hostname)
-    
-    # Modified notification text (single line)
     local message="✅ *PagerMaid 监控通知* 在服务器: \`$hostname\` 您已成功为服务 \`${PAGERMAID_SERVICE_NAME}\` 配置 Telegram 通知功能！"
     
     print_msg "yellow" "正在发送测试通知到您的 Telegram Bot..."
@@ -43,7 +40,7 @@ send_test_notification() {
     if echo "$RESPONSE" | grep -q '"ok":true'; then
         print_msg "green" "✔ 测试通知发送成功！请检查您的 Telegram。"
     else
-        print_msg "red" "❌ 测试通知发送失败！"
+        print_msg "red" "❌ 测试通知发送失败！请检查 Bot Token 和 Chat ID 是否正确，以及服务器网络。"
     fi
 }
 
@@ -52,9 +49,7 @@ check_prerequisites() {
     print_msg "green" "正在检查环境和依赖..."
 
     systemctl status "${PAGERMAID_SERVICE_NAME}" &> /dev/null
-    local status_code=$?
-    
-    if [ $status_code -eq 4 ]; then
+    if [ $? -eq 4 ]; then
         print_msg "red" "错误：在系统中未找到名为 '${PAGERMAID_SERVICE_NAME}' 的服务。"
         print_msg "yellow" "请确认您输入的服务名完全正确（包括 .service 后缀）。"
         exit 1
@@ -70,26 +65,23 @@ check_prerequisites() {
     print_msg "green" "✔ 依赖 'jq' 已满足。"
 }
 
-# Create the health check script
+# Create the health check script (REVISED AND IMPROVED)
 create_health_check_script() {
-    local check_interval=$1
-    local service_name=$2
-    print_msg "green" "正在创建健康检查脚本..."
+    local service_name=$1
+    print_msg "green" "正在创建健康检查脚本 (已应用优化)..."
     
     cat << EOF > "${HEALTH_CHECK_SCRIPT_PATH}"
 #!/bin/bash
-# This script checks the health of the PagerMaid service.
+# PagerMaid Health Check Script (Optimized)
 
 PAGERMAID_SERVICE="$service_name"
 WATCHDOG_CONFIG="/etc/pagermaid_watchdog.conf"
-CHECK_INTERVAL="$check_interval"
 
 # Function to send Telegram notification
 send_telegram_notification() {
     local message_text=\$1
-    local url_encoded_text=\$(printf %s "\$message_text" | jq -s -R -r @uri)
     API_URL="https://api.telegram.org/bot\${BOT_TOKEN}/sendMessage"
-    curl -s -o /dev/null -X POST "\$API_URL" -d "chat_id=\${CHAT_ID}" -d "text=\${url_encoded_text}" -d "parse_mode=Markdown"
+    curl -s -o /dev/null -X POST "\$API_URL" --data-urlencode "chat_id=\${CHAT_ID}" --data-urlencode "text=\$message_text" --data-urlencode "parse_mode=Markdown"
 }
 
 # Load bot credentials if config file exists
@@ -97,58 +89,49 @@ if [ -f "\$WATCHDOG_CONFIG" ]; then
     source "\$WATCHDOG_CONFIG"
 fi
 
-# Step 1: Check if the service is active. If not, restart it.
-if ! systemctl is-active --quiet \$PAGERMAID_SERVICE; then
-    echo "\$(date): Health check FAILED! Service '\$PAGERMAID_SERVICE' is not active. Restarting..."
+# Function to notify and restart the service
+notify_and_restart() {
+    local reason=\$1
+    local state_info=\$2
+    echo "\$(date): Health check FAILED! Reason: \$reason. Restarting service '\$PAGERMAID_SERVICE'..."
     if [[ -n "\$BOT_TOKEN" && -n "\$CHAT_ID" ]]; then
         HOSTNAME=\$(hostname)
-        # Modified notification text (single line)
-        MESSAGE="🚨 *PagerMaid 监控通知* 在服务器: \`\$HOSTNAME\` 检测到服务 \`\$PAGERMAID_SERVICE\` 处于**停止状态**，已自动触发重启。"
+        if [ -n "\$state_info" ]; then
+            MESSAGE="🚨 *PagerMaid 监控通知* 在服务器: \`\$HOSTNAME\` 检测到服务 \`\$PAGERMAID_SERVICE\` **\$reason (状态: \$state_info)**，已自动触发重启。"
+        else
+            MESSAGE="🚨 *PagerMaid 监控通知* 在服务器: \`\$HOSTNAME\` 检测到服务 \`\$PAGERMAID_SERVICE\` 处于**\$reason**，已自动触发重启。"
+        fi
         send_telegram_notification "\$MESSAGE"
     fi
     /usr/bin/systemctl restart \$PAGERMAID_SERVICE
     exit 0
+}
+
+# --- Health Check Logic ---
+
+# Step 1: Check if the service is marked as 'active' by systemd.
+if ! systemctl is-active --quiet \$PAGERMAID_SERVICE; then
+    notify_and_restart "停止状态"
 fi
 
-# Step 2: If active, check for recent log activity (hung state).
-if [[ "\$CHECK_INTERVAL" == *s ]]; then
-    seconds=\$(echo \$CHECK_INTERVAL | sed 's/s//')
-    since_time="\$((\$seconds + 5)) seconds ago"
-elif [[ "\$CHECK_INTERVAL" == *m ]]; then
-    minutes=\$(echo \$CHECK_INTERVAL | sed 's/m//')
-    since_time="\$((\$minutes * 60 + 5)) seconds ago"
-else
-    since_time="2 minutes ago" # Fallback
+# Step 2: Get the Main Process ID (PID).
+PID=\$(systemctl show -p MainPID --value \$PAGERMAID_SERVICE)
+
+# If PID is 0 or not found, the service is active but has no process, which is an error state.
+if [[ -z "\$PID" || "\$PID" -eq 0 ]]; then
+    notify_and_restart "PID 未找到"
 fi
 
-if [[ \$(journalctl -u \$PAGERMAID_SERVICE --since "\$since_time" --output=cat -n 1 | wc -l) -eq 0 ]]; then
-    # NO LOGS FOUND! Perform Step 3.
-    PID=\$(systemctl show -p MainPID --value \$PAGERMAID_SERVICE)
-    if [[ \$PID -gt 0 ]]; then
-        PROC_STATE=\$(ps -o state= -p \$PID)
-        # THE KEY FIX IS HERE: Check if the state code STARTS WITH 'S'.
-        # This covers 'S' (sleeping), 'Sl' (multi-threaded), 'S+' (foreground), etc.
-        if [[ "\$PROC_STATE" == S* ]]; then
-            echo "\$(date): Health check PASSED. No new logs, but process for '\$PAGERMAID_SERVICE' is in a healthy idle state (State: \$PROC_STATE)."
-            exit 0
-        fi
-        
-        echo "\$(date): Health check FAILED! No log activity for '\$PAGERMAID_SERVICE' and process state is '\$PROC_STATE'. Restarting..."
-        if [[ -n "\$BOT_TOKEN" && -n "\$CHAT_ID" ]]; then
-            HOSTNAME=\$(hostname)
-            # Modified notification text (single line)
-            MESSAGE="🚨 *PagerMaid 监控通知* 在服务器: \`\$HOSTNAME\` 检测到服务 \`\$PAGERMAID_SERVICE\` **无响应（状态: \$PROC_STATE）**，已自动触发重启。"
-            send_telegram_notification "\$MESSAGE"
-        fi
-        /usr/bin/systemctl restart \$PAGERMAID_SERVICE
-        
-    else
-        echo "\$(date): Health check FAILED! Service '\$PAGERMAID_SERVICE' active but PID not found. Restarting..."
-        /usr/bin/systemctl restart \$PAGERMAID_SERVICE
-    fi
-else
-    echo "\$(date): Health check PASSED for '\$PAGERMAID_SERVICE'."
+# Step 3: Check the actual process state from the /proc filesystem.
+PROC_STATE=\$(cat /proc/\$PID/stat 2>/dev/null | awk '{print \$3}')
+
+# Check for 'Z' state (Zombie). This is a definitive sign of a problem.
+if [[ "\$PROC_STATE" == "Z" ]]; then
+    notify_and_restart "僵尸进程" "\$PROC_STATE"
 fi
+
+# If we reach here, the process is active, has a valid PID, and is not a zombie. This is healthy.
+echo "\$(date): Health check PASSED for '\$PAGERMAID_SERVICE'. Process is active (PID: \$PID, State: \$PROC_STATE)."
 
 exit 0
 EOF
@@ -188,27 +171,17 @@ EOF
     print_msg "green" "✔ systemd 定时器单元创建成功。"
 }
 
-# Install and enable the monitoring
+# Main installation function
 install_watchdog() {
-    read -p "请输入您要监控的 PagerMaid 服务名，默认为 [pagermaid.service]: " custom_service_name
-    if [ -z "$custom_service_name" ]; then
-        PAGERMAID_SERVICE_NAME="pagermaid.service"
-    else
-        PAGERMAID_SERVICE_NAME="$custom_service_name"
-    fi
+    read -p "请输入您要监控的 PagerMaid 服务名 (默认为 pagermaid.service): " custom_service_name
+    PAGERMAID_SERVICE_NAME=${custom_service_name:-"pagermaid.service"}
     print_msg "green" "将要监控的服务: ${PAGERMAID_SERVICE_NAME}"
     echo
     
     check_prerequisites
     
-    local bot_token=""
-    local chat_id=""
-    local check_interval=""
-    
-    read -p "请输入巡检时间间隔 (例如 30s, 1m, 5m)，默认为 [1m]: " check_interval
-    if [ -z "$check_interval" ]; then
-        check_interval="1m"
-    fi
+    read -p "请输入巡检时间间隔, 例如 30s, 1m, 5m (默认为 1m): " check_interval
+    check_interval=${check_interval:-"1m"}
     
     read -p "是否启用 Telegram Bot 通知功能? (y/N): " enable_bot
     if [[ "$enable_bot" =~ ^[Yy]$ ]]; then
@@ -219,7 +192,7 @@ install_watchdog() {
         chmod 600 "$WATCHDOG_CONFIG_PATH"
     fi
     
-    create_health_check_script "$check_interval" "$PAGERMAID_SERVICE_NAME"
+    create_health_check_script "$PAGERMAID_SERVICE_NAME"
     create_health_check_service
     create_health_check_timer "$check_interval"
 
@@ -228,7 +201,7 @@ install_watchdog() {
     systemctl enable "${HEALTH_CHECK_TIMER_NAME}" &>/dev/null
     systemctl start "${HEALTH_CHECK_TIMER_NAME}"
 
-    if [[ -n "$bot_token" && -n "$chat_id" ]]; then
+    if [[ "$enable_bot" =~ ^[Yy]$ ]]; then
         send_test_notification "$bot_token" "$chat_id"
     fi
     
@@ -238,7 +211,7 @@ install_watchdog() {
     print_msg "green" "--------------------------------------------------"
 }
 
-# Uninstall the monitoring
+# Uninstall function
 uninstall_watchdog() {
     print_msg "yellow" "正在卸载监控脚本..."
     systemctl stop "${HEALTH_CHECK_TIMER_NAME}" &>/dev/null
@@ -252,14 +225,14 @@ uninstall_watchdog() {
 main() {
     clear
     print_msg "green" "============================================="
-    print_msg "green" "        PagerMaid 监控脚本"
+    print_msg "green" "            PagerMaid 监控脚本                "
     print_msg "green" "============================================="
     echo
     
     if [ -f "${HEALTH_CHECK_SCRIPT_PATH}" ]; then
         print_msg "yellow" "检测到您已经安装了监控脚本。"
         echo "请选择您要执行的操作："
-        echo "  1) 重新安装 (覆盖配置)"
+        echo "  1) 重新安装 (使用优化逻辑覆盖配置)"
         echo "  2) 卸载监控"
         echo "  3) 退出"
         read -p "请输入选项 [1-3]: " choice
