@@ -269,14 +269,11 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         bot: Bot = context.bot
         img_service: ImageHostingService = context.bot_data['img_service']
         channel_id = int(context.bot_data['channel_id']) # Convert here
+        channel_username = context.bot_data.get('channel_username', '')  # 从配置获取
         base_url = context.bot_data.get('base_url', BASE_URL_FALLBACK)
         
-        # 检查频道类型和Bot权限
+        # 检查Bot权限
         try:
-            chat = await bot.get_chat(channel_id)
-            channel_username = chat.username  # 公开频道的username，私有频道为None
-            
-            # 检查Bot是否为管理员
             bot_member = await bot.get_chat_member(channel_id, bot.id)
             if bot_member.status not in ['administrator', 'creator']:
                 logger.warning(f"Bot 在频道 {channel_id} 中不是管理员")
@@ -287,7 +284,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 return
         except Exception as e:
             logger.error(f"检查频道状态失败: {str(e)}")
-            channel_username = None
 
         file_to_process = None
         mime_type = "image/jpeg" # Default
@@ -432,10 +428,12 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         direct_link = f"{base_url}/i/{final_url_file_id}"
         
-        # 根据频道类型生成不同的备用链接
+        # 根据配置生成备用链接
         if channel_username:
-            # 公开频道，使用 username 格式
-            backup_link = f"https://t.me/{channel_username}/{sent_message.message_id}"
+            # 使用配置中的用户名（公开频道）
+            # 去掉可能存在的 @ 符号
+            clean_username = channel_username.lstrip('@')
+            backup_link = f"https://t.me/{clean_username}/{sent_message.message_id}"
             link_note = "（公开频道链接，所有人可访问）"
         else:
             # 私有频道，使用 c/ 格式
@@ -480,7 +478,7 @@ async def main() -> None:
     img_service_instance = None 
 
     try:
-        bot_token, channel_id_str, allowed_users, base_url = load_config()
+        bot_token, channel_id_str, channel_username, allowed_users, base_url = load_config()
         try:
             channel_id = int(channel_id_str)
         except ValueError:
@@ -495,6 +493,7 @@ async def main() -> None:
 
         application_instance.bot_data['img_service'] = img_service_instance
         application_instance.bot_data['channel_id'] = channel_id
+        application_instance.bot_data['channel_username'] = channel_username
         application_instance.bot_data['allowed_users'] = allowed_users
         application_instance.bot_data['base_url'] = base_url
         setup_handlers(application_instance)
@@ -504,7 +503,7 @@ async def main() -> None:
             logger.info("正在初始化 Telegram Application...")
             await application_instance.initialize()
             
-            # 在启动前检查Bot权限
+            # 在启动前检查Bot权限和频道信息
             logger.info("正在检查Bot在频道中的权限...")
             try:
                 chat = await application_instance.bot.get_chat(channel_id)
@@ -512,10 +511,17 @@ async def main() -> None:
                 
                 if bot_member.status in ['administrator', 'creator']:
                     logger.info(f"✅ Bot 在频道中拥有 {bot_member.status} 权限")
+                    
+                    # 检查配置的用户名是否匹配
                     if chat.username:
                         logger.info(f"📢 检测到公开频道: @{chat.username}")
+                        if channel_username and channel_username.lstrip('@') != chat.username:
+                            logger.warning(f"⚠️ 配置的用户名 {channel_username} 与实际用户名 @{chat.username} 不匹配")
+                            logger.warning(f"将使用实际用户名 @{chat.username}")
                     else:
                         logger.info(f"🔒 检测到私有频道")
+                        if channel_username:
+                            logger.warning(f"⚠️ 配置了用户名 {channel_username}，但频道是私有的")
                 else:
                     logger.warning(f"⚠️ Bot 在频道中的权限为: {bot_member.status}")
                     logger.warning("请将 Bot 设置为频道管理员以确保正常工作")
@@ -662,9 +668,73 @@ setup_config_interactive() {
         fi
     done
 
+    local channel_username
+    echo -e "${YELLOW}频道类型配置：${NC}"
+    echo "如果您的频道是公开频道（有 @username），请输入用户名"
+    echo "如果是私有频道，直接按回车跳过"
+    read -p "请输入频道用户名 (例如 @imghub7788，可留空): " channel_username
+    # 清理用户名格式（去掉可能的@符号，保持一致性）
+    if [[ -n "${channel_username}" ]]; then
+        channel_username="${channel_username#@}"  # 去掉开头的@
+        echo -e "${GREEN}已设置公开频道用户名: @${channel_username}${NC}"
+    else
+        echo -e "${YELLOW}未设置用户名，将作为私有频道处理${NC}"
+    fi
+
     local allowed_users
     while true; do
         read -p "请输入授权使用此 Bot 的用户 ID (多个 ID 请用英文逗号隔开, 例如 12345678,87654321): " allowed_users
+        if [[ -n "${allowed_users}" ]]; then # 允许为空，但提示一下
+             if [[ ! "${allowed_users}" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+                echo -e "${RED}授权用户 ID 列表格式不正确。应为纯数字，多个用英文逗号隔开。请重新输入。${NC}"
+                continue
+             fi
+        else
+            echo -e "${YELLOW}警告：授权用户列表为空，这意味着在配置完成前可能无人能使用 Bot 的上传功能。${NC}"
+        fi
+        break
+    done
+    
+    local channel_username
+    echo -e "${YELLOW}频道类型配置：${NC}"
+    echo "如果您的频道是公开频道（有 @username），请输入用户名"
+    echo "如果是私有频道，直接按回车跳过"
+    read -p "请输入频道用户名 (例如 @imghub7788，可留空): " channel_username
+    # 清理用户名格式（去掉可能的@符号，保持一致性）
+    if [[ -n "${channel_username}" ]]; then
+        channel_username="${channel_username#@}"  # 去掉开头的@
+        echo -e "${GREEN}已设置公开频道用户名: @${channel_username}${NC}"
+    else
+        echo -e "${YELLOW}未设置用户名，将作为私有频道处理${NC}"
+    fi
+    
+    local base_url
+    while true; do
+        read -p "请输入您图床的完整基础 URL (必须以 http:// 或 https:// 开头, 例如 https://img.yourdomain.com): " base_url
+        if [[ "${base_url}" =~ ^https?:// ]]; then
+            break
+        else
+            echo -e "${RED}基础 URL 格式不正确，必须以 http:// 或 https:// 开头。请重新输入。${NC}"
+        fi
+    done
+
+    echo -e "${GREEN}正在生成配置文件: ${CONFIG_FILE_PATH}${NC}"
+    cat > "${CONFIG_FILE_PATH}" <<EOL
+[telegram]
+bot_token = ${bot_token}
+channel_id = ${channel_id}
+channel_username = ${channel_username}
+
+[access]
+allowed_users = ${allowed_users}
+
+[server]
+base_url = ${base_url}
+EOL
+    # 设置配置文件权限，确保root可读写，其他用户无权访问
+    chmod 600 "${CONFIG_FILE_PATH}"
+    echo -e "${GREEN}配置文件已生成并设置权限。${NC}"
+} 的用户 ID (多个 ID 请用英文逗号隔开, 例如 12345678,87654321): " allowed_users
         if [[ -n "${allowed_users}" ]]; then # 允许为空，但提示一下
              if [[ ! "${allowed_users}" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
                 echo -e "${RED}授权用户 ID 列表格式不正确。应为纯数字，多个用英文逗号隔开。请重新输入。${NC}"
@@ -691,6 +761,7 @@ setup_config_interactive() {
 [telegram]
 bot_token = ${bot_token}
 channel_id = ${channel_id}
+channel_username = ${channel_username}
 
 [access]
 allowed_users = ${allowed_users}
