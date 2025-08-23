@@ -2,7 +2,7 @@
 
 # ==========================================
 # IRIS自用工具箱 - GitHub一键版
-# 项目地址：https://github.com/Acacia415/GPT-Scripts
+# 项目地址：https://github.com/Acacia415/AI-Scripts
 # ==========================================
 
 # 全局颜色定义
@@ -866,13 +866,13 @@ caddy_main() {
 nginx_main() {
     clear
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/GPT-Scripts${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
     local nginx_script="/tmp/nginx-manager.sh"
     
     if wget -O "$nginx_script" --no-check-certificate \
-        https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/nginx-manager.sh; then
+        https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/nginx-manager.sh; then
         chmod +x "$nginx_script"
         "$nginx_script"
         rm -f "$nginx_script"
@@ -1738,7 +1738,7 @@ install_tg_image_host() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo # Add an empty line for spacing
 
-    local install_script_url="https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/install_imghub.sh"
+    local install_script_url="https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/install_imghub.sh"
     local temp_install_script="/tmp/tg_imghub_install.sh"
 
     echo -e "${CYAN}正在下载 TG图床 安装脚本...${NC}"
@@ -1991,7 +1991,7 @@ update_script() {
   rm -f /root/tool.sh
   
   # 下载并执行新脚本
-  if curl -sSL https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/tool.sh -o /root/tool.sh && 
+  if curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o /root/tool.sh && 
      chmod +x /root/tool.sh
   then
     echo -e "${GREEN}更新成功，即将启动新脚本...${NC}"
@@ -1999,7 +1999,7 @@ update_script() {
     exec /root/tool.sh  # 用新脚本替换当前进程
   else
     echo -e "${RED}更新失败！请手动执行："
-    echo -e "curl -sSL https://raw.githubusercontent.com/Acacia415/GPT-Scripts/main/tool.sh -o tool.sh"
+    echo -e "curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o tool.sh"
     echo -e "chmod +x tool.sh && ./tool.sh${NC}"
     exit 1
   fi
