@@ -184,6 +184,7 @@ def load_config() -> tuple:
 
         bot_token = config.get('telegram', 'bot_token').strip()
         channel_id_str = config.get('telegram', 'channel_id').strip()
+        channel_username = config.get('telegram', 'channel_username', fallback="").strip()
         
         allowed_users_str = config.get('access', 'allowed_users', fallback="").strip()
         allowed_users = [int(uid.strip()) for uid in allowed_users_str.split(',') if uid.strip()]
@@ -202,6 +203,7 @@ def load_config() -> tuple:
         return (
             bot_token,
             channel_id_str, # Keep as string, convert to int later where needed
+            channel_username,  # 添加频道用户名
             allowed_users,
             base_url
         )
@@ -268,6 +270,24 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         img_service: ImageHostingService = context.bot_data['img_service']
         channel_id = int(context.bot_data['channel_id']) # Convert here
         base_url = context.bot_data.get('base_url', BASE_URL_FALLBACK)
+        
+        # 检查频道类型和Bot权限
+        try:
+            chat = await bot.get_chat(channel_id)
+            channel_username = chat.username  # 公开频道的username，私有频道为None
+            
+            # 检查Bot是否为管理员
+            bot_member = await bot.get_chat_member(channel_id, bot.id)
+            if bot_member.status not in ['administrator', 'creator']:
+                logger.warning(f"Bot 在频道 {channel_id} 中不是管理员")
+                await update.message.reply_text(
+                    "⚠️ Bot 需要在频道中拥有管理员权限才能正常工作。\n"
+                    "请将 Bot 添加为频道管理员后重试。"
+                )
+                return
+        except Exception as e:
+            logger.error(f"检查频道状态失败: {str(e)}")
+            channel_username = None
 
         file_to_process = None
         mime_type = "image/jpeg" # Default
@@ -411,12 +431,33 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         img_service.save_records() 
 
         direct_link = f"{base_url}/i/{final_url_file_id}"
-        backup_link = f"https://t.me/c/{channel_part_for_link}/{sent_message.message_id}"
+        
+        # 根据频道类型生成不同的备用链接
+        if channel_username:
+            # 公开频道，使用 username 格式
+            backup_link = f"https://t.me/{channel_username}/{sent_message.message_id}"
+            link_note = "（公开频道链接，所有人可访问）"
+        else:
+            # 私有频道，使用 c/ 格式
+            backup_link = f"https://t.me/c/{channel_part_for_link}/{sent_message.message_id}"
+            link_note = "（私有频道链接，仅频道成员可访问）"
 
-        await update.message.reply_text(
+        response_text = (
             f"✅ 图片上传成功!\n\n"
             f"🔗 直链地址: {direct_link}\n"
-            f"备用地址: {backup_link}\n\n",
+            f"📎 备用地址: {backup_link}\n"
+            f"   {link_note}\n\n"
+        )
+        
+        # 如果是私有频道，添加提示
+        if not channel_username:
+            response_text += (
+                f"💡 提示：备用链接仅对频道成员有效。\n"
+                f"   如需公开访问，请使用直链地址。\n"
+            )
+
+        await update.message.reply_text(
+            response_text,
             disable_web_page_preview=True,
             reply_to_message_id=update.message.message_id
         )
@@ -462,6 +503,29 @@ async def main() -> None:
         try:
             logger.info("正在初始化 Telegram Application...")
             await application_instance.initialize()
+            
+            # 在启动前检查Bot权限
+            logger.info("正在检查Bot在频道中的权限...")
+            try:
+                chat = await application_instance.bot.get_chat(channel_id)
+                bot_member = await application_instance.bot.get_chat_member(channel_id, application_instance.bot.id)
+                
+                if bot_member.status in ['administrator', 'creator']:
+                    logger.info(f"✅ Bot 在频道中拥有 {bot_member.status} 权限")
+                    if chat.username:
+                        logger.info(f"📢 检测到公开频道: @{chat.username}")
+                    else:
+                        logger.info(f"🔒 检测到私有频道")
+                else:
+                    logger.warning(f"⚠️ Bot 在频道中的权限为: {bot_member.status}")
+                    logger.warning("请将 Bot 设置为频道管理员以确保正常工作")
+            except Exception as e:
+                logger.error(f"无法检查频道权限: {str(e)}")
+                logger.error("请确保：")
+                logger.error("1. 频道ID配置正确")
+                logger.error("2. Bot 已被添加到频道")
+                logger.error("3. Bot 在频道中拥有管理员权限")
+            
             logger.info("正在启动 Telegram Application Polling...")
             await application_instance.start()
             if application_instance.updater:
