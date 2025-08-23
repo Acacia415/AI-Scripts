@@ -386,19 +386,32 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         final_url_file_id = id_candidate
 
+        # 修复：正确处理频道ID以生成有效的备用链接
+        # Telegram 私有频道ID格式通常是 -100XXXXXXXXXX
+        # 对于 t.me/c/ 链接，需要去掉前面的 -100
+        channel_id_str = str(channel_id)
+        if channel_id_str.startswith("-100"):
+            # 去掉 -100 前缀
+            channel_part_for_link = channel_id_str[4:]
+        elif channel_id_str.startswith("-"):
+            # 如果只是负数但不是 -100 开头，去掉负号
+            channel_part_for_link = channel_id_str[1:]
+        else:
+            # 如果是正数，直接使用
+            channel_part_for_link = channel_id_str
+
         img_service.file_records[final_url_file_id] = (
-            str(abs(channel_id))[4:] if abs(channel_id) >= 10000 else str(abs(channel_id)), 
+            channel_part_for_link,  # 存储处理后的频道ID部分
             sent_message.message_id,
             persistent_file_id_for_retrieval, 
             mime_type
         )
 
-        logger.info(f"📝 文件记录保存: url_file_id={final_url_file_id}, persistent_file_id={persistent_file_id_for_retrieval}")
+        logger.info(f"📝 文件记录保存: url_file_id={final_url_file_id}, channel_part={channel_part_for_link}, message_id={sent_message.message_id}")
         img_service.save_records() 
 
         direct_link = f"{base_url}/i/{final_url_file_id}"
-        channel_id_part_for_url = img_service.file_records[final_url_file_id][0]
-        backup_link = f"https://t.me/c/{channel_id_part_for_url}/{sent_message.message_id}"
+        backup_link = f"https://t.me/c/{channel_part_for_link}/{sent_message.message_id}"
 
         await update.message.reply_text(
             f"✅ 图片上传成功!\n\n"
