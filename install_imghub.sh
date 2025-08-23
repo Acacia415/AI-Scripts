@@ -478,6 +478,7 @@ async def main() -> None:
     img_service_instance = None 
 
     try:
+        # 修复：正确接收5个返回值
         bot_token, channel_id_str, channel_username, allowed_users, base_url = load_config()
         try:
             channel_id = int(channel_id_str)
@@ -493,7 +494,7 @@ async def main() -> None:
 
         application_instance.bot_data['img_service'] = img_service_instance
         application_instance.bot_data['channel_id'] = channel_id
-        application_instance.bot_data['channel_username'] = channel_username
+        application_instance.bot_data['channel_username'] = channel_username  # 添加到bot_data
         application_instance.bot_data['allowed_users'] = allowed_users
         application_instance.bot_data['base_url'] = base_url
         setup_handlers(application_instance)
@@ -517,7 +518,7 @@ async def main() -> None:
                         logger.info(f"📢 检测到公开频道: @{chat.username}")
                         if channel_username and channel_username.lstrip('@') != chat.username:
                             logger.warning(f"⚠️ 配置的用户名 {channel_username} 与实际用户名 @{chat.username} 不匹配")
-                            logger.warning(f"将使用实际用户名 @{chat.username}")
+                            logger.warning(f"将使用配置的用户名 {channel_username}")
                     else:
                         logger.info(f"🔒 检测到私有频道")
                         if channel_username:
@@ -545,6 +546,7 @@ async def main() -> None:
 
             logger.info(f"----- 图床服务已成功启动 (PID: {os.getpid()}) -----")
             logger.info(f"监听频道ID: {channel_id}")
+            logger.info(f"频道用户名: {'@' + channel_username if channel_username else '未设置（私有频道）'}")
             logger.info(f"授权用户列表: {allowed_users if allowed_users else '无 (请在配置文件中设置!)'}")
             logger.info(f"图床基础URL: {base_url}")
             logger.info(f"已加载 {len(img_service_instance.file_records)} 个文件记录 (来自 {img_service_instance.db_path})")
@@ -695,57 +697,6 @@ setup_config_interactive() {
         break
     done
     
-    local channel_username
-    echo -e "${YELLOW}频道类型配置：${NC}"
-    echo "如果您的频道是公开频道（有 @username），请输入用户名"
-    echo "如果是私有频道，直接按回车跳过"
-    read -p "请输入频道用户名 (例如 @imghub7788，可留空): " channel_username
-    # 清理用户名格式（去掉可能的@符号，保持一致性）
-    if [[ -n "${channel_username}" ]]; then
-        channel_username="${channel_username#@}"  # 去掉开头的@
-        echo -e "${GREEN}已设置公开频道用户名: @${channel_username}${NC}"
-    else
-        echo -e "${YELLOW}未设置用户名，将作为私有频道处理${NC}"
-    fi
-    
-    local base_url
-    while true; do
-        read -p "请输入您图床的完整基础 URL (必须以 http:// 或 https:// 开头, 例如 https://img.yourdomain.com): " base_url
-        if [[ "${base_url}" =~ ^https?:// ]]; then
-            break
-        else
-            echo -e "${RED}基础 URL 格式不正确，必须以 http:// 或 https:// 开头。请重新输入。${NC}"
-        fi
-    done
-
-    echo -e "${GREEN}正在生成配置文件: ${CONFIG_FILE_PATH}${NC}"
-    cat > "${CONFIG_FILE_PATH}" <<EOL
-[telegram]
-bot_token = ${bot_token}
-channel_id = ${channel_id}
-channel_username = ${channel_username}
-
-[access]
-allowed_users = ${allowed_users}
-
-[server]
-base_url = ${base_url}
-EOL
-    # 设置配置文件权限，确保root可读写，其他用户无权访问
-    chmod 600 "${CONFIG_FILE_PATH}"
-    echo -e "${GREEN}配置文件已生成并设置权限。${NC}"
-} 的用户 ID (多个 ID 请用英文逗号隔开, 例如 12345678,87654321): " allowed_users
-        if [[ -n "${allowed_users}" ]]; then # 允许为空，但提示一下
-             if [[ ! "${allowed_users}" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
-                echo -e "${RED}授权用户 ID 列表格式不正确。应为纯数字，多个用英文逗号隔开。请重新输入。${NC}"
-                continue
-             fi
-        else
-            echo -e "${YELLOW}警告：授权用户列表为空，这意味着在配置完成前可能无人能使用 Bot 的上传功能。${NC}"
-        fi
-        break
-    done
-    
     local base_url
     while true; do
         read -p "请输入您图床的完整基础 URL (必须以 http:// 或 https:// 开头, 例如 https://img.yourdomain.com): " base_url
@@ -779,6 +730,25 @@ main() {
     check_root
 
     echo -e "${GREEN}开始安装 ImgHub Bot...${NC}"
+
+    # 检查是否已有服务在运行
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        echo -e "${YELLOW}检测到 ${SERVICE_NAME} 服务正在运行。${NC}"
+        read -p "是否要停止现有服务并继续安装？[y/N]: " -r
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo -e "${YELLOW}正在停止现有服务...${NC}"
+            systemctl stop "${SERVICE_NAME}"
+            
+            # 备份现有数据
+            if [ -f "/var/lib/imghub/records.json" ]; then
+                echo -e "${YELLOW}正在备份现有记录...${NC}"
+                cp /var/lib/imghub/records.json /var/lib/imghub/records.json.bak.$(date +%Y%m%d_%H%M%S)
+            fi
+        else
+            echo -e "${RED}安装已取消。${NC}"
+            exit 0
+        fi
+    fi
 
     install_dependencies
 
@@ -867,8 +837,19 @@ main() {
     echo -e "重启服务: ${YELLOW}systemctl restart ${SERVICE_NAME}.service${NC}"
     echo -e "查看服务日志: ${YELLOW}journalctl -u ${SERVICE_NAME} -f --no-pager${NC}"
     echo -e "查看Python脚本日志: ${YELLOW}tail -f ${LOG_FILE}${NC}"
-    echo -e "配置文件位置: ${YELLOW}${CONFIG_FILE_PATH}${NC}"
+    echo -e "编辑配置文件: ${YELLOW}nano ${CONFIG_FILE_PATH}${NC}"
     echo -e "Python脚本位置: ${YELLOW}${PYTHON_SCRIPT_PATH}${NC}"
+    echo ""
+    
+    # 显示配置的频道信息
+    configured_channel_username=$(grep channel_username ${CONFIG_FILE_PATH} | cut -d '=' -f2 | xargs)
+    if [[ -n "${configured_channel_username}" ]]; then
+        echo -e "${GREEN}配置的频道类型: 公开频道 @${configured_channel_username}${NC}"
+        echo -e "${GREEN}备用链接格式: https://t.me/${configured_channel_username}/消息ID${NC}"
+    else
+        echo -e "${YELLOW}配置的频道类型: 私有频道${NC}"
+        echo -e "${YELLOW}备用链接格式: https://t.me/c/频道ID/消息ID (仅成员可访问)${NC}"
+    fi
 }
 
 # 执行主函数
