@@ -1535,7 +1535,7 @@ EOF
 install_tg_image_host() {
     clear
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/GPT-Scripts${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo # Add an empty line for spacing
 
