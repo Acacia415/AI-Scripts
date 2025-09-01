@@ -529,6 +529,46 @@ install_shadowtls() {
     fi
 }
 
+# ======================= 一键IPTables转发 =======================
+install_iptables_forward() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}一键IPTables转发管理工具${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/iptables_forward.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/iptables.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载 IPTables转发 脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
+# ======================= 一键GOST转发 =======================
+install_gost_forward() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}一键GOST转发管理工具${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/Multi-EasyGost${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/gost_forward.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/Multi-EasyGost/Acacia415-improved-version/gost.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载 GOST转发 脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
 # ======================= 安装3X-UI面板 =======================
 install_3x_ui() {
     clear
@@ -618,7 +658,7 @@ open_all_ports() {
     echo -e "${RED}═════════════════════════════════${NC}"
     read -p "确认继续操作？[y/N] " confirm
     
-    if [[ $confirm =~ ^[Yy]$ ]]; then
+    if [[ $confirm =~ ^[Yy]$ ]]; 键，然后
         echo -e "${CYAN}正在重置防火墙规则...${NC}"
         
         # 设置默认策略
@@ -648,7 +688,7 @@ configure_caddy_reverse_proxy() {
     local domain ip port
 
     # 首次安装检测
-    if ! command -v caddy &>/dev/null; then
+    if ! command -v caddy &>/dev/null; 键，然后
         echo -e "${CYAN}开始安装Caddy服务器...${NC}"
         
         # 安装依赖组件（显示进度）
@@ -1993,7 +2033,7 @@ update_script() {
   # 下载并执行新脚本
   if curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o /root/tool.sh && 
      chmod +x /root/tool.sh
-  then
+  键，然后
     echo -e "${GREEN}更新成功，即将启动新脚本...${NC}"
     sleep 2
     exec /root/tool.sh  # 用新脚本替换当前进程
@@ -2026,20 +2066,22 @@ main_menu() {
     echo -e "6. 安装 Hysteria2 协议服务"
     echo -e "7. 安装 SS-Rust 协议服务"
     echo -e "8. 安装 ShadowTLS"
-    echo -e "9. 安装 3X-UI 管理面板"
-    echo -e "10. 流媒体解锁检测"
-    echo -e "11. Speedtest网络测速"
-    echo -e "12. 开放所有端口"
-    echo -e "13. Caddy反代管理"
-    echo -e "14. Nginx管理"
-    echo -e "15. IP优先级设置"
-    echo -e "16. TCP性能优化"
-    echo -e "17. 命令行美化"
-    echo -e "18. DNS解锁服务"
-    echo -e "19. 安装Sub-Store"
-    echo -e "20. 搭建TG图床"
-    echo -e "21. TCP性能优化 (BBR+fq)"
-    echo -e "22. 恢复TCP原始配置"
+    echo -e "9. 一键IPTables转发"
+    echo -e "10. 一键GOST转发"
+    echo -e "11. 安装 3X-UI 管理面板"
+    echo -e "12. 流媒体解锁检测"
+    echo -e "13. Speedtest网络测速"
+    echo -e "14. 开放所有端口"
+    echo -e "15. Caddy反代管理"
+    echo -e "16. Nginx管理"
+    echo -e "17. IP优先级设置"
+    echo -e "18. TCP性能优化"
+    echo -e "19. 命令行美化"
+    echo -e "20. DNS解锁服务"
+    echo -e "21. 安装Sub-Store"
+    echo -e "22. 搭建TG图床"
+    echo -e "23. TCP性能优化 (BBR+fq)"
+    echo -e "24. 恢复TCP原始配置"
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
@@ -2080,58 +2122,66 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       9)  
-        install_3x_ui 
+        install_iptables_forward 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       10)  
-        install_media_check 
+        install_gost_forward 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       11)  
-        install_speedtest 
+        install_3x_ui 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       12)  
+        install_media_check 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      13)  
+        install_speedtest 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      14)  
         open_all_ports 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      13)
+      15)
         caddy_main
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      14)
+      16)
         nginx_main
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      15)
+      17)
         modify_ip_preference
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      16)
+      18)
         install_magic_tcp 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      17)  
+      19)  
         install_shell_beautify 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      18)  
+      20)  
         dns_unlock_menu 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      19)  
+      21)  
         install_substore 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      20)  
+      22)  
         install_tg_image_host 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      21)
+      23)
         optimize_tcp_performance 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      22)
+      24)
         uninstall_tcp_optimization 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
