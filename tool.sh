@@ -16,7 +16,7 @@ NC='\033[0m'
 # ===================== IRIS 工具箱快捷键自动安装 =====================
 
 # 确保以 root 权限运行
-if [ "$EUID" -ne 0 ]; then
+if [ "$EUID" -ne 0 ]; 键，然后
     echo "请使用 sudo 执行本脚本"
     exit 1
 fi
@@ -36,11 +36,11 @@ display_system_info() {
         local deps=(jq whois)
         local missing=()
         for dep in "${deps[@]}"; do
-            if ! command -v $dep &>/dev/null; then
+            if ! command -v $dep &>/dev/null; 键，然后
                 missing+=("$dep")
             fi
         done
-        if [ ${#missing[@]} -gt 0 ]; then
+        if [ ${#missing[@]} -gt 0 ]; 键，然后
             echo -e "${YELLOW}正在安装依赖：${missing[*]}${NC}"
             apt-get update >/dev/null 2>&1
             apt-get install -y "${missing[@]}" >/dev/null 2>&1
@@ -141,7 +141,7 @@ check_dependencies() {
     local missing=()
     
     for dep in "${deps[@]}"; do
-        if ! command -v $dep &>/dev/null; then
+        if ! command -v $dep &>/dev/null; 键，然后
             missing+=("$dep")
         fi
     done
@@ -658,11 +658,11 @@ open_all_ports() {
     echo -e "${RED}═════════════════════════════════${NC}"
     read -p "确认继续操作？[y/N] " confirm
     
-    if [[ $confirm =~ ^[Yy]$ ]]; 键，然后
+    if [[ $confirm =~ ^[Yy]$ ]]; then
         echo -e "${CYAN}正在重置防火墙规则...${NC}"
         
         # 设置默认策略
-        sudo iptables -P INPUT ACCEPT    # 修正缺少的ACCEPT
+        sudo iptables -P INPUT ACCEPT
         sudo iptables -P FORWARD ACCEPT
         sudo iptables -P OUTPUT ACCEPT
         
@@ -1238,7 +1238,7 @@ install_magic_tcp() {
     if [[ ! "$confirm" =~ [yY] ]]; then
         echo -e "${BLUE}操作已取消${NC}"
         return 1
-    fi  # 必须显式闭合if语句
+    fi
     
     # 网络检测环节
     if ! curl -Is https://raw.githubusercontent.com >/dev/null 2>&1; then
@@ -1247,17 +1247,17 @@ install_magic_tcp() {
     fi
     
     # 执行优化脚本
-    echo -e "${CYAN}正在应用TCP优化参数..."
+    echo -e "${CYAN}正在应用TCP优化参数...${NC}"
     if bash <(curl -sSL https://raw.githubusercontent.com/qiuxiuya/magicTCP/main/main.sh); then
         echo -e "${GREEN}✅ 优化成功完成，重启后生效${NC}"
     else
-        echo -e "${RED}❌ 优化过程中出现错误，请检查："
-        echo -e "1. 系统是否为Debian/Ubuntu"
-        echo -e "2. 是否具有root权限"
-        echo -e "3. 查看日志：/var/log/magic_tcp.log${NC}"
+        echo -e "${RED}❌ 优化过程中出现错误，请检查：${NC}"
+        echo -e "${RED}1. 系统是否为Debian/Ubuntu${NC}"
+        echo -e "${RED}2. 是否具有root权限${NC}"
+        echo -e "${RED}3. 查看日志：/var/log/magic_tcp.log${NC}"
         return 1
-    fi  # 闭合核心if语句
-}  # 函数结束（对应原错误行号807）
+    fi
+}
 
 # ======================= 命令行美化 =======================
 install_shell_beautify() {
