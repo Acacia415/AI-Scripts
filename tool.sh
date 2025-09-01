@@ -16,7 +16,7 @@ NC='\033[0m'
 # ===================== IRIS 工具箱快捷键自动安装 =====================
 
 # 确保以 root 权限运行
-if [ "$EUID" -ne 0 ]; 键，然后
+if [ "$EUID" -ne 0 ]; then
     echo "请使用 sudo 执行本脚本"
     exit 1
 fi
@@ -36,11 +36,11 @@ display_system_info() {
         local deps=(jq whois)
         local missing=()
         for dep in "${deps[@]}"; do
-            if ! command -v $dep &>/dev/null; 键，然后
+            if ! command -v $dep &>/dev/null; then
                 missing+=("$dep")
             fi
         done
-        if [ ${#missing[@]} -gt 0 ]; 键，然后
+        if [ ${#missing[@]} -gt 0 ]; then
             echo -e "${YELLOW}正在安装依赖：${missing[*]}${NC}"
             apt-get update >/dev/null 2>&1
             apt-get install -y "${missing[@]}" >/dev/null 2>&1
@@ -141,7 +141,7 @@ check_dependencies() {
     local missing=()
     
     for dep in "${deps[@]}"; do
-        if ! command -v $dep &>/dev/null; 键，然后
+        if ! command -v $dep &>/dev/null; then
             missing+=("$dep")
         fi
     done
@@ -688,7 +688,7 @@ configure_caddy_reverse_proxy() {
     local domain ip port
 
     # 首次安装检测
-    if ! command -v caddy &>/dev/null; 键，然后
+    if ! command -v caddy &>/dev/null; then
         echo -e "${CYAN}开始安装Caddy服务器...${NC}"
         
         # 安装依赖组件（显示进度）
@@ -2033,7 +2033,7 @@ update_script() {
   # 下载并执行新脚本
   if curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o /root/tool.sh && 
      chmod +x /root/tool.sh
-  键，然后
+  then
     echo -e "${GREEN}更新成功，即将启动新脚本...${NC}"
     sleep 2
     exec /root/tool.sh  # 用新脚本替换当前进程
