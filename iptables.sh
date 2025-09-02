@@ -254,7 +254,7 @@ show_current_rules() {
     printf "%-5s %-8s %-20s %-30s\n" "编号" "协议" "本地端口" "目标地址"
     echo "-------------------------------------------------------------------"
     
-    # 获取TCP规则
+    # 获取规则
     iptables -t nat -L PREROUTING -n --line-numbers | grep "dpt:" | while read line; do
         num=$(echo "$line" | awk '{print $1}')
         proto=$(echo "$line" | awk '{print $4}')
@@ -371,84 +371,16 @@ delete_rules() {
     
     if [[ "$confirm" == "y" ]] || [[ "$confirm" == "Y" ]]; then
         # 从大到小排序规则编号，避免删除时编号变化
-        IFS=
-
-# 函数：显示主菜单
-show_menu() {
-    clear
-    echo -e "${BLUE}================================================${NC}"
-    echo -e "${CYAN}         IPTables 流量转发管理工具${NC}"
-    echo -e "${BLUE}================================================${NC}"
-    echo ""
-    echo -e "${GREEN}请选择操作:${NC}"
-    echo ""
-    echo "  1. 转发 TCP+UDP"
-    echo "  2. 转发 TCP"
-    echo "  3. 转发 UDP"
-    echo "  4. 查看当前规则"
-    echo "  5. 删除转发规则"
-    echo "  0. 退出脚本"
-    echo ""
-    echo -e "${BLUE}================================================${NC}"
-    echo -e "本机IP: ${GREEN}$(get_local_ip)${NC}"
-    echo -e "IP转发: ${GREEN}$([ $(cat /proc/sys/net/ipv4/ip_forward) -eq 1 ] && echo "已启用" || echo "未启用")${NC}"
-    echo -e "${BLUE}================================================${NC}"
-    echo ""
-}
-
-# 主函数
-main() {
-    # 检查权限和系统
-    check_root
-    check_system
-    
-    # 初始化环境
-    print_info "正在初始化环境..."
-    init_environment
-    
-    # 主循环
-    while true; do
-        show_menu
-        
-        read -p "请输入选项 (0-5): " choice
-        
-        case $choice in
-            1)
-                setup_forward "both" "TCP+UDP"
-                ;;
-            2)
-                setup_forward "tcp" "TCP"
-                ;;
-            3)
-                setup_forward "udp" "UDP"
-                ;;
-            4)
-                show_current_rules
-                ;;
-            5)
-                delete_rules
-                ;;
-            0)
-                echo ""
-                print_info "感谢使用，再见！"
-                exit 0
-                ;;
-            *)
-                print_error "无效的选项，请重新选择"
-                sleep 2
-                ;;
-        esac
-    done
-}
-
-# 启动脚本
-main\n' sorted_rules=($(sort -rn <<<"${valid_rules[*]}"))
-        unset IFS
+        # 使用 printf 和 sort 来正确处理多位数字排序
+        local sorted_rules=($(printf "%s\n" "${valid_rules[@]}" | sort -rn))
         
         local success_count=0
         local fail_count=0
         
         # 删除规则
+        # 注意：这里只删除了PREROUTING规则，与之关联的POSTROUTING和FORWARD规则会保留，
+        # 但因为入口规则已删除，它们不会被匹配到，通常无害。
+        print_info "正在删除规则..."
         for rule_num in "${sorted_rules[@]}"; do
             if iptables -t nat -D PREROUTING $rule_num 2>/dev/null; then
                 print_info "已删除规则 $rule_num"
@@ -459,15 +391,12 @@ main\n' sorted_rules=($(sort -rn <<<"${valid_rules[*]}"))
             fi
         done
         
-        # 清理相关的POSTROUTING和FORWARD规则（可选）
-        # 注意：这里简化处理，实际使用中可能需要更精确的匹配
-        
         # 保存规则
         netfilter-persistent save > /dev/null 2>&1
         
         echo ""
         if [[ $success_count -gt 0 ]]; then
-            print_info "成功删除 $success_count 条规则"
+            print_info "成功删除 $success_count 条规则并已持久化"
         fi
         if [[ $fail_count -gt 0 ]]; then
             print_warning "删除失败 $fail_count 条规则"
@@ -480,11 +409,86 @@ main\n' sorted_rules=($(sort -rn <<<"${valid_rules[*]}"))
     read -p "按回车键返回主菜单..."
 }
 
+# 函数：备份规则
+backup_rules() {
+    clear
+    echo -e "${CYAN}========== 备份iptables规则 ==========${NC}"
+    echo ""
+    
+    local default_path="/root/iptables-backup-$(date +%Y%m%d-%H%M%S).rules"
+    local backup_path=""
+    
+    read -p "请输入备份文件路径 [默认: ${default_path}]: " backup_path
+    if [[ -z "$backup_path" ]]; then
+        backup_path="$default_path"
+    fi
+    
+    # 检查文件是否存在
+    if [[ -f "$backup_path" ]]; then
+        print_warning "文件已存在: $backup_path"
+        read -p "是否覆盖？ (y/n): " confirm
+        if [[ "$confirm" != "y" ]] && [[ "$confirm" != "Y" ]]; then
+            print_info "已取消备份"
+            echo ""
+            read -p "按回车键返回主菜单..."
+            return
+        fi
+    fi
+    
+    print_info "正在备份规则到 $backup_path ..."
+    if iptables-save > "$backup_path"; then
+        print_info "规则备份成功！"
+    else
+        print_error "规则备份失败！"
+    fi
+    
+    echo ""
+    read -p "按回车键返回主菜单..."
+}
+
+# 函数：恢复规则
+restore_rules() {
+    clear
+    echo -e "${CYAN}========== 恢复iptables规则 ==========${NC}"
+    echo ""
+    
+    local backup_path=""
+    read -p "请输入要恢复的备份文件路径: " backup_path
+    
+    if [[ ! -f "$backup_path" ]]; then
+        print_error "备份文件不存在: $backup_path"
+        echo ""
+        read -p "按回车键返回主菜单..."
+        return
+    fi
+    
+    echo ""
+    print_warning "警告：恢复操作将覆盖所有现有iptables规则！"
+    read -p "确认从 $backup_path 恢复规则吗？ (y/n): " confirm
+    
+    if [[ "$confirm" == "y" ]] || [[ "$confirm" == "Y" ]]; then
+        print_info "正在从 $backup_path 恢复规则..."
+        if iptables-restore < "$backup_path"; then
+            print_info "规则恢复成功！"
+            print_info "正在持久化规则..."
+            netfilter-persistent save > /dev/null 2>&1
+            print_info "规则已持久化！"
+        else
+            print_error "规则恢复失败！请检查备份文件格式是否正确。"
+        fi
+    else
+        print_warning "已取消恢复操作"
+    fi
+    
+    echo ""
+    read -p "按回车键返回主菜单..."
+}
+
 # 函数：显示主菜单
 show_menu() {
     clear
     echo -e "${BLUE}================================================${NC}"
-    echo -e "${CYAN}         IPTables 流量转发管理工具${NC}"
+    echo -e "${CYAN}          IPTables 流量转发管理工具${NC}"
     echo -e "${BLUE}================================================${NC}"
     echo ""
     echo -e "${GREEN}请选择操作:${NC}"
@@ -494,6 +498,8 @@ show_menu() {
     echo "  3. 转发 UDP"
     echo "  4. 查看当前规则"
     echo "  5. 删除转发规则"
+    echo "  6. 备份转发规则"
+    echo "  7. 恢复转发规则"
     echo "  0. 退出脚本"
     echo ""
     echo -e "${BLUE}================================================${NC}"
@@ -517,7 +523,7 @@ main() {
     while true; do
         show_menu
         
-        read -p "请输入选项 (0-5): " choice
+        read -p "请输入选项 (0-7): " choice
         
         case $choice in
             1)
@@ -534,6 +540,12 @@ main() {
                 ;;
             5)
                 delete_rules
+                ;;
+            6)
+                backup_rules
+                ;;
+            7)
+                restore_rules
                 ;;
             0)
                 echo ""
