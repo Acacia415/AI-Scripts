@@ -2023,6 +2023,26 @@ uninstall_tcp_optimization() {
     echo -e "${GREEN}SUCCESS: 网络配置已成功恢复到 ${timestamp} 的状态！${NC}"
 }
 
+# ======================= 安装Fail2Ban =======================
+install_fail2ban() {
+    clear
+    # 添加来源提示（使用工具箱内置颜色变量）
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    # 执行安装流程（增加错误处理和自动清理）
+    if wget -O install_fail2ban.sh https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/install_fail2ban.sh; then
+        chmod +x install_fail2ban.sh
+        ./install_fail2ban.sh
+        rm -f install_fail2ban.sh  # 新增清理步骤
+    else
+        echo -e "${RED}下载 Fail2Ban 安装脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
 # ======================= 脚本更新 =======================
 update_script() {
   echo -e "${YELLOW}开始更新脚本...${NC}"
@@ -2082,6 +2102,7 @@ main_menu() {
     echo -e "22. 搭建TG图床"
     echo -e "23. TCP性能优化 (BBR+fq)"
     echo -e "24. 恢复TCP原始配置"
+    echo -e "25. 安装Fail2Ban"
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
@@ -2183,6 +2204,10 @@ main_menu() {
         ;;
       24)
         uninstall_tcp_optimization 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      25)
+        install_fail2ban 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       99)  
