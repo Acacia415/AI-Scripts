@@ -558,7 +558,7 @@ install_gost_forward() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
     local install_script="/tmp/gost_forward.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/Multi-EasyGost/Acacia415-improved-version/gost.sh; then
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/Multi-EasyGost/refs/heads/test/gost.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
