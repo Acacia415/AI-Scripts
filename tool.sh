@@ -1329,7 +1329,7 @@ install_shell_beautify() {
     fi
 }
 
-# ======================= DNS解锁管理 (Gost 最终版 + 模块化配置) =======================
+# ======================= DNS解锁管理   =======================
 
 # 帮助函数：检查 Dnsmasq 的 53 端口
 check_port_53() {
@@ -1372,7 +1372,7 @@ dns_unlock_menu() {
     while true; do
         clear
         echo -e "\033[0;36m=============================================\033[0m"
-        echo -e "\033[0;33m         DNS 解锁服务管理 (Gost 方案)        \033[0m"
+        echo -e "\033[0;33m              DNS 解锁服务管理                \033[0m"
         echo -e "\033[0;36m=============================================\033[0m"
         echo " --- 服务端管理 ---"
         echo "  1. 安装/更新 DNS 解锁服务"
@@ -1399,7 +1399,7 @@ dns_unlock_menu() {
     done
 }
 
-# 服务端安装（Gost方案 + 模块化配置）
+# 服务端安装
 install_dns_unlock_server() {
     clear
     echo -e "\033[0;33m--- DNS解锁服务 安装/更新 (全新Gost方案) ---\033[0m"
@@ -1636,8 +1636,11 @@ address=/youtube.com/${PUBLIC_IP}
 address=/youtubei.googleapis.com/${PUBLIC_IP}
 EOF
 
-    # 脚本不再触碰主配置文件 /etc/dnsmasq.conf。
-    # 用户需要自己确保主配置文件中包含 "conf-dir=/etc/dnsmasq.d/" 这一行。
+    # --- 步骤4: 智能检查并配置主配置文件 ---
+    if ! grep -q "^conf-dir=/etc/dnsmasq.d" /etc/dnsmasq.conf; then
+        echo -e "\033[0;36mINFO: 正在为 dnsmasq.conf 添加 'conf-dir' 配置...\033[0m"
+        echo -e "\n# Load configurations from /etc/dnsmasq.d\nconf-dir=/etc/dnsmasq.d/,*.conf" | sudo tee -a /etc/dnsmasq.conf
+    fi
     
     echo -e "\033[0;36mINFO: 正在重启Dnsmasq服务以加载新配置...\033[0m"
     sudo systemctl restart dnsmasq
@@ -1651,7 +1654,7 @@ EOF
 }
 
 
-# 服务端卸载 (匹配模块化配置方案)
+# 服务端卸载 (匹配智能模块化配置方案)
 uninstall_dns_unlock_server() {
     clear
     echo -e "\033[0;33m--- DNS解锁服务 卸载 (Gost方案) ---\033[0m"
@@ -1665,12 +1668,13 @@ uninstall_dns_unlock_server() {
     echo -e "\033[0;32mSUCCESS: Gost 已彻底卸载。\033[0m"
     echo
     
-    # --- 卸载 Dnsmasq 的子配置 ---
+    # --- 卸载 Dnsmasq 的子配置并清理主配置 ---
     echo -e "\033[0;36mINFO: 正在卸载 Dnsmasq 服务及相关配置...\033[0m"
     sudo systemctl stop dnsmasq 2>/dev/null
-    # 只删除由本脚本创建的配置文件
     sudo rm -f /etc/dnsmasq.d/custom_unlock.conf
-    # 卸载dnsmasq软件包本身
+    # 从主配置文件中移除 conf-dir 行
+    sudo sed -i '/^# Load configurations from \/etc\/dnsmasq.d/d' /etc/dnsmasq.conf 2>/dev/null
+    sudo sed -i '/^conf-dir=\/etc\/dnsmasq.d/d' /etc/dnsmasq.conf 2>/dev/null
     sudo apt-get purge -y dnsmasq >/dev/null 2>&1
     echo -e "\033[0;32mSUCCESS: Dnsmasq 及相关配置已卸载。\033[0m"
     echo
