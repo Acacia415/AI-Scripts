@@ -1496,7 +1496,25 @@ EOT
     
     DNSMASQ_CONFIG_FILE="/etc/dnsmasq.d/custom_unlock.conf"
     sudo tee "$DNSMASQ_CONFIG_FILE" > /dev/null <<EOF
-# Comprehensive unlock list based on user request
+# --- DNSMASQ CONFIG MODULE MANAGED BY SCRIPT ---
+# General Settings
+domain-needed
+bogus-priv
+no-resolv
+no-poll
+all-servers
+cache-size=2048
+local-ttl=60
+interface=*
+
+# Upstream DNS Servers
+server=8.8.8.8
+server=1.1.1.1
+server=208.67.222.222
+server=4.2.2.1
+
+# --- Unlock Rules ---
+# The IP address is dynamically replaced by the script.
 address=/akadns.net/${PUBLIC_IP}
 address=/akam.net/${PUBLIC_IP}
 address=/akamai.com/${PUBLIC_IP}
