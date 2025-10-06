@@ -1421,16 +1421,14 @@ EOF
     return 0
 }
 
-# 服务端安装（最终完美版：增加系统状态修复）
+# 服务端安装（最终决战版：补全编译依赖）
 install_dns_unlock_server() {
     clear
     echo -e "${YELLOW}--- DNS解锁服务 安装/更新 ---${NC}"
 
     # --- 步骤0: 清理并修复 APT 包管理器状态 ---
     echo -e "${CYAN}INFO: 正在清理先前失败的安装残留，并修复APT包管理器状态...${NC}"
-    # 强制卸载可能导致依赖问题的旧版 sniproxy
     sudo apt-get purge -y sniproxy
-    # 自动修复任何损坏的依赖关系
     sudo apt-get --fix-broken install -y
     echo -e "${GREEN}SUCCESS: 系统包管理器状态已修复。${NC}"
     echo
@@ -1438,10 +1436,12 @@ install_dns_unlock_server() {
     # --- 步骤1: 预安装所有依赖 ---
     echo -e "${CYAN}INFO: 准备环境，预先安装所有依赖...${NC}"
     sudo apt-get update
+    # 列表增加了编译所需的旧版libpcre3-dev
     local dependencies=(
         wget lsof curl net-tools dnsmasq
         autotools-dev cdbs gettext libev-dev
-        libpcre2-dev libudns-dev autoconf devscripts build-essential
+        libpcre3-dev libpcre2-dev libudns-dev 
+        autoconf devscripts build-essential
     )
     
     for dep in "${dependencies[@]}"; do
