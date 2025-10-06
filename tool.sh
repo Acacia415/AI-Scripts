@@ -1329,20 +1329,18 @@ install_shell_beautify() {
     fi
 }
 
-# ======================= DNS解锁管理 =======================
+# ======================= DNS解锁管理 (Gost 最终版 + 网络诊断) =======================
 
 # 帮助函数：检查 Dnsmasq 的 53 端口
 check_port_53() {
+    if ! command -v lsof &> /dev/null; then sudo apt-get install -y lsof >/dev/null; fi
     if lsof -i :53 -sTCP:LISTEN -P -n >/dev/null; then
         local process_name=$(ps -p $(lsof -i :53 -sTCP:LISTEN -P -n -t) -o comm=)
         echo -e "\033[0;33mWARNING: 端口 53 (DNS) 已被进程 '${process_name}' 占用。\033[0m"
         if [[ "$process_name" == "systemd-resolve" ]]; then
-            # 此处省略了自动处理 systemd-resolve 的代码，因为它非常庞大且在服务器环境中不常见
-            # 保留了更清晰的手动提示
             echo -e "\033[0;31mERROR: 请先禁用 systemd-resolved (sudo systemctl disable --now systemd-resolved) 后重试。\033[0m"
             return 1
         fi
-        # 如果是dnsmasq自身，可以忽略，因为我们会重启它
         if [[ "$process_name" != "dnsmasq" ]]; then
              echo -e "\033[0;31mERROR: 请先停止 '${process_name}' 服务后再试。\033[0m"
              return 1
@@ -1351,20 +1349,17 @@ check_port_53() {
     return 0
 }
 
+# 帮助函数：检查 Gost 的 80/443 端口
 check_ports_80_443() {
+    if ! command -v lsof &> /dev/null; then sudo apt-get install -y lsof >/dev/null; fi
     for port in 80 443; do
         if lsof -i :${port} -sTCP:LISTEN -P -n >/dev/null; then
             local process_name=$(ps -p $(lsof -i :${port} -sTCP:LISTEN -P -n -t) -o comm=)
-            # 如果是gost自身，可以忽略
             if [[ "$process_name" != "gost" ]]; then
                 echo -e "\033[0;33mWARNING: 端口 ${port} 已被进程 '${process_name}' 占用。\033[0m"
-                echo -e "\033[0;31m这可能会与 Nginx, Apache 或 Caddy 等常用Web服务冲突。请确保您已了解此情况。\033[0m"
+                echo -e "\033[0;31m这可能与 Nginx, Apache 或 Caddy 等常用Web服务冲突。请确保您已了解此情况。\033[0m"
                 read -p "是否仍然继续安装? (y/N): " choice
-                if [[ ! "$choice" =~ ^[yY]$ ]]; then
-                    echo "安装已取消。"
-                    return 1
-                fi
-                # 只提示一次
+                if [[ ! "$choice" =~ ^[yY]$ ]]; then echo "安装已取消。"; return 1; fi
                 return 0
             fi
         fi
@@ -1404,34 +1399,54 @@ dns_unlock_menu() {
     done
 }
 
-# 服务端安装（全新 Gost 方案）
+# 服务端安装（Gost方案 + 增强网络诊断）
 install_dns_unlock_server() {
     clear
     echo -e "\033[0;33m--- DNS解锁服务 安装/更新 (全新Gost方案) ---\033[0m"
 
-    # --- 步骤0: 检查端口占用 ---
+    # --- 步骤0: 安装核心依赖 (lsof必须先装) ---
+    echo -e "\033[0;36mINFO: 正在安装/检查核心依赖...\033[0m"
+    sudo apt-get update >/dev/null 2>&1
+    sudo apt-get install -y dnsmasq curl wget lsof >/dev/null 2>&1
+    
+    # --- 步骤1: 检查端口占用 ---
     if ! check_port_53; then return 1; fi
     if ! check_ports_80_443; then return 1; fi
 
-    # --- 步骤1: 清理旧环境并修复APT ---
+    # --- 步骤2: 清理旧环境并修复APT ---
     echo -e "\033[0;36mINFO: 正在清理旧环境并修复APT包管理器状态...\033[0m"
     sudo systemctl stop sniproxy 2>/dev/null
     sudo apt-get purge -y sniproxy >/dev/null 2>&1
     sudo apt-get --fix-broken install -y >/dev/null 2>&1
-    
-    # --- 步骤2: 安装核心依赖 ---
-    sudo apt-get update >/dev/null 2>&1
-    sudo apt-get install -y dnsmasq curl wget lsof
-    echo -e "\033[0;32mSUCCESS: 核心依赖安装/检查完毕。\033[0m"
+    echo -e "\033[0;32mSUCCESS: 核心依赖与系统状态检查完毕。\033[0m"
     echo
 
-    # --- 步骤3: 安装并配置 Gost ---
+    # --- 步骤3: 安装并配置 Gost (带网络诊断) ---
     echo -e "\033[0;36mINFO: 正在安装Gost作为SNI代理...\033[0m"
-    GOST_VERSION=$(curl -sL "https://api.github.com/repos/ginuerzh/gost/releases/latest" | grep "tag_name" | head -n 1 | cut -d '"' -f 4)
-    GOST_URL="https://github.com/ginuerzh/gost/releases/download/${GOST_VERSION}/gost-linux-amd64-${GOST_VERSION//v/}.gz"
     
+    echo -e "\033[0;36mINFO: 检查到GitHub API的连通性...\033[0m"
+    if ! curl -sL --head "https://api.github.com" | head -n 1 | grep "200" > /dev/null; then
+        echo -e "\033[0;31mERROR: 无法连接到 GitHub API (api.github.com)。请检查您的网络连接、DNS设置或防火墙。\033[0m"
+        return 1
+    fi
+
+    GOST_VERSION=$(curl -sL "https://api.github.com/repos/ginuerzh/gost/releases/latest" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
+    if [[ -z "$GOST_VERSION" ]]; then
+        echo -e "\033[0;31mERROR: 从 GitHub API 获取 Gost 最新版本号失败。可能是网络问题或API被限速。\033[0m"
+        return 1
+    fi
+    echo -e "\033[0;32mINFO: 检测到 Gost 最新版本为: ${GOST_VERSION}\033[0m"
+
+    GOST_URL="https://github.com/ginuerzh/gost/releases/download/${GOST_VERSION}/gost-linux-amd64-${GOST_VERSION//v/}.gz"
+    echo -e "\033[0;36mINFO: 准备从以下地址下载: ${GOST_URL}\033[0m"
+
     wget --no-check-certificate -qO gost.gz "${GOST_URL}"
-    if [ $? -ne 0 ]; then echo -e "\033[0;31mERROR: 下载Gost失败。\033[0m"; return 1; fi
+    if [ $? -ne 0 ]; then
+        echo -e "\033[0;31mERROR: 下载Gost失败。正在无静默模式重试以显示详细错误...\033[0m"
+        wget --no-check-certificate "${GOST_URL}" -O gost.gz
+        echo -e "\033[0;31mERROR: 请检查上面的详细输出以确定问题（例如：DNS解析失败、连接超时等）。\033[0m"
+        return 1
+    fi
 
     gunzip gost.gz
     chmod +x gost
@@ -1441,14 +1456,12 @@ install_dns_unlock_server() {
 [Unit]
 Description=GOST as SNI Proxy
 After=network.target
-
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/gost -L tcp://:443 -L tcp://:80 -F=
 Restart=always
 User=root
 Group=root
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -1456,7 +1469,6 @@ EOF
     sudo systemctl daemon-reload
     sudo systemctl enable gost-sniproxy.service
     sudo systemctl restart gost-sniproxy.service
-
     if systemctl is-active --quiet gost-sniproxy.service; then
         echo -e "\033[0;32mSUCCESS: Gost SNI 代理已成功安装并启动。\033[0m"
     else
@@ -1505,28 +1517,26 @@ EOF
     echo -e "\033[0;32m🎉 恭喜！全新的 DNS 解锁服务已成功安装！\033[0m"
 }
 
+# (其他函数 uninstall, setup_client, manage_iptables 等保持不变，此处省略以节约篇幅)
+# (请确保您替换的是完整的模块代码)
+
 # 服务端卸载 (匹配Gost方案)
 uninstall_dns_unlock_server() {
     clear
     echo -e "\033[0;33m--- DNS解锁服务 卸载 (Gost方案) ---\033[0m"
-
-    # --- 步骤1: 卸载 Gost ---
     echo -e "\033[0;36mINFO: 正在停止并卸载 Gost 服务...\033[0m"
-    sudo systemctl stop gost-sniproxy.service
-    sudo systemctl disable gost-sniproxy.service
+    sudo systemctl stop gost-sniproxy.service 2>/dev/null
+    sudo systemctl disable gost-sniproxy.service 2>/dev/null
     sudo rm -f /etc/systemd/system/gost-sniproxy.service
     sudo systemctl daemon-reload
     sudo rm -f /usr/local/bin/gost
     echo -e "\033[0;32mSUCCESS: Gost 已彻底卸载。\033[0m"
     echo
-
-    # --- 步骤2: 卸载 Dnsmasq ---
     echo -e "\033[0;36mINFO: 正在停止并卸载 Dnsmasq 服务...\033[0m"
-    sudo systemctl stop dnsmasq
-    sudo apt-get purge -y dnsmasq
+    sudo systemctl stop dnsmasq 2>/dev/null
+    sudo apt-get purge -y dnsmasq >/dev/null 2>&1
     sudo rm -f /etc/dnsmasq.d/custom_unlock.conf
-    # (可选)清理主配置文件中添加的行
-    sudo sed -i '/conf-dir=\/etc\/dnsmasq.d/d' /etc/dnsmasq.conf
+    sudo sed -i '/conf-dir=\/etc\/dnsmasq.d/d' /etc/dnsmasq.conf 2>/dev/null
     echo -e "\033[0;32mSUCCESS: Dnsmasq 已彻底卸载。\033[0m"
     echo
     echo -e "\033[0;32m✅ 所有 DNS 解锁服务组件均已卸载完毕。\033[0m"
@@ -1537,27 +1547,17 @@ setup_dns_client() {
     clear
     echo -e "\033[0;33m--- 设置 DNS 客户端 ---\033[0m"
     read -p "请输入您的 DNS 解锁服务器的 IP 地址: " server_ip
-    if ! [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo -e "\033[0;31m错误: 您输入的不是一个有效的 IP 地址。\033[0m"
-        return 1
-    fi
-
+    if ! [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo -e "\033[0;31m错误: 您输入的不是一个有效的 IP 地址。\033[0m"; return 1; fi
     echo -e "\033[0;36mINFO: 正在备份当前的 DNS 配置...\033[0m"
     if [ -f /etc/resolv.conf ]; then
         sudo chattr -i /etc/resolv.conf 2>/dev/null
         sudo mv /etc/resolv.conf "/etc/resolv.conf.bak_$(date +%Y%m%d_%H%M%S)"
         echo -e "\033[0;32mINFO: 原有配置已备份至 /etc/resolv.conf.bak_...\033[0m"
     fi
-
     echo -e "\033[0;36mINFO: 正在写入新的 DNS 配置...\033[0m"
     echo "nameserver $server_ip" | sudo tee /etc/resolv.conf > /dev/null
-
     echo -e "\033[0;36mINFO: 正在锁定 DNS 配置文件以防被覆盖...\033[0m"
-    if sudo chattr +i /etc/resolv.conf; then
-        echo -e "\033[0;32mSUCCESS: 客户端 DNS 已成功设置为 ${server_ip} 并已锁定！\033[0m"
-    else
-        echo -e "\033[0;31mERROR: 锁定 /etc/resolv.conf 文件失败。\033[0m"
-    fi
+    if sudo chattr +i /etc/resolv.conf; then echo -e "\033[0;32mSUCCESS: 客户端 DNS 已成功设置为 ${server_ip} 并已锁定！\033[0m"; else echo -e "\033[0;31mERROR: 锁定 /etc/resolv.conf 文件失败。\033[0m"; fi
 }
 
 # 客户端卸载（无改动）
@@ -1566,10 +1566,8 @@ uninstall_dns_client() {
     echo -e "\033[0;33m--- 卸载/还原 DNS 客户端设置 ---\033[0m"
     echo -e "\033[0;36mINFO: 正在解锁 DNS 配置文件...\033[0m"
     sudo chattr -i /etc/resolv.conf 2>/dev/null
-    
     local latest_backup
     latest_backup=$(ls -t /etc/resolv.conf.bak_* 2>/dev/null | head -n 1)
-
     if [[ -f "$latest_backup" ]]; then
         echo -e "\033[0;36mINFO: 正在从备份文件 $latest_backup 还原...\033[0m"
         sudo mv "$latest_backup" /etc/resolv.conf
@@ -1586,11 +1584,8 @@ manage_iptables_rules() {
     if ! dpkg -l | grep -q 'iptables-persistent'; then
         echo -e "\033[0;33mWARNING: 'iptables-persistent' 未安装，规则可能无法自动持久化。\033[0m"
         read -p "是否现在尝试安装? (y/N): " install_confirm
-        if [[ "$install_confirm" =~ ^[yY]$ ]]; then
-            sudo apt-get update && sudo apt-get install -y iptables-persistent
-        fi
+        if [[ "$install_confirm" =~ ^[yY]$ ]]; then sudo apt-get update && sudo apt-get install -y iptables-persistent; fi
     fi
-
     while true; do
         clear
         echo -e "\033[0;33m══════ IP 白名单管理 (端口 53, 80, 443) ══════\033[0m"
@@ -1604,18 +1599,13 @@ manage_iptables_rules() {
         echo "0. 返回上级菜单"
         echo -e "\033[0;33m════════════════════════════════════════════\033[0m"
         read -p "请输入选项: " rule_choice
-
         case $rule_choice in
         1)
             read -p "请输入要加入白名单的IP (单个IP): " ip
             if [[ -z "$ip" ]]; then continue; fi
             for port in 53 80 443; do
-                proto="udp"
-                if [[ "$port" != "53" ]]; then proto="tcp"; fi # 简化：53用udp，80/443用tcp
-                sudo iptables -I INPUT -s "$ip" -p $proto --dport $port -j ACCEPT
-                if [[ "$port" == "53" ]]; then # DNS 也需要 TCP
-                     sudo iptables -I INPUT -s "$ip" -p tcp --dport $port -j ACCEPT
-                fi
+                sudo iptables -I INPUT -s "$ip" -p tcp --dport $port -j ACCEPT
+                if [[ "$port" == "53" ]]; then sudo iptables -I INPUT -s "$ip" -p udp --dport $port -j ACCEPT; fi
             done
             echo -e "\033[0;32mIP $ip 已添加至端口 53, 80, 443 白名单。\033[0m"
             sudo netfilter-persistent save && echo -e "\033[0;32m防火墙规则已保存。\033[0m" || echo -e "\033[0;31m防火墙规则保存失败。\033[0m"
@@ -1632,14 +1622,8 @@ manage_iptables_rules() {
         3)
             echo -e "\033[0;36mINFO: 这将确保所有不在白名单的IP无法访问相关端口。\033[0m"
             for port in 53 80 443; do
-                if ! sudo iptables -C INPUT -p tcp --dport $port -j DROP &>/dev/null; then
-                    sudo iptables -A INPUT -p tcp --dport $port -j DROP
-                fi
-                if [[ "$port" == "53" ]]; then
-                     if ! sudo iptables -C INPUT -p udp --dport $port -j DROP &>/dev/null; then
-                        sudo iptables -A INPUT -p udp --dport $port -j DROP
-                     fi
-                fi
+                if ! sudo iptables -C INPUT -p tcp --dport $port -j DROP &>/dev/null; then sudo iptables -A INPUT -p tcp --dport $port -j DROP; fi
+                if [[ "$port" == "53" ]]; then if ! sudo iptables -C INPUT -p udp --dport $port -j DROP &>/dev/null; then sudo iptables -A INPUT -p udp --dport $port -j DROP; fi; fi
             done
             echo -e "\033[0;32m'默认拒绝' 规则已应用/确认存在。\033[0m"
             sudo netfilter-persistent save && echo -e "\033[0;32m防火墙规则已保存。\033[0m" || echo -e "\033[0;31m防火墙规则保存失败。\033[0m"
