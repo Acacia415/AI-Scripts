@@ -1421,15 +1421,23 @@ EOF
     return 0
 }
 
-# 服务端安装（最终完美版：预安装所有依赖）
+# 服务端安装（最终完美版：增加系统状态修复）
 install_dns_unlock_server() {
     clear
     echo -e "${YELLOW}--- DNS解锁服务 安装/更新 ---${NC}"
+
+    # --- 步骤0: 清理并修复 APT 包管理器状态 ---
+    echo -e "${CYAN}INFO: 正在清理先前失败的安装残留，并修复APT包管理器状态...${NC}"
+    # 强制卸载可能导致依赖问题的旧版 sniproxy
+    sudo apt-get purge -y sniproxy
+    # 自动修复任何损坏的依赖关系
+    sudo apt-get --fix-broken install -y
+    echo -e "${GREEN}SUCCESS: 系统包管理器状态已修复。${NC}"
+    echo
     
-    # --- 步骤1: 预安装所有依赖，避免外部脚本因环境问题失败 ---
+    # --- 步骤1: 预安装所有依赖 ---
     echo -e "${CYAN}INFO: 准备环境，预先安装所有依赖...${NC}"
     sudo apt-get update
-    # 列表包含了我们脚本和外部脚本(编译模式)所需的所有依赖
     local dependencies=(
         wget lsof curl net-tools dnsmasq
         autotools-dev cdbs gettext libev-dev
@@ -1437,10 +1445,10 @@ install_dns_unlock_server() {
     )
     
     for dep in "${dependencies[@]}"; do
-        if ! dpkg -s "${dep}" >/dev/null 2>&1; then
+        if ! dpkg-query -W -f='${Status}' "${dep}" 2>/dev/null | grep -q "install ok installed"; then
             echo -e "${YELLOW}INFO: 正在安装依赖包: ${dep}...${NC}"
             sudo apt-get install -y "${dep}"
-            if ! dpkg -s "${dep}" >/dev/null 2>&1; then
+            if ! dpkg-query -W -f='${Status}' "${dep}" 2>/dev/null | grep -q "install ok installed"; then
                 echo -e "${RED}ERROR: 依赖包 ${dep} 安装失败。请检查您的 apt 源后重试。${NC}"
                 return 1
             fi
@@ -1665,6 +1673,7 @@ manage_iptables_rules() {
         esac
     done
 }
+
 # ======================= Sub-Store安装模块 =======================
 install_substore() {
     local secret_key
