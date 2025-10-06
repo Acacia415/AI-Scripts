@@ -1352,45 +1352,59 @@ dns_unlock_menu() {
         read -p "请输入选项 [0-5]: " choice
 
         case $choice in
-            1) install_dns_unlock_server; press_any_key ;;
-            2) uninstall_dns_unlock_server; press_any_key ;;
+            1) install_dns_unlock_server; echo; read -n 1 -s -r -p "按任意键返回..." ;;
+            2) uninstall_dns_unlock_server; echo; read -n 1 -s -r -p "按任意键返回..." ;;
             3) manage_iptables_rules ;;
-            4) setup_dns_client; press_any_key ;;
-            5) uninstall_dns_client; press_any_key ;;
+            4) setup_dns_client; echo; read -n 1 -s -r -p "按任意键返回..." ;;
+            5) uninstall_dns_client; echo; read -n 1 -s -r -p "按任意键返回..." ;;
             0) break ;;
             *) echo -e "${RED}无效选项，请重新输入!${NC}"; sleep 2 ;;
         esac
     done
 }
 
-# 帮助函数：检查并尝试释放被 systemd-resolved 占用的 53 端口
+# 帮助函数：检查并尝试释放被 systemd-resolved 占用的 53 端口 (已优化)
 check_and_free_port_53() {
     echo -e "${CYAN}INFO: 正在检查端口 53 是否被占用...${NC}"
-    if sudo lsof -i :53 -sTCP:LISTEN -P -n > /dev/null || sudo lsof -i :53 -sUDP:LISTEN -P -n > /dev/null; then
-        echo -e "${YELLOW}WARNING: 端口 53 (DNS) 已被占用，很可能由 systemd-resolved 导致。${NC}"
-        echo -e "${CYAN}INFO: 正在尝试自动修改配置以释放端口...${NC}"
-        sudo systemctl stop systemd-resolved
-        if [ -f /etc/systemd/resolved.conf ]; then
-            sudo sed -i -E 's/^#?(DNS=).*/\18.8.8.8/' /etc/systemd/resolved.conf
-            sudo sed -i -E 's/^#?(DNSStubListener=).*/\1no/' /etc/systemd/resolved.conf
-            if ! grep -q "DNSStubListener=no" /etc/systemd/resolved.conf; then
-                echo "DNSStubListener=no" | sudo tee -a /etc/systemd/resolved.conf > /dev/null
-            fi
-        else
-            sudo tee /etc/systemd/resolved.conf > /dev/null <<EOF
+    # 使用更可靠的检查方法，并捕获占用进程的名称
+    local occupying_process
+    occupying_process=$(sudo lsof -i :53 -sTCP:LISTEN -P -n -t)
+
+    if [[ -n "$occupying_process" ]]; then
+        local process_name
+        process_name=$(ps -p "$occupying_process" -o comm=)
+        echo -e "${YELLOW}WARNING: 端口 53 (DNS) 已被进程 '$process_name' (PID: $occupying_process) 占用。${NC}"
+
+        if [[ "$process_name" == "systemd-resolve" ]]; then
+            echo -e "${CYAN}INFO: 正在尝试自动修改 systemd-resolved 配置以释放端口...${NC}"
+            sudo systemctl stop systemd-resolved
+            if [ -f /etc/systemd/resolved.conf ]; then
+                sudo sed -i -E 's/^#?(DNS=).*/\18.8.8.8/' /etc/systemd/resolved.conf
+                sudo sed -i -E 's/^#?(DNSStubListener=).*/\1no/' /etc/systemd/resolved.conf
+                if ! grep -q "DNSStubListener=no" /etc/systemd/resolved.conf; then
+                    echo "DNSStubListener=no" | sudo tee -a /etc/systemd/resolved.conf > /dev/null
+                fi
+            else
+                sudo tee /etc/systemd/resolved.conf > /dev/null <<EOF
 [Resolve]
 DNS=8.8.8.8
 DNSStubListener=no
 EOF
-        fi
-        sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
-        sudo systemctl restart systemd-resolved
-        sleep 1
-        if sudo lsof -i :53 -sTCP:LISTEN -P -n > /dev/null || sudo lsof -i :53 -sUDP:LISTEN -P -n > /dev/null; then
-            echo -e "${RED}ERROR: 自动释放端口 53 失败。请手动排查问题后重试。${NC}"
-            return 1
+            fi
+            sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+            sudo systemctl restart systemd-resolved
+            sleep 1
+            # 再次检查
+            if [[ -n "$(sudo lsof -i :53 -sTCP:LISTEN -P -n -t)" ]]; then
+                echo -e "${RED}ERROR: 自动释放端口 53 失败。请手动排查问题后重试。${NC}"
+                return 1
+            else
+                echo -e "${GREEN}SUCCESS: 端口 53 已成功释放。${NC}"
+            fi
         else
-            echo -e "${GREEN}SUCCESS: 端口 53 已成功释放。${NC}"
+            echo -e "${RED}ERROR: 端口被 '$process_name' 占用，脚本无法自动处理。${NC}"
+            echo -e "${RED}请先手动停止该服务 (例如: sudo systemctl stop $process_name) 后再试。${NC}"
+            return 1
         fi
     else
         echo -e "${GREEN}INFO: 端口 53 未被占用，可以继续安装。${NC}"
@@ -1466,6 +1480,8 @@ address=/tiktok.com/${PUBLIC_IP}
 address=/tik-tokapi.com/${PUBLIC_IP}
 address=/tiktokcdn.com/${PUBLIC_IP}
 address=/tiktokv.com/${PUBLIC_IP}
+address=/youtube.com/${PUBLIC_IP}
+address=/youtubei.googleapis.com/${PUBLIC_IP}
 EOF
                 echo -e "${CYAN}INFO: 正在重启 Dnsmasq 服务...${NC}"
                 if sudo systemctl restart dnsmasq; then echo -e "${GREEN}SUCCESS: Dnsmasq 配置更新并重启成功。${NC}"; else echo -e "${RED}ERROR: Dnsmasq 服务重启失败。${NC}"; fi
@@ -1494,6 +1510,8 @@ EOF
     .*tik-tokapi\.com$ *
     .*tiktokcdn\.com$ *
     .*tiktokv\.com$ *
+    .*youtube\.com$ *
+    .*youtubei\.googleapis\.com$ *
 EOF
                 LINE_NUM=$(grep -n "}" "$SNIPROXY_CONFIG_FILE" | tail -n 1 | cut -d: -f1)
                 if [[ -n "$LINE_NUM" ]]; then
