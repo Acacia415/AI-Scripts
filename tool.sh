@@ -1329,7 +1329,7 @@ install_shell_beautify() {
     fi
 }
 
-# ======================= DNS解锁管理 =======================
+# ======================= DNS解锁管理 (Gost 最终版 + 自定义全集) =======================
 
 # 帮助函数：检查 Dnsmasq 的 53 端口
 check_port_53() {
@@ -1372,7 +1372,7 @@ dns_unlock_menu() {
     while true; do
         clear
         echo -e "\033[0;36m=============================================\033[0m"
-        echo -e "\033[0;33m              DNS 解锁服务管理                \033[0m"
+        echo -e "\033[0;33m         DNS 解锁服务管理 (Gost 方案)        \033[0m"
         echo -e "\033[0;36m=============================================\033[0m"
         echo " --- 服务端管理 ---"
         echo "  1. 安装/更新 DNS 解锁服务"
@@ -1399,7 +1399,7 @@ dns_unlock_menu() {
     done
 }
 
-# 服务端安装
+# 服务端安装（Gost方案 + 集成您的域名全集）
 install_dns_unlock_server() {
     clear
     echo -e "\033[0;33m--- DNS解锁服务 安装/更新 (全新Gost方案) ---\033[0m"
@@ -1418,6 +1418,8 @@ install_dns_unlock_server() {
     sudo systemctl stop sniproxy 2>/dev/null
     sudo apt-get purge -y sniproxy >/dev/null 2>&1
     sudo apt-get --fix-broken install -y >/dev/null 2>&1
+    # 同时清理旧的dnsmasq配置文件，避免冲突
+    sudo rm -f /etc/dnsmasq.d/custom_netflix.conf
     echo -e "\033[0;32mSUCCESS: 核心依赖与系统状态检查完毕。\033[0m"
     echo
 
@@ -1449,11 +1451,9 @@ install_dns_unlock_server() {
     tar -xzf "${FILENAME}"
     if [ $? -ne 0 ]; then echo -e "\033[0;31mERROR: 解压失败。\033[0m"; rm -f "${FILENAME}"; return 1; fi
 
-    # Gost 新版解压后在一个子目录里，需要找到它
     GOST_EXEC_PATH=$(find . -name gost -type f | head -n 1)
     if [[ -z "$GOST_EXEC_PATH" ]]; then
         echo -e "\033[0;31mERROR: 在解压的文件中未找到 'gost' 执行文件。\033[0m"
-        # 清理下载的垃圾
         rm -f "${FILENAME}"
         rm -rf "gost_${VERSION_NUM}_linux_amd64"
         return 1
@@ -1462,7 +1462,6 @@ install_dns_unlock_server() {
     chmod +x "${GOST_EXEC_PATH}"
     sudo mv "${GOST_EXEC_PATH}" /usr/local/bin/gost
     
-    # 清理下载和解压的垃圾
     rm -f "${FILENAME}"
     rm -rf "gost_${VERSION_NUM}_linux_amd64"
 
@@ -1490,16 +1489,153 @@ EOT
     fi
     echo
 
-    # --- 步骤4: 配置 Dnsmasq ---
+    # --- 步骤4: 配置 Dnsmasq (使用您的完整域名列表) ---
     echo -e "\033[0;36mINFO: 正在配置Dnsmasq...\033[0m"
     PUBLIC_IP=$(curl -4s ip.sb || curl -4s ifconfig.me)
     if [[ -z "$PUBLIC_IP" ]]; then echo -e "\033[0;31mERROR: 无法获取公网IP地址。\033[0m"; return 1; fi
     
     DNSMASQ_CONFIG_FILE="/etc/dnsmasq.d/custom_unlock.conf"
     sudo tee "$DNSMASQ_CONFIG_FILE" > /dev/null <<EOF
-# Dnsmasq config for media unlock
+# Comprehensive unlock list based on user request
+address=/akadns.net/${PUBLIC_IP}
+address=/akam.net/${PUBLIC_IP}
+address=/akamai.com/${PUBLIC_IP}
+address=/akamai.net/${PUBLIC_IP}
+address=/akamaiedge.net/${PUBLIC_IP}
+address=/akamaihd.net/${PUBLIC_IP}
+address=/akamaistream.net/${PUBLIC_IP}
+address=/akamaitech.net/${PUBLIC_IP}
+address=/akamaitechnologies.com/${PUBLIC_IP}
+address=/akamaitechnologies.fr/${PUBLIC_IP}
+address=/akamaized.net/${PUBLIC_IP}
+address=/edgekey.net/${PUBLIC_IP}
+address=/edgesuite.net/${PUBLIC_IP}
+address=/srip.net/${PUBLIC_IP}
+address=/footprint.net/${PUBLIC_IP}
+address=/level3.net/${PUBLIC_IP}
+address=/llnwd.net/${PUBLIC_IP}
+address=/edgecastcdn.net/${PUBLIC_IP}
+address=/cloudfront.net/${PUBLIC_IP}
 address=/netflix.com/${PUBLIC_IP}
+address=/netflix.net/${PUBLIC_IP}
+address=/nflximg.com/${PUBLIC_IP}
+address=/nflximg.net/${PUBLIC_IP}
 address=/nflxvideo.net/${PUBLIC_IP}
+address=/nflxso.net/${PUBLIC_IP}
+address=/nflxext.com/${PUBLIC_IP}
+address=/hulu.com/${PUBLIC_IP}
+address=/huluim.com/${PUBLIC_IP}
+address=/hbo.com/${PUBLIC_IP}
+address=/hbonow.com/${PUBLIC_IP}
+address=/hbomax.com/${PUBLIC_IP}
+address=/hbomaxcdn.com/${PUBLIC_IP}
+address=/hboasia.com/${PUBLIC_IP}
+address=/hbogoasia.com/${PUBLIC_IP}
+address=/max.com/${PUBLIC_IP}
+address=/warnermediacdn.com/${PUBLIC_IP}
+address=/wmcdp.io/${PUBLIC_IP}
+address=/ngtv.io/${PUBLIC_IP}
+address=/pypestream.com/${PUBLIC_IP}
+address=/arkoselabs.com/${PUBLIC_IP}
+address=/amazon.com/${PUBLIC_IP}
+address=/amazon.co.uk/${PUBLIC_IP}
+address=/amazonvideo.com/${PUBLIC_IP}
+address=/crackle.com/${PUBLIC_IP}
+address=/pandora.com/${PUBLIC_IP}
+address=/vudu.com/${PUBLIC_IP}
+address=/blinkbox.com/${PUBLIC_IP}
+address=/abc.com/${PUBLIC_IP}
+address=/fox.com/${PUBLIC_IP}
+address=/theplatform.com/${PUBLIC_IP}
+address=/nbc.com/${PUBLIC_IP}
+address=/nbcuni.com/${PUBLIC_IP}
+address=/ip2location.com/${PUBLIC_IP}
+address=/pbs.org/${PUBLIC_IP}
+address=/warnerbros.com/${PUBLIC_IP}
+address=/southpark.cc.com/${PUBLIC_IP}
+address=/cbs.com/${PUBLIC_IP}
+address=/brightcove.com/${PUBLIC_IP}
+address=/cwtv.com/${PUBLIC_IP}
+address=/spike.com/${PUBLIC_IP}
+address=/go.com/${PUBLIC_IP}
+address=/mtv.com/${PUBLIC_IP}
+address=/mtvnservices.com/${PUBLIC_IP}
+address=/playstation.net/${PUBLIC_IP}
+address=/uplynk.com/${PUBLIC_IP}
+address=/maxmind.com/${PUBLIC_IP}
+address=/disney.com/${PUBLIC_IP}
+address=/disneyjunior.com/${PUBLIC_IP}
+address=/adobedtm.com/${PUBLIC_IP}
+address=/bam.nr-data.net/${PUBLIC_IP}
+address=/bamgrid.com/${PUBLIC_IP}
+address=/braze.com/${PUBLIC_IP}
+address=/cdn.optimizely.com/${PUBLIC_IP}
+address=/cdn.registerdisney.go.com/${PUBLIC_IP}
+address=/cws.conviva.com/${PUBLIC_IP}
+address=/d9.flashtalking.com/${PUBLIC_IP}
+address=/disney-plus.net/${PUBLIC_IP}
+address=/disney-portal.my.onetrust.com/${PUBLIC_IP}
+address=/disney.demdex.net/${PUBLIC_IP}
+address=/disney.my.sentry.io/${PUBLIC_IP}
+address=/disneyplus.bn5x.net/${PUBLIC_IP}
+address=/disneyplus.com/${PUBLIC_IP}
+address=/disneyplus.com.ssl.sc.omtrdc.net/${PUBLIC_IP}
+address=/disneystreaming.com/${PUBLIC_IP}
+address=/dssott.com/${PUBLIC_IP}
+address=/execute-api.us-east-1.amazonaws.com/${PUBLIC_IP}
+address=/js-agent.newrelic.com/${PUBLIC_IP}
+address=/xboxlive.com/${PUBLIC_IP}
+address=/lovefilm.com/${PUBLIC_IP}
+address=/turner.com/${PUBLIC_IP}
+address=/amctv.com/${PUBLIC_IP}
+address=/sho.com/${PUBLIC_IP}
+address=/mog.com/${PUBLIC_IP}
+address=/wdtvlive.com/${PUBLIC_IP}
+address=/beinsportsconnect.tv/${PUBLIC_IP}
+address=/beinsportsconnect.net/${PUBLIC_IP}
+address=/fig.bbc.co.uk/${PUBLIC_IP}
+address=/open.live.bbc.co.uk/${PUBLIC_IP}
+address=/sa.bbc.co.uk/${PUBLIC_IP}
+address=/www.bbc.co.uk/${PUBLIC_IP}
+address=/crunchyroll.com/${PUBLIC_IP}
+address=/ifconfig.co/${PUBLIC_IP}
+address=/omtrdc.net/${PUBLIC_IP}
+address=/sling.com/${PUBLIC_IP}
+address=/movetv.com/${PUBLIC_IP}
+address=/happyon.jp/${PUBLIC_IP}
+address=/abema.tv/${PUBLIC_IP}
+address=/hulu.jp/${PUBLIC_IP}
+address=/optus.com.au/${PUBLIC_IP}
+address=/optusnet.com.au/${PUBLIC_IP}
+address=/gamer.com.tw/${PUBLIC_IP}
+address=/bahamut.com.tw/${PUBLIC_IP}
+address=/hinet.net/${PUBLIC_IP}
+address=/dmm.com/${PUBLIC_IP}
+address=/dmm.co.jp/${PUBLIC_IP}
+address=/dmm-extension.com/${PUBLIC_IP}
+address=/dmmapis.com/${PUBLIC_IP}
+address=/videomarket.jp/${PUBLIC_IP}
+address=/p-smith.com/${PUBLIC_IP}
+address=/img.vm-movie.jp/${PUBLIC_IP}
+address=/saima.zlzd.xyz/${PUBLIC_IP}
+address=/challenges.cloudflare.com/${PUBLIC_IP}
+address=/ai.com/${PUBLIC_IP}
+address=/openai.com/${PUBLIC_IP}
+address=/cdn.oaistatic.com/${PUBLIC_IP}
+address=/aiv-cdn.net/${PUBLIC_IP}
+address=/aiv-delivery.net/${PUBLIC_IP}
+address=/amazonprimevideo.cn/${PUBLIC_IP}
+address=/amazonprimevideo.com.cn/${PUBLIC_IP}
+address=/amazonprimevideos.com/${PUBLIC_IP}
+address=/amazonvideo.cc/${PUBLIC_IP}
+address=/media-amazon.com/${PUBLIC_IP}
+address=/prime-video.com/${PUBLIC_IP}
+address=/primevideo.cc/${PUBLIC_IP}
+address=/primevideo.com/${PUBLIC_IP}
+address=/primevideo.info/${PUBLIC_IP}
+address=/primevideo.org/${PUBLIC_IP}
+address=/primevideo.tv/${PUBLIC_IP}
+address=/pv-cdn.net/${PUBLIC_IP}
 address=/chatgpt.com/${PUBLIC_IP}
 address=/cdn.usefathom.com/${PUBLIC_IP}
 address=/anthropic.com/${PUBLIC_IP}
@@ -1646,6 +1782,8 @@ manage_iptables_rules() {
         esac
     done
 }
+EOF
+
 # ======================= Sub-Store安装模块 =======================
 install_substore() {
     local secret_key
