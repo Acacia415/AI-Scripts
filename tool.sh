@@ -1442,7 +1442,7 @@ Description=GOST as SNI Proxy
 After=network.target
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/gost -L tcp://:443 -L tcp://:80 -F=
+ExecStart=/usr/local/bin/gost -L sni://:80 -L sni://:443
 Restart=always
 User=root
 [Install]
