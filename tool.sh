@@ -1366,7 +1366,6 @@ dns_unlock_menu() {
 # 帮助函数：检查并尝试释放被 systemd-resolved 或 dnsmasq 占用的 53 端口 (已优化)
 check_and_free_port_53() {
     echo -e "${CYAN}INFO: 正在检查端口 53 是否被占用...${NC}"
-    # 使用更可靠的检查方法，并捕获占用进程的名称
     local occupying_process
     occupying_process=$(sudo lsof -i :53 -sTCP:LISTEN -P -n -t)
 
@@ -1394,18 +1393,16 @@ EOF
             sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
             sudo systemctl restart systemd-resolved
             sleep 1
-            # 再次检查
             if [[ -n "$(sudo lsof -i :53 -sTCP:LISTEN -P -n -t)" ]]; then
                 echo -e "${RED}ERROR: 自动释放端口 53 失败。请手动排查问题后重试。${NC}"
                 return 1
             else
                 echo -e "${GREEN}SUCCESS: 端口 53 已成功释放。${NC}"
             fi
-        # 【新增逻辑】如果占用者是dnsmasq，也自动处理
         elif [[ "$process_name" == "dnsmasq" ]]; then
             echo -e "${CYAN}INFO: 检测到 dnsmasq 正在运行，可能是上次安装残留。正在自动停止...${NC}"
             sudo systemctl stop dnsmasq
-            sleep 1 # 等待端口释放
+            sleep 1
             if [[ -z "$(sudo lsof -i :53 -sTCP:LISTEN -P -n -t)" ]]; then
                 echo -e "${GREEN}SUCCESS: 已成功停止 dnsmasq 服务，端口 53 已释放。${NC}"
             else
@@ -1424,7 +1421,7 @@ EOF
     return 0
 }
 
-# 服务端安装（已修改以兼容新旧系统）
+# 服务端安装（最终、最简修正版）
 install_dns_unlock_server() {
     clear
     echo -e "${YELLOW}--- DNS解锁服务 安装/更新 ---${NC}"
@@ -1446,10 +1443,8 @@ install_dns_unlock_server() {
     echo -e "${CYAN}INFO: 正在下载一键安装脚本...${NC}"
     if wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh; then
         
-        # --- 兼容性补丁 开始 ---
-        echo -e "${CYAN}INFO: 检查系统兼容性并自动应用补丁...${NC}"
-        
-        # 补丁1: 修正编译依赖 (适用于新系统如 Debian 12+)
+        # --- 唯一需要的兼容性补丁 ---
+        echo -e "${CYAN}INFO: 检查系统兼容性并应用编译依赖补丁...${NC}"
         if apt-cache show libpcre2-dev &> /dev/null; then
             echo -e "${GREEN}INFO: 检测到新版系统，自动修正编译依赖 (libpcre3-dev -> libpcre2-dev)...${NC}"
             sed -i 's/libpcre3-dev/libpcre2-dev/g' dnsmasq_sniproxy.sh
@@ -1457,23 +1452,9 @@ install_dns_unlock_server() {
             echo -e "${GREEN}INFO: 检测到旧版系统，无需修正编译依赖。${NC}"
         fi
 
-        # 补丁2: 【最终修正】通过直接改写if条件，100%强制源码编译
-        echo -e "${GREEN}INFO: 应用最终补丁，强制源码编译 SNI Proxy ...${NC}"
-        sed -i 's|if \[ -s /tmp/sniproxy_0.6.1_amd64.deb \]; then|if false; then|' dnsmasq_sniproxy.sh
-
-        # --- 兼容性补丁 结束 ---
-        
-        # --- DEBUG: 检查补丁是否生效 ---
-        echo
-        echo -e "${YELLOW}========================= DEBUG INFO =========================${NC}"
-        echo -e "${CYAN}检查补丁是否生效，下面这行应该显示为 'if false; then':${NC}"
-        grep -n "if false; then" dnsmasq_sniproxy.sh || echo -e "${RED}补丁失败！未找到 'if false; then'，请检查上面的 sed 命令。${NC}"
-        echo -e "${YELLOW}==============================================================${NC}"
-        echo
-        read -n 1 -s -r -p "检查完毕，按任意键继续执行安装..."
-
-        echo -e "${CYAN}INFO: 正在执行安装脚本...${NC}"
-        if sudo bash dnsmasq_sniproxy.sh -f; then
+        # --- 使用正确的 -i 参数执行编译安装 ---
+        echo -e "${CYAN}INFO: 正在以标准编译模式(-i)执行安装脚本...${NC}"
+        if sudo bash dnsmasq_sniproxy.sh -i; then
             echo -e "${GREEN}SUCCESS: 基础服务安装完成。${NC}"
             echo -e "${CYAN}INFO: 即将开始自动化配置增强...${NC}"
             
@@ -1517,7 +1498,6 @@ EOF
             fi
             echo
 
-            # --- SNI Proxy 修改（已重写为更安全的方式） ---
             SNIPROXY_CONFIG_FILE="/etc/sniproxy.conf"
             echo -e "${CYAN}INFO: 正在更新 SNI Proxy 配置文件 (${SNIPROXY_CONFIG_FILE})...${NC}"
             if [ -f "$SNIPROXY_CONFIG_FILE" ] && ! grep -q "chatgpt\\.com" "$SNIPROXY_CONFIG_FILE"; then
