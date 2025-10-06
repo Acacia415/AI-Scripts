@@ -1457,9 +1457,9 @@ install_dns_unlock_server() {
             echo -e "${GREEN}INFO: 检测到旧版系统，无需修正编译依赖。${NC}"
         fi
 
-        # 补丁2: 强制源码编译 (解决预编译包在新系统上的依赖问题)
+        # 补丁2: 【最终修正】通过阻止下载.deb文件，来强制源码编译，避免破坏脚本结构
         echo -e "${GREEN}INFO: 应用补丁，强制使用源码编译 SNI Proxy 以获得最佳兼容性...${NC}"
-        sed -i '/sniproxy_0.6.1_amd64.deb/s/^/#/' dnsmasq_sniproxy.sh
+        sed -i 's|Download .*sniproxy_0.6.1_amd64.deb|#&|' dnsmasq_sniproxy.sh
 
         # --- 兼容性补丁 结束 ---
 
