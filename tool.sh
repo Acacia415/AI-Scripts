@@ -1329,7 +1329,7 @@ install_shell_beautify() {
     fi
 }
 
-# ======================= DNS解锁管理 (Gost 最终版 + 自定义全集) =======================
+# ======================= DNS解锁管理 (Gost 最终版 + 模块化配置) =======================
 
 # 帮助函数：检查 Dnsmasq 的 53 端口
 check_port_53() {
@@ -1399,72 +1399,43 @@ dns_unlock_menu() {
     done
 }
 
-# 服务端安装（Gost方案 + 集成您的域名全集）
+# 服务端安装（Gost方案 + 模块化配置）
 install_dns_unlock_server() {
     clear
     echo -e "\033[0;33m--- DNS解锁服务 安装/更新 (全新Gost方案) ---\033[0m"
 
-    # --- 步骤0: 安装核心依赖 (lsof必须先装) ---
+    # --- 步骤0: 依赖及端口检查 ---
     echo -e "\033[0;36mINFO: 正在安装/检查核心依赖...\033[0m"
     sudo apt-get update >/dev/null 2>&1
     sudo apt-get install -y dnsmasq curl wget lsof >/dev/null 2>&1
-    
-    # --- 步骤1: 检查端口占用 ---
     if ! check_port_53; then return 1; fi
     if ! check_ports_80_443; then return 1; fi
-
-    # --- 步骤2: 清理旧环境并修复APT ---
-    echo -e "\033[0;36mINFO: 正在清理旧环境并修复APT包管理器状态...\033[0m"
+    
+    # --- 步骤1: 清理旧环境 ---
+    echo -e "\033[0;36mINFO: 正在清理旧环境...\033[0m"
     sudo systemctl stop sniproxy 2>/dev/null
     sudo apt-get purge -y sniproxy >/dev/null 2>&1
     sudo apt-get --fix-broken install -y >/dev/null 2>&1
-    # 同时清理旧的dnsmasq配置文件，避免冲突
-    sudo rm -f /etc/dnsmasq.d/custom_netflix.conf
-    echo -e "\033[0;32mSUCCESS: 核心依赖与系统状态检查完毕。\033[0m"
+    sudo rm -f /etc/dnsmasq.d/custom_netflix.conf # 清理旧脚本残留
     echo
 
-    # --- 步骤3: 安装并配置 Gost (同步最新格式) ---
+    # --- 步骤2: 安装并配置 Gost ---
     echo -e "\033[0;36mINFO: 正在安装Gost作为SNI代理...\033[0m"
-    
-    GOST_VERSION=$(curl -sL "https://api.github.com/repos/ginuerzh/gost/releases/latest" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
-    if [[ -z "$GOST_VERSION" ]]; then
-        echo -e "\033[0;31mERROR: 从 GitHub API 获取 Gost 最新版本号失败。\033[0m"
-        return 1
+    if ! command -v gost &> /dev/null; then
+        GOST_VERSION=$(curl -sL "https://api.github.com/repos/ginuerzh/gost/releases/latest" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
+        if [[ -n "$GOST_VERSION" ]]; then
+            VERSION_NUM=${GOST_VERSION//v/}
+            FILENAME="gost_${VERSION_NUM}_linux_amd64.tar.gz"
+            GOST_URL="https://github.com/ginuerzh/gost/releases/download/${GOST_VERSION}/${FILENAME}"
+            wget --no-check-certificate -qO "${FILENAME}" "${GOST_URL}" && tar -xzf "${FILENAME}"
+            GOST_EXEC_PATH=$(find . -name gost -type f | head -n 1)
+            if [[ -n "$GOST_EXEC_PATH" ]]; then
+                chmod +x "${GOST_EXEC_PATH}"
+                sudo mv "${GOST_EXEC_PATH}" /usr/local/bin/gost
+            fi; rm -f "${FILENAME}"; rm -rf "gost_${VERSION_NUM}_linux_amd64"
+        fi
     fi
-    echo -e "\033[0;32mINFO: 检测到 Gost 最新版本为: ${GOST_VERSION}\033[0m"
-
-    VERSION_NUM=${GOST_VERSION//v/}
-    FILENAME="gost_${VERSION_NUM}_linux_amd64.tar.gz"
-    GOST_URL="https://github.com/ginuerzh/gost/releases/download/${GOST_VERSION}/${FILENAME}"
-    
-    echo -e "\033[0;36mINFO: 准备从以下地址下载: ${GOST_URL}\033[0m"
-
-    wget --no-check-certificate -qO "${FILENAME}" "${GOST_URL}"
-    if [ $? -ne 0 ]; then
-        echo -e "\033[0;31mERROR: 下载Gost失败。正在无静默模式重试以显示详细错误...\033[0m"
-        wget --no-check-certificate "${GOST_URL}" -O "${FILENAME}"
-        echo -e "\033[0;31mERROR: 请检查上面的详细输出以确定问题。\033[0m"
-        return 1
-    fi
-
-    echo -e "\033[0;36mINFO: 正在解压 ${FILENAME}...\033[0m"
-    tar -xzf "${FILENAME}"
-    if [ $? -ne 0 ]; then echo -e "\033[0;31mERROR: 解压失败。\033[0m"; rm -f "${FILENAME}"; return 1; fi
-
-    GOST_EXEC_PATH=$(find . -name gost -type f | head -n 1)
-    if [[ -z "$GOST_EXEC_PATH" ]]; then
-        echo -e "\033[0;31mERROR: 在解压的文件中未找到 'gost' 执行文件。\033[0m"
-        rm -f "${FILENAME}"
-        rm -rf "gost_${VERSION_NUM}_linux_amd64"
-        return 1
-    fi
-
-    chmod +x "${GOST_EXEC_PATH}"
-    sudo mv "${GOST_EXEC_PATH}" /usr/local/bin/gost
-    
-    rm -f "${FILENAME}"
-    rm -rf "gost_${VERSION_NUM}_linux_amd64"
-
+    if ! command -v gost &> /dev/null; then echo -e "\033[0;31mERROR: Gost 安装失败。\033[0m"; return 1; fi
     sudo tee /etc/systemd/system/gost-sniproxy.service > /dev/null <<'EOT'
 [Unit]
 Description=GOST as SNI Proxy
@@ -1474,27 +1445,21 @@ Type=simple
 ExecStart=/usr/local/bin/gost -L tcp://:443 -L tcp://:80 -F=
 Restart=always
 User=root
-Group=root
 [Install]
 WantedBy=multi-user.target
 EOT
-
-    sudo systemctl daemon-reload
-    sudo systemctl enable gost-sniproxy.service
-    sudo systemctl restart gost-sniproxy.service
-    if systemctl is-active --quiet gost-sniproxy.service; then
-        echo -e "\033[0;32mSUCCESS: Gost SNI 代理已成功安装并启动。\033[0m"
-    else
-        echo -e "\033[0;31mERROR: Gost服务启动失败。\033[0m"; return 1;
-    fi
+    sudo systemctl daemon-reload; sudo systemctl enable gost-sniproxy.service; sudo systemctl restart gost-sniproxy.service
+    if systemctl is-active --quiet gost-sniproxy.service; then echo -e "\033[0;32mSUCCESS: Gost SNI 代理已成功安装并启动。\033[0m"; else echo -e "\033[0;31mERROR: Gost服务启动失败。\033[0m"; return 1; fi
     echo
 
-    # --- 步骤4: 配置 Dnsmasq (使用您的完整域名列表) ---
-    echo -e "\033[0;36mINFO: 正在配置Dnsmasq...\033[0m"
+    # --- 步骤3: 创建 Dnsmasq 子配置文件 ---
+    echo -e "\033[0;36mINFO: 正在创建 Dnsmasq 子配置文件...\033[0m"
     PUBLIC_IP=$(curl -4s ip.sb || curl -4s ifconfig.me)
     if [[ -z "$PUBLIC_IP" ]]; then echo -e "\033[0;31mERROR: 无法获取公网IP地址。\033[0m"; return 1; fi
     
     DNSMASQ_CONFIG_FILE="/etc/dnsmasq.d/custom_unlock.conf"
+    
+    # 写入您提供的完整配置到子配置文件
     sudo tee "$DNSMASQ_CONFIG_FILE" > /dev/null <<EOF
 # --- DNSMASQ CONFIG MODULE MANAGED BY SCRIPT ---
 # General Settings
@@ -1671,10 +1636,10 @@ address=/youtube.com/${PUBLIC_IP}
 address=/youtubei.googleapis.com/${PUBLIC_IP}
 EOF
 
-    if ! grep -q "conf-dir=/etc/dnsmasq.d" /etc/dnsmasq.conf; then
-        echo "conf-dir=/etc/dnsmasq.d" | sudo tee -a /etc/dnsmasq.conf;
-    fi
+    # 脚本不再触碰主配置文件 /etc/dnsmasq.conf。
+    # 用户需要自己确保主配置文件中包含 "conf-dir=/etc/dnsmasq.d/" 这一行。
     
+    echo -e "\033[0;36mINFO: 正在重启Dnsmasq服务以加载新配置...\033[0m"
     sudo systemctl restart dnsmasq
     if systemctl is-active --quiet dnsmasq; then
         echo -e "\033[0;32mSUCCESS: Dnsmasq配置完成并已重启。\033[0m"
@@ -1686,10 +1651,11 @@ EOF
 }
 
 
-# 服务端卸载 (匹配Gost方案)
+# 服务端卸载 (匹配模块化配置方案)
 uninstall_dns_unlock_server() {
     clear
     echo -e "\033[0;33m--- DNS解锁服务 卸载 (Gost方案) ---\033[0m"
+    # --- 卸载 Gost ---
     echo -e "\033[0;36mINFO: 正在停止并卸载 Gost 服务...\033[0m"
     sudo systemctl stop gost-sniproxy.service 2>/dev/null
     sudo systemctl disable gost-sniproxy.service 2>/dev/null
@@ -1698,12 +1664,15 @@ uninstall_dns_unlock_server() {
     sudo rm -f /usr/local/bin/gost
     echo -e "\033[0;32mSUCCESS: Gost 已彻底卸载。\033[0m"
     echo
-    echo -e "\033[0;36mINFO: 正在停止并卸载 Dnsmasq 服务...\033[0m"
+    
+    # --- 卸载 Dnsmasq 的子配置 ---
+    echo -e "\033[0;36mINFO: 正在卸载 Dnsmasq 服务及相关配置...\033[0m"
     sudo systemctl stop dnsmasq 2>/dev/null
-    sudo apt-get purge -y dnsmasq >/dev/null 2>&1
+    # 只删除由本脚本创建的配置文件
     sudo rm -f /etc/dnsmasq.d/custom_unlock.conf
-    sudo sed -i '/conf-dir=\/etc\/dnsmasq.d/d' /etc/dnsmasq.conf 2>/dev/null
-    echo -e "\033[0;32mSUCCESS: Dnsmasq 已彻底卸载。\033[0m"
+    # 卸载dnsmasq软件包本身
+    sudo apt-get purge -y dnsmasq >/dev/null 2>&1
+    echo -e "\033[0;32mSUCCESS: Dnsmasq 及相关配置已卸载。\033[0m"
     echo
     echo -e "\033[0;32m✅ 所有 DNS 解锁服务组件均已卸载完毕。\033[0m"
 }
@@ -1800,7 +1769,6 @@ manage_iptables_rules() {
         esac
     done
 }
-EOF
 
 # ======================= Sub-Store安装模块 =======================
 install_substore() {
