@@ -1457,11 +1457,20 @@ install_dns_unlock_server() {
             echo -e "${GREEN}INFO: 检测到旧版系统，无需修正编译依赖。${NC}"
         fi
 
-        # 补丁2: 【最终修正】通过阻止下载.deb文件，来强制源码编译，避免破坏脚本结构
-        echo -e "${GREEN}INFO: 应用补丁，强制使用源码编译 SNI Proxy 以获得最佳兼容性...${NC}"
-        sed -i 's|Download .*sniproxy_0.6.1_amd64.deb|#&|' dnsmasq_sniproxy.sh
+        # 补丁2: 【最终修正】通过直接改写if条件，100%强制源码编译
+        echo -e "${GREEN}INFO: 应用最终补丁，强制源码编译 SNI Proxy ...${NC}"
+        sed -i 's|if \[ -s /tmp/sniproxy_0.6.1_amd64.deb \]; then|if false; then|' dnsmasq_sniproxy.sh
 
         # --- 兼容性补丁 结束 ---
+        
+        # --- DEBUG: 检查补丁是否生效 ---
+        echo
+        echo -e "${YELLOW}========================= DEBUG INFO =========================${NC}"
+        echo -e "${CYAN}检查补丁是否生效，下面这行应该显示为 'if false; then':${NC}"
+        grep -n "if false; then" dnsmasq_sniproxy.sh || echo -e "${RED}补丁失败！未找到 'if false; then'，请检查上面的 sed 命令。${NC}"
+        echo -e "${YELLOW}==============================================================${NC}"
+        echo
+        read -n 1 -s -r -p "检查完毕，按任意键继续执行安装..."
 
         echo -e "${CYAN}INFO: 正在执行安装脚本...${NC}"
         if sudo bash dnsmasq_sniproxy.sh -f; then
