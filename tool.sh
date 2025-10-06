@@ -1421,59 +1421,62 @@ EOF
     return 0
 }
 
-# 服务端安装（最终、最简修正版）
+# 服务端安装（最终完美版：预安装所有依赖）
 install_dns_unlock_server() {
     clear
     echo -e "${YELLOW}--- DNS解锁服务 安装/更新 ---${NC}"
     
-    echo -e "${CYAN}INFO: 正在检查核心依赖 (wget, lsof, curl)...${NC}"
-    for cmd in wget lsof curl; do
-        if ! command -v "$cmd" &> /dev/null; then
-            echo -e "${YELLOW}WARNING: 命令 '$cmd' 未找到，正在尝试安装...${NC}"
-            sudo apt-get update && sudo apt-get install -y "$cmd"
-            if ! command -v "$cmd" &> /dev/null; then
-                echo -e "${RED}ERROR: 依赖 '$cmd' 安装失败。请手动安装后重试。${NC}"
+    # --- 步骤1: 预安装所有依赖，避免外部脚本因环境问题失败 ---
+    echo -e "${CYAN}INFO: 准备环境，预先安装所有依赖...${NC}"
+    sudo apt-get update
+    # 列表包含了我们脚本和外部脚本(编译模式)所需的所有依赖
+    local dependencies=(
+        wget lsof curl net-tools dnsmasq
+        autotools-dev cdbs gettext libev-dev
+        libpcre2-dev libudns-dev autoconf devscripts build-essential
+    )
+    
+    for dep in "${dependencies[@]}"; do
+        if ! dpkg -s "${dep}" >/dev/null 2>&1; then
+            echo -e "${YELLOW}INFO: 正在安装依赖包: ${dep}...${NC}"
+            sudo apt-get install -y "${dep}"
+            if ! dpkg -s "${dep}" >/dev/null 2>&1; then
+                echo -e "${RED}ERROR: 依赖包 ${dep} 安装失败。请检查您的 apt 源后重试。${NC}"
                 return 1
             fi
+        else
+            echo -e "${GREEN}INFO: 依赖包 ${dep} 已安装。${NC}"
         fi
     done
+    echo -e "${GREEN}SUCCESS: 所有依赖项均已安装或确认存在。${NC}"
+    echo
 
+    # --- 步骤2: 检查端口 ---
     if ! check_and_free_port_53; then return 1; fi
 
+    # --- 步骤3: 下载外部脚本 ---
     echo -e "${CYAN}INFO: 正在下载一键安装脚本...${NC}"
     if wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh; then
         
-        # --- 唯一需要的兼容性补丁 ---
-        echo -e "${CYAN}INFO: 检查系统兼容性并应用编译依赖补丁...${NC}"
-        if apt-cache show libpcre2-dev &> /dev/null; then
-            echo -e "${GREEN}INFO: 检测到新版系统，自动修正编译依赖 (libpcre3-dev -> libpcre2-dev)...${NC}"
-            sed -i 's/libpcre3-dev/libpcre2-dev/g' dnsmasq_sniproxy.sh
-        else
-            echo -e "${GREEN}INFO: 检测到旧版系统，无需修正编译依赖。${NC}"
-        fi
+        # --- 步骤4: 应用唯一需要的兼容性补丁 ---
+        echo -e "${CYAN}INFO: 应用编译依赖补丁...${NC}"
+        sed -i 's/libpcre3-dev/libpcre2-dev/g' dnsmasq_sniproxy.sh
 
-        # --- 使用正确的 -i 参数执行编译安装 ---
+        # --- 步骤5: 使用正确的 -i 参数执行编译安装 ---
         echo -e "${CYAN}INFO: 正在以标准编译模式(-i)执行安装脚本...${NC}"
         if sudo bash dnsmasq_sniproxy.sh -i; then
             echo -e "${GREEN}SUCCESS: 基础服务安装完成。${NC}"
             echo -e "${CYAN}INFO: 即将开始自动化配置增强...${NC}"
             
-            # --- 自动配置开始 ---
-            echo -e "${CYAN}INFO: 正在获取本机公网IP地址...${NC}"
+            # --- 自动配置增强 ---
             PUBLIC_IP=$(curl -4s ip.sb || curl -4s ifconfig.me)
             if [[ -z "$PUBLIC_IP" ]]; then
-                echo -e "${RED}ERROR: 无法获取公网IP地址。无法继续配置。${NC}"
-                rm -f dnsmasq_sniproxy.sh
-                return 1
-            fi
-            echo -e "${GREEN}INFO: 获取到公网IP地址: ${PUBLIC_IP}${NC}"
-            echo
-
-            DNSMASQ_CONFIG_FILE="/etc/dnsmasq.d/custom_netflix.conf"
-            echo -e "${CYAN}INFO: 正在更新 Dnsmasq 配置文件 (${DNSMASQ_CONFIG_FILE})...${NC}"
-            if [ -f "$DNSMASQ_CONFIG_FILE" ] && ! grep -q "chatgpt.com" "$DNSMASQ_CONFIG_FILE"; then
-                sudo tee -a "$DNSMASQ_CONFIG_FILE" > /dev/null <<EOF
-
+                echo -e "${RED}ERROR: 无法获取公网IP地址。自动配置增强失败。${NC}"
+            else
+                echo -e "${GREEN}INFO: 获取到公网IP地址: ${PUBLIC_IP}${NC}"
+                DNSMASQ_CONFIG_FILE="/etc/dnsmasq.d/custom_netflix.conf"
+                if [ -f "$DNSMASQ_CONFIG_FILE" ] && ! grep -q "chatgpt.com" "$DNSMASQ_CONFIG_FILE"; then
+                    sudo tee -a "$DNSMASQ_CONFIG_FILE" > /dev/null <<EOF
 # Custom additions for ChatGPT/TikTok etc.
 address=/chatgpt.com/${PUBLIC_IP}
 address=/cdn.usefathom.com/${PUBLIC_IP}
@@ -1491,19 +1494,12 @@ address=/tiktokv.com/${PUBLIC_IP}
 address=/youtube.com/${PUBLIC_IP}
 address=/youtubei.googleapis.com/${PUBLIC_IP}
 EOF
-                echo -e "${CYAN}INFO: 正在重启 Dnsmasq 服务...${NC}"
-                if sudo systemctl restart dnsmasq; then echo -e "${GREEN}SUCCESS: Dnsmasq 配置更新并重启成功。${NC}"; else echo -e "${RED}ERROR: Dnsmasq 服务重启失败。${NC}"; fi
-            else
-                echo -e "${YELLOW}WARNING: Dnsmasq 配置文件未找到或已包含相关配置，跳过此步骤。${NC}"
-            fi
-            echo
-
-            SNIPROXY_CONFIG_FILE="/etc/sniproxy.conf"
-            echo -e "${CYAN}INFO: 正在更新 SNI Proxy 配置文件 (${SNIPROXY_CONFIG_FILE})...${NC}"
-            if [ -f "$SNIPROXY_CONFIG_FILE" ] && ! grep -q "chatgpt\\.com" "$SNIPROXY_CONFIG_FILE"; then
-                ADDITIONS_FILE=$(mktemp)
-                cat <<'EOF' > "$ADDITIONS_FILE"
-    # Custom additions for ChatGPT/TikTok etc.
+                    sudo systemctl restart dnsmasq
+                fi
+                SNIPROXY_CONFIG_FILE="/etc/sniproxy.conf"
+                if [ -f "$SNIPROXY_CONFIG_FILE" ] && ! grep -q "chatgpt\\.com" "$SNIPROXY_CONFIG_FILE"; then
+                    ADDITIONS_FILE=$(mktemp)
+                    cat <<'EOF' > "$ADDITIONS_FILE"
     .*chatgpt\.com$ *
     .*cdn\.usefathom\.com$ *
     .*anthropic\.com$ *
@@ -1520,28 +1516,20 @@ EOF
     .*youtube\.com$ *
     .*youtubei\.googleapis\.com$ *
 EOF
-                LINE_NUM=$(grep -n "}" "$SNIPROXY_CONFIG_FILE" | tail -n 1 | cut -d: -f1)
-                if [[ -n "$LINE_NUM" ]]; then
-                    TEMP_CONFIG=$(mktemp)
-                    head -n $((LINE_NUM - 1)) "$SNIPROXY_CONFIG_FILE" > "$TEMP_CONFIG"
-                    cat "$ADDITIONS_FILE" >> "$TEMP_CONFIG"
-                    tail -n +$LINE_NUM "$SNIPROXY_CONFIG_FILE" >> "$TEMP_CONFIG"
-                    
-                    if sudo mv "$TEMP_CONFIG" "$SNIPROXY_CONFIG_FILE"; then
-                        echo -e "${GREEN}SUCCESS: SNI Proxy 配置文件已更新。${NC}"
-                        echo -e "${CYAN}INFO: 正在重启 SNI Proxy 服务...${NC}"
-                        if sudo systemctl restart sniproxy; then echo -e "${GREEN}SUCCESS: SNI Proxy 服务重启成功。${NC}"; else echo -e "${RED}ERROR: SNI Proxy 服务重启失败。${NC}"; fi
-                    else
-                        echo -e "${RED}ERROR: 写入 SNI Proxy 配置文件失败。${NC}"
+                    LINE_NUM=$(grep -n "}" "$SNIPROXY_CONFIG_FILE" | tail -n 1 | cut -d: -f1)
+                    if [[ -n "$LINE_NUM" ]]; then
+                        TEMP_CONFIG=$(mktemp)
+                        head -n $((LINE_NUM - 1)) "$SNIPROXY_CONFIG_FILE" > "$TEMP_CONFIG"
+                        cat "$ADDITIONS_FILE" >> "$TEMP_CONFIG"
+                        tail -n +$LINE_NUM "$SNIPROXY_CONFIG_FILE" >> "$TEMP_CONFIG"
+                        if sudo mv "$TEMP_CONFIG" "$SNIPROXY_CONFIG_FILE"; then
+                            sudo systemctl restart sniproxy
+                        fi
                     fi
-                else
-                    echo -e "${RED}ERROR: 无法在 ${SNIPROXY_CONFIG_FILE} 中找到插入点 '}'。${NC}"
+                    rm -f "$ADDITIONS_FILE"
                 fi
-                rm -f "$ADDITIONS_FILE"
-            else
-                echo -e "${YELLOW}WARNING: SNI Proxy 配置文件未找到或已包含相关配置，跳过此步骤。${NC}"
+                echo -e "${GREEN}SUCCESS: 自动化配置增强完成。${NC}"
             fi
-            # --- 自动配置结束 ---
         else
             echo -e "${RED}ERROR: 基础服务安装脚本执行失败。${NC}"
         fi
@@ -1677,7 +1665,6 @@ manage_iptables_rules() {
         esac
     done
 }
-
 # ======================= Sub-Store安装模块 =======================
 install_substore() {
     local secret_key
