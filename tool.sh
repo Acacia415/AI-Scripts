@@ -1329,11 +1329,11 @@ install_shell_beautify() {
     fi
 }
 
-# ======================= DNS解锁管理 (Gost 最终版 + 网络诊断) =======================
+# ======================= DNS解锁管理 =======================
 
 # 帮助函数：检查 Dnsmasq 的 53 端口
 check_port_53() {
-    if ! command -v lsof &> /dev/null; then sudo apt-get install -y lsof >/dev/null; fi
+    if ! command -v lsof &> /dev/null; then sudo apt-get update >/dev/null 2>&1 && sudo apt-get install -y lsof >/dev/null; fi
     if lsof -i :53 -sTCP:LISTEN -P -n >/dev/null; then
         local process_name=$(ps -p $(lsof -i :53 -sTCP:LISTEN -P -n -t) -o comm=)
         echo -e "\033[0;33mWARNING: 端口 53 (DNS) 已被进程 '${process_name}' 占用。\033[0m"
@@ -1351,7 +1351,7 @@ check_port_53() {
 
 # 帮助函数：检查 Gost 的 80/443 端口
 check_ports_80_443() {
-    if ! command -v lsof &> /dev/null; then sudo apt-get install -y lsof >/dev/null; fi
+    if ! command -v lsof &> /dev/null; then sudo apt-get update >/dev/null 2>&1 && sudo apt-get install -y lsof >/dev/null; fi
     for port in 80 443; do
         if lsof -i :${port} -sTCP:LISTEN -P -n >/dev/null; then
             local process_name=$(ps -p $(lsof -i :${port} -sTCP:LISTEN -P -n -t) -o comm=)
@@ -1372,7 +1372,7 @@ dns_unlock_menu() {
     while true; do
         clear
         echo -e "\033[0;36m=============================================\033[0m"
-        echo -e "\033[0;33m         DNS 解锁服务管理 (Gost 方案)        \033[0m"
+        echo -e "\033[0;33m              DNS 解锁服务管理                \033[0m"
         echo -e "\033[0;36m=============================================\033[0m"
         echo " --- 服务端管理 ---"
         echo "  1. 安装/更新 DNS 解锁服务"
@@ -1399,7 +1399,7 @@ dns_unlock_menu() {
     done
 }
 
-# 服务端安装（Gost方案 + 增强网络诊断）
+# 服务端安装
 install_dns_unlock_server() {
     clear
     echo -e "\033[0;33m--- DNS解锁服务 安装/更新 (全新Gost方案) ---\033[0m"
@@ -1421,38 +1421,52 @@ install_dns_unlock_server() {
     echo -e "\033[0;32mSUCCESS: 核心依赖与系统状态检查完毕。\033[0m"
     echo
 
-    # --- 步骤3: 安装并配置 Gost (带网络诊断) ---
+    # --- 步骤3: 安装并配置 Gost (同步最新格式) ---
     echo -e "\033[0;36mINFO: 正在安装Gost作为SNI代理...\033[0m"
     
-    echo -e "\033[0;36mINFO: 检查到GitHub API的连通性...\033[0m"
-    if ! curl -sL --head "https://api.github.com" | head -n 1 | grep "200" > /dev/null; then
-        echo -e "\033[0;31mERROR: 无法连接到 GitHub API (api.github.com)。请检查您的网络连接、DNS设置或防火墙。\033[0m"
-        return 1
-    fi
-
     GOST_VERSION=$(curl -sL "https://api.github.com/repos/ginuerzh/gost/releases/latest" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
     if [[ -z "$GOST_VERSION" ]]; then
-        echo -e "\033[0;31mERROR: 从 GitHub API 获取 Gost 最新版本号失败。可能是网络问题或API被限速。\033[0m"
+        echo -e "\033[0;31mERROR: 从 GitHub API 获取 Gost 最新版本号失败。\033[0m"
         return 1
     fi
     echo -e "\033[0;32mINFO: 检测到 Gost 最新版本为: ${GOST_VERSION}\033[0m"
 
-    GOST_URL="https://github.com/ginuerzh/gost/releases/download/${GOST_VERSION}/gost-linux-amd64-${GOST_VERSION//v/}.gz"
+    VERSION_NUM=${GOST_VERSION//v/}
+    FILENAME="gost_${VERSION_NUM}_linux_amd64.tar.gz"
+    GOST_URL="https://github.com/ginuerzh/gost/releases/download/${GOST_VERSION}/${FILENAME}"
+    
     echo -e "\033[0;36mINFO: 准备从以下地址下载: ${GOST_URL}\033[0m"
 
-    wget --no-check-certificate -qO gost.gz "${GOST_URL}"
+    wget --no-check-certificate -qO "${FILENAME}" "${GOST_URL}"
     if [ $? -ne 0 ]; then
         echo -e "\033[0;31mERROR: 下载Gost失败。正在无静默模式重试以显示详细错误...\033[0m"
-        wget --no-check-certificate "${GOST_URL}" -O gost.gz
-        echo -e "\033[0;31mERROR: 请检查上面的详细输出以确定问题（例如：DNS解析失败、连接超时等）。\033[0m"
+        wget --no-check-certificate "${GOST_URL}" -O "${FILENAME}"
+        echo -e "\033[0;31mERROR: 请检查上面的详细输出以确定问题。\033[0m"
         return 1
     fi
 
-    gunzip gost.gz
-    chmod +x gost
-    sudo mv gost /usr/local/bin/
+    echo -e "\033[0;36mINFO: 正在解压 ${FILENAME}...\033[0m"
+    tar -xzf "${FILENAME}"
+    if [ $? -ne 0 ]; then echo -e "\033[0;31mERROR: 解压失败。\033[0m"; rm -f "${FILENAME}"; return 1; fi
+
+    # Gost 新版解压后在一个子目录里，需要找到它
+    GOST_EXEC_PATH=$(find . -name gost -type f | head -n 1)
+    if [[ -z "$GOST_EXEC_PATH" ]]; then
+        echo -e "\033[0;31mERROR: 在解压的文件中未找到 'gost' 执行文件。\033[0m"
+        # 清理下载的垃圾
+        rm -f "${FILENAME}"
+        rm -rf "gost_${VERSION_NUM}_linux_amd64"
+        return 1
+    fi
+
+    chmod +x "${GOST_EXEC_PATH}"
+    sudo mv "${GOST_EXEC_PATH}" /usr/local/bin/gost
     
-    sudo tee /etc/systemd/system/gost-sniproxy.service > /dev/null <<'EOF'
+    # 清理下载和解压的垃圾
+    rm -f "${FILENAME}"
+    rm -rf "gost_${VERSION_NUM}_linux_amd64"
+
+    sudo tee /etc/systemd/system/gost-sniproxy.service > /dev/null <<'EOT'
 [Unit]
 Description=GOST as SNI Proxy
 After=network.target
@@ -1464,7 +1478,7 @@ User=root
 Group=root
 [Install]
 WantedBy=multi-user.target
-EOF
+EOT
 
     sudo systemctl daemon-reload
     sudo systemctl enable gost-sniproxy.service
@@ -1517,8 +1531,6 @@ EOF
     echo -e "\033[0;32m🎉 恭喜！全新的 DNS 解锁服务已成功安装！\033[0m"
 }
 
-# (其他函数 uninstall, setup_client, manage_iptables 等保持不变，此处省略以节约篇幅)
-# (请确保您替换的是完整的模块代码)
 
 # 服务端卸载 (匹配Gost方案)
 uninstall_dns_unlock_server() {
