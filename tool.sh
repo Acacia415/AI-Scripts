@@ -1331,63 +1331,65 @@ install_shell_beautify() {
 
 # ======================= DNS解锁管理 (完整功能版) =======================
 
+# ======================= DNS解锁管理 (完整功能版) =======================
+
 # 帮助函数：检查并尝试释放被 systemd-resolved 占用的 53 端口
 check_and_free_port_53() {
-    echo -e "${CYAN}INFO: 正在检查端口 53 是否被占用...${NC}"
-    if sudo lsof -i :53 -sTCP:LISTEN -P -n > /dev/null || sudo lsof -i :53 -sUDP:LISTEN -P -n > /dev/null; then
-        echo -e "${YELLOW}WARNING: 端口 53 (DNS) 已被占用，很可能由 systemd-resolved 导致。${NC}"
-        echo -e "${CYAN}INFO: 正在尝试自动修改配置以释放端口...${NC}"
-        sudo systemctl stop systemd-resolved
-        if [ -f /etc/systemd/resolved.conf ]; then
-            sudo sed -i -E 's/^#?(DNS=).*/\18.8.8.8/' /etc/systemd/resolved.conf
-            sudo sed -i -E 's/^#?(DNSStubListener=).*/\1no/' /etc/systemd/resolved.conf
-            if ! grep -q "DNSStubListener=no" /etc/systemd/resolved.conf; then
-                echo "DNSStubListener=no" | sudo tee -a /etc/systemd/resolved.conf > /dev/null
-            fi
-        else
-            sudo tee /etc/systemd/resolved.conf > /dev/null <<EOF
+    echo -e "${CYAN}INFO: 正在检查端口 53 是否被占用...${NC}"
+    if sudo lsof -i :53 -sTCP:LISTEN -P -n > /dev/null || sudo lsof -i :53 -sUDP:LISTEN -P -n > /dev/null; then
+        echo -e "${YELLOW}WARNING: 端口 53 (DNS) 已被占用，很可能由 systemd-resolved 导致。${NC}"
+        echo -e "${CYAN}INFO: 正在尝试自动修改配置以释放端口...${NC}"
+        sudo systemctl stop systemd-resolved
+        if [ -f /etc/systemd/resolved.conf ]; then
+            sudo sed -i -E 's/^#?(DNS=).*/\18.8.8.8/' /etc/systemd/resolved.conf
+            sudo sed -i -E 's/^#?(DNSStubListener=).*/\1no/' /etc/systemd/resolved.conf
+            if ! grep -q "DNSStubListener=no" /etc/systemd/resolved.conf; then
+                echo "DNSStubListener=no" | sudo tee -a /etc/systemd/resolved.conf > /dev/null
+            fi
+        else
+            sudo tee /etc/systemd/resolved.conf > /dev/null <<EOF
 [Resolve]
 DNS=8.8.8.8
 DNSStubListener=no
 EOF
-        fi
-        sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
-        sudo systemctl restart systemd-resolved
-        sleep 1
-        if sudo lsof -i :53 -sTCP:LISTEN -P -n > /dev/null || sudo lsof -i :53 -sUDP:LISTEN -P -n > /dev/null; then
-            echo -e "${RED}ERROR: 自动释放端口 53 失败。请手动排查问题后重试。${NC}"
-            return 1
-        else
-            echo -e "${GREEN}SUCCESS: 端口 53 已成功释放。${NC}"
-        fi
-    else
-        echo -e "${GREEN}INFO: 端口 53 未被占用，可以继续安装。${NC}"
-    fi
-    echo
-    return 0
+        fi
+        sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+        sudo systemctl restart systemd-resolved
+        sleep 1
+        if sudo lsof -i :53 -sTCP:LISTEN -P -n > /dev/null || sudo lsof -i :53 -sUDP:LISTEN -P -n > /dev/null; then
+            echo -e "${RED}ERROR: 自动释放端口 53 失败。请手动排查问题后重试。${NC}"
+            return 1
+        else
+            echo -e "${GREEN}SUCCESS: 端口 53 已成功释放。${NC}"
+        fi
+    else
+        echo -e "${GREEN}INFO: 端口 53 未被占用，可以继续安装。${NC}"
+    fi
+    echo
+    return 0
 }
 
 # 服务端安装（已修改以兼容新旧系统）
 install_dns_unlock_server() {
-    clear
-    echo -e "${YELLOW}--- DNS解锁服务 安装/更新 ---${NC}"
-    
-    echo -e "${CYAN}INFO: 正在检查核心依赖 (wget, lsof, curl)...${NC}"
-    for cmd in wget lsof curl; do
-        if ! command -v "$cmd" &> /dev/null; then
-            echo -e "${YELLOW}WARNING: 命令 '$cmd' 未找到，正在尝试安装...${NC}"
-            sudo apt-get update && sudo apt-get install -y "$cmd"
-            if ! command -v "$cmd" &> /dev/null; then
-                echo -e "${RED}ERROR: 依赖 '$cmd' 安装失败。请手动安装后重试。${NC}"
-                return 1
-            fi
-        fi
-    done
+    clear
+    echo -e "${YELLOW}--- DNS解锁服务 安装/更新 ---${NC}"
+    
+    echo -e "${CYAN}INFO: 正在检查核心依赖 (wget, lsof, curl)...${NC}"
+    for cmd in wget lsof curl; do
+        if ! command -v "$cmd" &> /dev/null; then
+            echo -e "${YELLOW}WARNING: 命令 '$cmd' 未找到，正在尝试安装...${NC}"
+            sudo apt-get update && sudo apt-get install -y "$cmd"
+            if ! command -v "$cmd" &> /dev/null; then
+                echo -e "${RED}ERROR: 依赖 '$cmd' 安装失败。请手动安装后重试。${NC}"
+                return 1
+            fi
+        fi
+    done
 
-    if ! check_and_free_port_53; then return 1; fi
+    if ! check_and_free_port_53; then return 1; fi
 
-    echo -e "${CYAN}INFO: 正在下载一键安装脚本...${NC}"
-    if wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh; then
+    echo -e "${CYAN}INFO: 正在下载一键安装脚本...${NC}"
+    if wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh; then
         
         # --- 兼容性补丁 开始 ---
         echo -e "${CYAN}INFO: 检查系统兼容性并自动应用补丁...${NC}"
@@ -1401,24 +1403,24 @@ install_dns_unlock_server() {
 
         echo -e "${CYAN}INFO: 正在执行安装脚本...${NC}"
         if sudo bash dnsmasq_sniproxy.sh -f; then
-            echo -e "${GREEN}SUCCESS: 基础服务安装完成。${NC}"
-            echo -e "${CYAN}INFO: 即将开始自动化配置增强...${NC}"
-            
-            # --- 自动配置开始 ---
-            echo -e "${CYAN}INFO: 正在获取本机公网IP地址...${NC}"
-            PUBLIC_IP=$(curl -4s ip.sb || curl -4s ifconfig.me)
-            if [[ -z "$PUBLIC_IP" ]]; then
-                echo -e "${RED}ERROR: 无法获取公网IP地址。无法继续配置。${NC}"
-                rm -f dnsmasq_sniproxy.sh
-                return 1
-            fi
-            echo -e "${GREEN}INFO: 获取到公网IP地址: ${PUBLIC_IP}${NC}"
-            echo
+            echo -e "${GREEN}SUCCESS: 基础服务安装完成。${NC}"
+            echo -e "${CYAN}INFO: 即将开始自动化配置增强...${NC}"
+            
+            # --- 自动配置开始 ---
+            echo -e "${CYAN}INFO: 正在获取本机公网IP地址...${NC}"
+            PUBLIC_IP=$(curl -4s ip.sb || curl -4s ifconfig.me)
+            if [[ -z "$PUBLIC_IP" ]]; then
+                echo -e "${RED}ERROR: 无法获取公网IP地址。无法继续配置。${NC}"
+                rm -f dnsmasq_sniproxy.sh
+                return 1
+            fi
+            echo -e "${GREEN}INFO: 获取到公网IP地址: ${PUBLIC_IP}${NC}"
+            echo
 
-            DNSMASQ_CONFIG_FILE="/etc/dnsmasq.d/custom_netflix.conf"
-            echo -e "${CYAN}INFO: 正在更新 Dnsmasq 配置文件 (${DNSMASQ_CONFIG_FILE})...${NC}"
-            if [ -f "$DNSMASQ_CONFIG_FILE" ] && ! grep -q "chatgpt.com" "$DNSMASQ_CONFIG_FILE"; then
-                sudo tee -a "$DNSMASQ_CONFIG_FILE" > /dev/null <<EOF
+            DNSMASQ_CONFIG_FILE="/etc/dnsmasq.d/custom_netflix.conf"
+            echo -e "${CYAN}INFO: 正在更新 Dnsmasq 配置文件 (${DNSMASQ_CONFIG_FILE})...${NC}"
+            if [ -f "$DNSMASQ_CONFIG_FILE" ] && ! grep -q "chatgpt.com" "$DNSMASQ_CONFIG_FILE"; then
+                sudo tee -a "$DNSMASQ_CONFIG_FILE" > /dev/null <<EOF
 
 # Custom additions for ChatGPT/TikTok etc.
 address=/chatgpt.com/${PUBLIC_IP}
@@ -1435,190 +1437,190 @@ address=/tik-tokapi.com/${PUBLIC_IP}
 address=/tiktokcdn.com/${PUBLIC_IP}
 address=/tiktokv.com/${PUBLIC_IP}
 EOF
-                echo -e "${CYAN}INFO: 正在重启 Dnsmasq 服务...${NC}"
-                if sudo systemctl restart dnsmasq; then echo -e "${GREEN}SUCCESS: Dnsmasq 配置更新并重启成功。${NC}"; else echo -e "${RED}ERROR: Dnsmasq 服务重启失败。${NC}"; fi
-            else
-                echo -e "${YELLOW}WARNING: Dnsmasq 配置文件未找到或已包含相关配置，跳过此步骤。${NC}"
-            fi
-            echo
+                echo -e "${CYAN}INFO: 正在重启 Dnsmasq 服务...${NC}"
+                if sudo systemctl restart dnsmasq; then echo -e "${GREEN}SUCCESS: Dnsmasq 配置更新并重启成功。${NC}"; else echo -e "${RED}ERROR: Dnsmasq 服务重启失败。${NC}"; fi
+            else
+                echo -e "${YELLOW}WARNING: Dnsmasq 配置文件未找到或已包含相关配置，跳过此步骤。${NC}"
+            fi
+            echo
 
-            # --- SNI Proxy 修改（已重写为更安全的方式） ---
-            SNIPROXY_CONFIG_FILE="/etc/sniproxy.conf"
-            echo -e "${CYAN}INFO: 正在更新 SNI Proxy 配置文件 (${SNIPROXY_CONFIG_FILE})...${NC}"
-            if [ -f "$SNIPROXY_CONFIG_FILE" ] && ! grep -q "chatgpt\\.com" "$SNIPROXY_CONFIG_FILE"; then
-                ADDITIONS_FILE=$(mktemp)
-                cat <<'EOF' > "$ADDITIONS_FILE"
-    # Custom additions for ChatGPT/TikTok etc.
-    .*chatgpt\.com$ *
-    .*cdn\.usefathom\.com$ *
-    .*anthropic\.com$ *
-    .*claude\.ai$ *
-    .*byteoversea\.com$ *
-    .*ibytedtos\.com$ *
-    .*ipstatp\.com$ *
-    .*muscdn\.com$ *
-    .*musical\.ly$ *
-    .*tiktok\.com$ *
-    .*tik-tokapi\.com$ *
-    .*tiktokcdn\.com$ *
-    .*tiktokv\.com$ *
+            # --- SNI Proxy 修改（已重写为更安全的方式） ---
+            SNIPROXY_CONFIG_FILE="/etc/sniproxy.conf"
+            echo -e "${CYAN}INFO: 正在更新 SNI Proxy 配置文件 (${SNIPROXY_CONFIG_FILE})...${NC}"
+            if [ -f "$SNIPROXY_CONFIG_FILE" ] && ! grep -q "chatgpt\\.com" "$SNIPROXY_CONFIG_FILE"; then
+                ADDITIONS_FILE=$(mktemp)
+                cat <<'EOF' > "$ADDITIONS_FILE"
+    # Custom additions for ChatGPT/TikTok etc.
+    .*chatgpt\.com$ *
+    .*cdn\.usefathom\.com$ *
+    .*anthropic\.com$ *
+    .*claude\.ai$ *
+    .*byteoversea\.com$ *
+    .*ibytedtos\.com$ *
+    .*ipstatp\.com$ *
+    .*muscdn\.com$ *
+    .*musical\.ly$ *
+    .*tiktok\.com$ *
+    .*tik-tokapi\.com$ *
+    .*tiktokcdn\.com$ *
+    .*tiktokv\.com$ *
 EOF
-                LINE_NUM=$(grep -n "}" "$SNIPROXY_CONFIG_FILE" | tail -n 1 | cut -d: -f1)
-                if [[ -n "$LINE_NUM" ]]; then
-                    TEMP_CONFIG=$(mktemp)
-                    head -n $((LINE_NUM - 1)) "$SNIPROXY_CONFIG_FILE" > "$TEMP_CONFIG"
-                    cat "$ADDITIONS_FILE" >> "$TEMP_CONFIG"
-                    tail -n +$LINE_NUM "$SNIPROXY_CONFIG_FILE" >> "$TEMP_CONFIG"
-                    
-                    if sudo mv "$TEMP_CONFIG" "$SNIPROXY_CONFIG_FILE"; then
-                        echo -e "${GREEN}SUCCESS: SNI Proxy 配置文件已更新。${NC}"
-                        echo -e "${CYAN}INFO: 正在重启 SNI Proxy 服务...${NC}"
-                        if sudo systemctl restart sniproxy; then echo -e "${GREEN}SUCCESS: SNI Proxy 服务重启成功。${NC}"; else echo -e "${RED}ERROR: SNI Proxy 服务重启失败。${NC}"; fi
-                    else
-                        echo -e "${RED}ERROR: 写入 SNI Proxy 配置文件失败。${NC}"
-                    fi
-                else
-                    echo -e "${RED}ERROR: 无法在 ${SNIPROXY_CONFIG_FILE} 中找到插入点 '}'。${NC}"
-                fi
-                rm -f "$ADDITIONS_FILE"
-            else
-                echo -e "${YELLOW}WARNING: SNI Proxy 配置文件未找到或已包含相关配置，跳过此步骤。${NC}"
-            fi
-            # --- 自动配置结束 ---
+                LINE_NUM=$(grep -n "}" "$SNIPROXY_CONFIG_FILE" | tail -n 1 | cut -d: -f1)
+                if [[ -n "$LINE_NUM" ]]; then
+                    TEMP_CONFIG=$(mktemp)
+                    head -n $((LINE_NUM - 1)) "$SNIPROXY_CONFIG_FILE" > "$TEMP_CONFIG"
+                    cat "$ADDITIONS_FILE" >> "$TEMP_CONFIG"
+                    tail -n +$LINE_NUM "$SNIPROXY_CONFIG_FILE" >> "$TEMP_CONFIG"
+                    
+                    if sudo mv "$TEMP_CONFIG" "$SNIPROXY_CONFIG_FILE"; then
+                        echo -e "${GREEN}SUCCESS: SNI Proxy 配置文件已更新。${NC}"
+                        echo -e "${CYAN}INFO: 正在重启 SNI Proxy 服务...${NC}"
+                        if sudo systemctl restart sniproxy; then echo -e "${GREEN}SUCCESS: SNI Proxy 服务重启成功。${NC}"; else echo -e "${RED}ERROR: SNI Proxy 服务重启失败。${NC}"; fi
+                    else
+                        echo -e "${RED}ERROR: 写入 SNI Proxy 配置文件失败。${NC}"
+                    fi
+                else
+                    echo -e "${RED}ERROR: 无法在 ${SNIPROXY_CONFIG_FILE} 中找到插入点 '}'。${NC}"
+                fi
+                rm -f "$ADDITIONS_FILE"
+            else
+                echo -e "${YELLOW}WARNING: SNI Proxy 配置文件未找到或已包含相关配置，跳过此步骤。${NC}"
+            fi
+            # --- 自动配置结束 ---
         else
             echo -e "${RED}ERROR: 基础服务安装脚本执行失败。${NC}"
         fi
-    else
-        echo -e "${RED}ERROR: 基础服务安装脚本下载失败。${NC}"
-    fi
-    rm -f dnsmasq_sniproxy.sh
+    else
+        echo -e "${RED}ERROR: 基础服务安装脚本下载失败。${NC}"
+    fi
+    rm -f dnsmasq_sniproxy.sh
 }
 
 
 # 服务端卸载（使用一键脚本）
 uninstall_dns_unlock_server() {
-    clear
-    echo -e "${YELLOW}--- DNS解锁服务 卸载 ---${NC}"
-    if ! command -v wget &> /dev/null; then
-        sudo apt-get update && sudo apt-get install -y wget
-    fi
-    echo -e "${CYAN}INFO: 正在下载并执行一键卸载脚本...${NC}"
-    if wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh && sudo bash dnsmasq_sniproxy.sh -u; then
-        echo -e "${GREEN}SUCCESS: DNS解锁服务卸载脚本执行完成。${NC}"
-    else
-        echo -e "${RED}ERROR: 卸载脚本下载或执行失败。${NC}"
-    fi
-    rm -f dnsmasq_sniproxy.sh
+    clear
+    echo -e "${YELLOW}--- DNS解锁服务 卸载 ---${NC}"
+    if ! command -v wget &> /dev/null; then
+        sudo apt-get update && sudo apt-get install -y wget
+    fi
+    echo -e "${CYAN}INFO: 正在下载并执行一键卸载脚本...${NC}"
+    if wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh && sudo bash dnsmasq_sniproxy.sh -u; then
+        echo -e "${GREEN}SUCCESS: DNS解锁服务卸载脚本执行完成。${NC}"
+    else
+        echo -e "${RED}ERROR: 卸载脚本下载或执行失败。${NC}"
+    fi
+    rm -f dnsmasq_sniproxy.sh
 }
 
 # 客户端设置（重写版）
 setup_dns_client() {
-    clear
-    echo -e "${YELLOW}--- 设置 DNS 客户端 ---${NC}"
-    read -p "请输入您的 DNS 解锁服务器的 IP 地址: " server_ip
-    if ! [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo -e "${RED}错误: 您输入的不是一个有效的 IP 地址。${NC}"
-        return 1
-    fi
+    clear
+    echo -e "${YELLOW}--- 设置 DNS 客户端 ---${NC}"
+    read -p "请输入您的 DNS 解锁服务器的 IP 地址: " server_ip
+    if ! [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${RED}错误: 您输入的不是一个有效的 IP 地址。${NC}"
+        return 1
+    fi
 
-    echo -e "${CYAN}INFO: 正在备份当前的 DNS 配置...${NC}"
-    if [ -f /etc/resolv.conf ]; then
-        sudo chattr -i /etc/resolv.conf 2>/dev/null
-        sudo mv /etc/resolv.conf "/etc/resolv.conf.bak_$(date +%Y%m%d_%H%M%S)"
-        echo -e "${GREEN}INFO: 原有配置已备份至 /etc/resolv.conf.bak_...${NC}"
-    fi
+    echo -e "${CYAN}INFO: 正在备份当前的 DNS 配置...${NC}"
+    if [ -f /etc/resolv.conf ]; then
+        sudo chattr -i /etc/resolv.conf 2>/dev/null
+        sudo mv /etc/resolv.conf "/etc/resolv.conf.bak_$(date +%Y%m%d_%H%M%S)"
+        echo -e "${GREEN}INFO: 原有配置已备份至 /etc/resolv.conf.bak_...${NC}"
+    fi
 
-    echo -e "${CYAN}INFO: 正在写入新的 DNS 配置...${NC}"
-    echo "nameserver $server_ip" | sudo tee /etc/resolv.conf > /dev/null
+    echo -e "${CYAN}INFO: 正在写入新的 DNS 配置...${NC}"
+    echo "nameserver $server_ip" | sudo tee /etc/resolv.conf > /dev/null
 
-    echo -e "${CYAN}INFO: 正在锁定 DNS 配置文件以防被覆盖...${NC}"
-    if sudo chattr +i /etc/resolv.conf; then
-        echo -e "${GREEN}SUCCESS: 客户端 DNS 已成功设置为 ${server_ip} 并已锁定！${NC}"
-    else
-        echo -e "${RED}ERROR: 锁定 /etc/resolv.conf 文件失败。${NC}"
-    fi
+    echo -e "${CYAN}INFO: 正在锁定 DNS 配置文件以防被覆盖...${NC}"
+    if sudo chattr +i /etc/resolv.conf; then
+        echo -e "${GREEN}SUCCESS: 客户端 DNS 已成功设置为 ${server_ip} 并已锁定！${NC}"
+    else
+        echo -e "${RED}ERROR: 锁定 /etc/resolv.conf 文件失败。${NC}"
+    fi
 }
 
 # 客户端卸载（重写版）
 uninstall_dns_client() {
-    clear
-    echo -e "${YELLOW}--- 卸载/还原 DNS 客户端设置 ---${NC}"
-    echo -e "${CYAN}INFO: 正在解锁 DNS 配置文件...${NC}"
-    sudo chattr -i /etc/resolv.conf 2>/dev/null
-    
-    local latest_backup
-    latest_backup=$(ls -t /etc/resolv.conf.bak_* 2>/dev/null | head -n 1)
+    clear
+    echo -e "${YELLOW}--- 卸载/还原 DNS 客户端设置 ---${NC}"
+    echo -e "${CYAN}INFO: 正在解锁 DNS 配置文件...${NC}"
+    sudo chattr -i /etc/resolv.conf 2>/dev/null
+    
+    local latest_backup
+    latest_backup=$(ls -t /etc/resolv.conf.bak_* 2>/dev/null | head -n 1)
 
-    if [[ -f "$latest_backup" ]]; then
-        echo -e "${CYAN}INFO: 正在从备份文件 $latest_backup 还原...${NC}"
-        sudo mv "$latest_backup" /etc/resolv.conf
-        echo -e "${GREEN}SUCCESS: DNS 配置已成功从备份还原。${NC}"
-    else
-        echo -e "${YELLOW}WARNING: 未找到备份文件。正在设置为通用 DNS (8.8.8.8)...${NC}"
-        echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
-        echo -e "${GREEN}SUCCESS: DNS 已设置为通用公共服务器。${NC}"
-    fi
+    if [[ -f "$latest_backup" ]]; then
+        echo -e "${CYAN}INFO: 正在从备份文件 $latest_backup 还原...${NC}"
+        sudo mv "$latest_backup" /etc/resolv.conf
+        echo -e "${GREEN}SUCCESS: DNS 配置已成功从备份还原。${NC}"
+    else
+        echo -e "${YELLOW}WARNING: 未找到备份文件。正在设置为通用 DNS (8.8.8.8)...${NC}"
+        echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
+        echo -e "${GREEN}SUCCESS: DNS 已设置为通用公共服务器。${NC}"
+    fi
 }
 
 # IP白名单管理（重写版）
 manage_iptables_rules() {
-    if ! dpkg -l | grep -q 'iptables-persistent'; then
-        echo -e "${YELLOW}WARNING: 'iptables-persistent' 未安装，规则可能无法自动持久化。${NC}"
-        read -p "是否现在尝试安装? (y/N): " install_confirm
-        if [[ "$install_confirm" =~ ^[yY]$ ]]; then
-            sudo apt-get update && sudo apt-get install -y iptables-persistent
-        fi
-    fi
+    if ! dpkg -l | grep -q 'iptables-persistent'; then
+        echo -e "${YELLOW}WARNING: 'iptables-persistent' 未安装，规则可能无法自动持久化。${NC}"
+        read -p "是否现在尝试安装? (y/N): " install_confirm
+        if [[ "$install_confirm" =~ ^[yY]$ ]]; then
+            sudo apt-get update && sudo apt-get install -y iptables-persistent
+        fi
+    fi
 
-    while true; do
-        clear
-        echo -e "${YELLOW}═════════ IP 白名单管理 (端口 53) ═════════${NC}"
-        echo -e "管理 TCP/UDP 端口 53 的访问权限。"
-        echo -e "${CYAN}当前生效的 Port 53 规则:${NC}"
-        sudo iptables -L INPUT -v -n --line-numbers | grep -E 'dpt:53|dpts.*53' || echo -e "  (无相关规则)"
-        echo -e "${YELLOW}────────────────────────────────────────────${NC}"
-        echo "1. 添加白名单IP (允许访问)"
-        echo "2. 删除白名单IP (根据行号)"
-        echo "3. 应用 '默认拒绝' 规则 (推荐)"
-        echo "0. 返回上级菜单"
-        echo -e "${YELLOW}════════════════════════════════════════════${NC}"
-        read -p "请输入选项: " rule_choice
+    while true; do
+        clear
+        echo -e "${YELLOW}═════════ IP 白名单管理 (端口 53) ═════════${NC}"
+        echo -e "管理 TCP/UDP 端口 53 的访问权限。"
+        echo -e "${CYAN}当前生效的 Port 53 规则:${NC}"
+        sudo iptables -L INPUT -v -n --line-numbers | grep -E 'dpt:53|dpts.*53' || echo -e "  (无相关规则)"
+        echo -e "${YELLOW}────────────────────────────────────────────${NC}"
+        echo "1. 添加白名单IP (允许访问)"
+        echo "2. 删除白名单IP (根据行号)"
+        echo "3. 应用 '默认拒绝' 规则 (推荐)"
+        echo "0. 返回上级菜单"
+        echo -e "${YELLOW}════════════════════════════════════════════${NC}"
+        read -p "请输入选项: " rule_choice
 
-        case $rule_choice in
-        1)
-            read -p "请输入要加入白名单的IP (多个用空格隔开): " ips
-            if [[ -z "$ips" ]]; then continue; fi
-            for ip in $ips; do
-                sudo iptables -I INPUT -s "$ip" -p tcp --dport 53 -j ACCEPT
-                sudo iptables -I INPUT -s "$ip" -p udp --dport 53 -j ACCEPT
-                echo -e "${GREEN}IP $ip 已添加至 TCP/UDP 端口 53 白名单。${NC}"
-            done
-            sudo netfilter-persistent save && echo -e "${GREEN}防火墙规则已保存。${NC}" || echo -e "${RED}防火墙规则保存失败。${NC}"
-            read -n 1 -s -r -p "按任意键继续..."
-            ;;
-        2)
-            read -p "请输入要删除的规则的行号: " line_num
-            if ! [[ "$line_num" =~ ^[0-9]+$ ]]; then continue; fi
-            sudo iptables -D INPUT "$line_num"
-            sudo netfilter-persistent save && echo -e "${GREEN}规则 ${line_num} 已删除并保存。${NC}" || echo -e "${RED}防火墙规则保存失败。${NC}"
-            read -n 1 -s -r -p "按任意键继续..."
-            ;;
-        3)
-            echo -e "${CYAN}INFO: 这将确保所有不在白名单的IP无法访问端口 53。${NC}"
-            if ! sudo iptables -C INPUT -p tcp --dport 53 -j DROP &>/dev/null; then
-                sudo iptables -A INPUT -p tcp --dport 53 -j DROP
-            fi
-            if ! sudo iptables -C INPUT -p udp --dport 53 -j DROP &>/dev/null; then
-                sudo iptables -A INPUT -p udp --dport 53 -j DROP
-            fi
-            echo -e "${GREEN}'默认拒绝' 规则已应用/确认存在。${NC}"
-            sudo netfilter-persistent save && echo -e "${GREEN}防火墙规则已保存。${NC}" || echo -e "${RED}防火墙规则保存失败。${NC}"
-            read -n 1 -s -r -p "按任意键继续..."
-            ;;
-        0) break ;;
-        *) echo -e "${RED}无效选项!${NC}"; sleep 1;;
-        esac
-    done
+        case $rule_choice in
+        1)
+            read -p "请输入要加入白名单的IP (多个用空格隔开): " ips
+            if [[ -z "$ips" ]]; then continue; fi
+            for ip in $ips; do
+                sudo iptables -I INPUT -s "$ip" -p tcp --dport 53 -j ACCEPT
+                sudo iptables -I INPUT -s "$ip" -p udp --dport 53 -j ACCEPT
+                echo -e "${GREEN}IP $ip 已添加至 TCP/UDP 端口 53 白名单。${NC}"
+            done
+            sudo netfilter-persistent save && echo -e "${GREEN}防火墙规则已保存。${NC}" || echo -e "${RED}防火墙规则保存失败。${NC}"
+            read -n 1 -s -r -p "按任意键继续..."
+            ;;
+        2)
+            read -p "请输入要删除的规则的行号: " line_num
+            if ! [[ "$line_num" =~ ^[0-9]+$ ]]; then continue; fi
+            sudo iptables -D INPUT "$line_num"
+            sudo netfilter-persistent save && echo -e "${GREEN}规则 ${line_num} 已删除并保存。${NC}" || echo -e "${RED}防火墙规则保存失败。${NC}"
+            read -n 1 -s -r -p "按任意键继续..."
+            ;;
+        3)
+            echo -e "${CYAN}INFO: 这将确保所有不在白名单的IP无法访问端口 53。${NC}"
+            if ! sudo iptables -C INPUT -p tcp --dport 53 -j DROP &>/dev/null; then
+                sudo iptables -A INPUT -p tcp --dport 53 -j DROP
+            fi
+            if ! sudo iptables -C INPUT -p udp --dport 53 -j DROP &>/dev/null; then
+                sudo iptables -A INPUT -p udp --dport 53 -j DROP
+            fi
+            echo -e "${GREEN}'默认拒绝' 规则已应用/确认存在。${NC}"
+            sudo netfilter-persistent save && echo -e "${GREEN}防火墙规则已保存。${NC}" || echo -e "${RED}防火墙规则保存失败。${NC}"
+            read -n 1 -s -r -p "按任意键继续..."
+            ;;
+        0) break ;;
+        *) echo -e "${RED}无效选项!${NC}"; sleep 1;;
+        esac
+    done
 }
 
 # ======================= Sub-Store安装模块 =======================
