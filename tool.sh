@@ -1331,7 +1331,37 @@ install_shell_beautify() {
 
 # ======================= DNS解锁管理 (完整功能版) =======================
 
-# ======================= DNS解锁管理 (完整功能版) =======================
+# DNS解锁服务 子菜单函数
+dns_unlock_menu() {
+    while true; do
+        clear
+        echo -e "${CYAN}=============================================${NC}"
+        echo -e "${YELLOW}           DNS 解锁服务管理模块           ${NC}"
+        echo -e "${CYAN}=============================================${NC}"
+        echo " --- 服务端管理 ---"
+        echo "  1. 安装/更新 DNS 解锁服务"
+        echo "  2. 卸载 DNS 解锁服务"
+        echo "  3. 管理 IP 白名单 (防火墙)"
+        echo
+        echo " --- 客户端管理 ---"
+        echo "  4. 设置本机为 DNS 客户端"
+        echo "  5. 还原客户端 DNS 设置"
+        echo " --------------------------------------------"
+        echo "  0. 返回上级菜单"
+        echo -e "${CYAN}=============================================${NC}"
+        read -p "请输入选项 [0-5]: " choice
+
+        case $choice in
+            1) install_dns_unlock_server; press_any_key ;;
+            2) uninstall_dns_unlock_server; press_any_key ;;
+            3) manage_iptables_rules ;;
+            4) setup_dns_client; press_any_key ;;
+            5) uninstall_dns_client; press_any_key ;;
+            0) break ;;
+            *) echo -e "${RED}无效选项，请重新输入!${NC}"; sleep 2 ;;
+        esac
+    done
+}
 
 # 帮助函数：检查并尝试释放被 systemd-resolved 占用的 53 端口
 check_and_free_port_53() {
