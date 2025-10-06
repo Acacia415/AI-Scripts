@@ -1363,54 +1363,65 @@ dns_unlock_menu() {
     done
 }
 
-# 帮助函数：检查并尝试释放被 systemd-resolved 占用的 53 端口 (已优化)
+# 帮助函数：检查并尝试释放被 systemd-resolved 或 dnsmasq 占用的 53 端口 (已优化)
 check_and_free_port_53() {
-    echo -e "${CYAN}INFO: 正在检查端口 53 是否被占用...${NC}"
-    # 使用更可靠的检查方法，并捕获占用进程的名称
-    local occupying_process
-    occupying_process=$(sudo lsof -i :53 -sTCP:LISTEN -P -n -t)
+    echo -e "${CYAN}INFO: 正在检查端口 53 是否被占用...${NC}"
+    # 使用更可靠的检查方法，并捕获占用进程的名称
+    local occupying_process
+    occupying_process=$(sudo lsof -i :53 -sTCP:LISTEN -P -n -t)
 
-    if [[ -n "$occupying_process" ]]; then
-        local process_name
-        process_name=$(ps -p "$occupying_process" -o comm=)
-        echo -e "${YELLOW}WARNING: 端口 53 (DNS) 已被进程 '$process_name' (PID: $occupying_process) 占用。${NC}"
+    if [[ -n "$occupying_process" ]]; then
+        local process_name
+        process_name=$(ps -p "$occupying_process" -o comm=)
+        echo -e "${YELLOW}WARNING: 端口 53 (DNS) 已被进程 '$process_name' (PID: $occupying_process) 占用。${NC}"
 
-        if [[ "$process_name" == "systemd-resolve" ]]; then
-            echo -e "${CYAN}INFO: 正在尝试自动修改 systemd-resolved 配置以释放端口...${NC}"
-            sudo systemctl stop systemd-resolved
-            if [ -f /etc/systemd/resolved.conf ]; then
-                sudo sed -i -E 's/^#?(DNS=).*/\18.8.8.8/' /etc/systemd/resolved.conf
-                sudo sed -i -E 's/^#?(DNSStubListener=).*/\1no/' /etc/systemd/resolved.conf
-                if ! grep -q "DNSStubListener=no" /etc/systemd/resolved.conf; then
-                    echo "DNSStubListener=no" | sudo tee -a /etc/systemd/resolved.conf > /dev/null
-                fi
-            else
-                sudo tee /etc/systemd/resolved.conf > /dev/null <<EOF
+        if [[ "$process_name" == "systemd-resolve" ]]; then
+            echo -e "${CYAN}INFO: 正在尝试自动修改 systemd-resolved 配置以释放端口...${NC}"
+            sudo systemctl stop systemd-resolved
+            if [ -f /etc/systemd/resolved.conf ]; then
+                sudo sed -i -E 's/^#?(DNS=).*/\18.8.8.8/' /etc/systemd/resolved.conf
+                sudo sed -i -E 's/^#?(DNSStubListener=).*/\1no/' /etc/systemd/resolved.conf
+                if ! grep -q "DNSStubListener=no" /etc/systemd/resolved.conf; then
+                    echo "DNSStubListener=no" | sudo tee -a /etc/systemd/resolved.conf > /dev/null
+                fi
+            else
+                sudo tee /etc/systemd/resolved.conf > /dev/null <<EOF
 [Resolve]
 DNS=8.8.8.8
 DNSStubListener=no
 EOF
-            fi
-            sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
-            sudo systemctl restart systemd-resolved
-            sleep 1
-            # 再次检查
-            if [[ -n "$(sudo lsof -i :53 -sTCP:LISTEN -P -n -t)" ]]; then
-                echo -e "${RED}ERROR: 自动释放端口 53 失败。请手动排查问题后重试。${NC}"
-                return 1
+            fi
+            sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+            sudo systemctl restart systemd-resolved
+            sleep 1
+            # 再次检查
+            if [[ -n "$(sudo lsof -i :53 -sTCP:LISTEN -P -n -t)" ]]; then
+                echo -e "${RED}ERROR: 自动释放端口 53 失败。请手动排查问题后重试。${NC}"
+                return 1
+            else
+                echo -e "${GREEN}SUCCESS: 端口 53 已成功释放。${NC}"
+            fi
+        # 【新增逻辑】如果占用者是dnsmasq，也自动处理
+        elif [[ "$process_name" == "dnsmasq" ]]; then
+            echo -e "${CYAN}INFO: 检测到 dnsmasq 正在运行，可能是上次安装残留。正在自动停止...${NC}"
+            sudo systemctl stop dnsmasq
+            sleep 1 # 等待端口释放
+            if [[ -z "$(sudo lsof -i :53 -sTCP:LISTEN -P -n -t)" ]]; then
+                echo -e "${GREEN}SUCCESS: 已成功停止 dnsmasq 服务，端口 53 已释放。${NC}"
             else
-                echo -e "${GREEN}SUCCESS: 端口 53 已成功释放。${NC}"
+                echo -e "${RED}ERROR: 尝试停止 dnsmasq 后端口仍被占用，请手动检查。${NC}"
+                return 1
             fi
-        else
-            echo -e "${RED}ERROR: 端口被 '$process_name' 占用，脚本无法自动处理。${NC}"
-            echo -e "${RED}请先手动停止该服务 (例如: sudo systemctl stop $process_name) 后再试。${NC}"
-            return 1
-        fi
-    else
-        echo -e "${GREEN}INFO: 端口 53 未被占用，可以继续安装。${NC}"
-    fi
-    echo
-    return 0
+        else
+            echo -e "${RED}ERROR: 端口被 '$process_name' 占用，脚本无法自动处理。${NC}"
+            echo -e "${RED}请先手动停止该服务 (例如: sudo systemctl stop $process_name) 后再试。${NC}"
+            return 1
+        fi
+    else
+        echo -e "${GREEN}INFO: 端口 53 未被占用，可以继续安装。${NC}"
+    fi
+    echo
+    return 0
 }
 
 # 服务端安装（已修改以兼容新旧系统）
