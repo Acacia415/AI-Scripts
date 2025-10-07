@@ -4,7 +4,7 @@
 # DNS & Gost Unlock Service Manager (Conflict-Proof Version)
 # Description: A standalone script to install, manage, and uninstall
 #              a DNS-based unlock service using Dnsmasq and Gost.
-# Version: 2.0 (Conflict-Proof)
+# Version: 4.0 (Final - Using user-provided working URL)
 # =================================================================
 
 # --- 专属配置 ---
@@ -14,9 +14,9 @@ DNS_GOST_SERVICE_PATH="/etc/systemd/system/${DNS_GOST_SERVICE_NAME}"
 
 # --- 安全检查: 确保以 root 权限运行 ---
 if [[ $EUID -ne 0 ]]; then
-   echo -e "\033[0;31m错误：本脚本需要以 root 权限运行。\033[0m" 
-   echo -e "\033[0;32m请尝试使用: sudo bash $0\033[0m"
-   exit 1
+    echo -e "\033[0;31m错误：本脚本需要以 root 权限运行。\033[0m"
+    echo -e "\033[0;32m请尝试使用: sudo bash $0\033[0m"
+    exit 1
 fi
 
 
@@ -44,7 +44,6 @@ check_ports_80_443() {
     for port in 80 443; do
         if lsof -i :${port} -sTCP:LISTEN -P -n >/dev/null; then
             local process_name=$(ps -p $(lsof -i :${port} -sTCP:LISTEN -P -n -t) -o comm=)
-            # 仅在端口被非gost进程占用时警告，因为可能会有另一个gost服务在运行
             if [[ "$process_name" != "gost" ]]; then
                 echo -e "\033[0;33mWARNING: 端口 ${port} 已被进程 '${process_name}' 占用。\033[0m"
                 echo -e "\033[0;31m这可能与 Nginx, Apache 或 Caddy 等常用Web服务冲突。请确保您已了解此情况。\033[0m"
@@ -64,7 +63,7 @@ dns_unlock_menu() {
     while true; do
         clear
         echo -e "\033[0;36m=============================================\033[0m"
-        echo -e "\033[0;33m              DNS 解锁服务管理                \033[0m"
+        echo -e "\033[0;33m          DNS 解锁服务管理 (Gost v3 版)        \033[0m"
         echo -e "\033[0;36m=============================================\033[0m"
         echo " --- 服务端管理 ---"
         echo "  1. 安装/更新 DNS 解锁服务"
@@ -93,95 +92,103 @@ dns_unlock_menu() {
 
 install_dns_unlock_server() {
     clear
-    echo -e "\033[0;33m--- DNS解锁服务 安装/更新 ---\033[0m"
+    echo -e "\033[0;33m--- DNS解锁服务 安装/更新 (已升级为Gost V3) ---\033[0m"
 
     echo -e "\033[0;36mINFO: 正在安装/检查核心依赖...\033[0m"
     apt-get update >/dev/null 2>&1
-    apt-get install -y dnsmasq curl wget lsof tar >/dev/null 2>&1
+    apt-get install -y dnsmasq curl wget lsof tar file >/dev/null 2>&1
     if ! check_port_53; then return 1; fi
     if ! check_ports_80_443; then return 1; fi
     
-    echo -e "\033[0;36mINFO: 正在清理旧环境...\033[0m"
+    echo -e "\033[0;36mINFO: 正在清理旧环境 (包括旧版Gost)...\033[0m"
     systemctl stop sniproxy 2>/dev/null
+    systemctl stop gost-dns.service 2>/dev/null
     apt-get purge -y sniproxy >/dev/null 2>&1
     apt-get --fix-broken install -y >/dev/null 2>&1
     rm -f /etc/dnsmasq.d/custom_netflix.conf
+    rm -f /usr/local/bin/gost
     echo
 
-    echo -e "\033[0;36mINFO: 正在检查 Gost 安装情况...\033[0m"
-    if ! command -v gost &> /dev/null; then
-        echo "INFO: 未找到Gost, 开始自动安装..."
-        echo "INFO: 正在从 GitHub 获取最新Gost版本号..."
-        GOST_VERSION=$(curl -L --retry 3 "https://api.github.com/repos/ginuerzh/gost/releases/latest" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
-        if [[ -z "$GOST_VERSION" ]]; then
-            echo -e "\033[0;31mERROR: 获取Gost版本号失败, 请检查网络或GitHub API访问。\033[0m"
-            return 1
-        fi
-        echo "INFO: 成功获取最新版本: $GOST_VERSION"
-        VERSION_NUM=${GOST_VERSION//v/}
-        FILENAME="gost_${VERSION_NUM}_linux_amd64.tar.gz"
-        GOST_URL="https://github.com/ginuerzh/gost/releases/download/${GOST_VERSION}/${FILENAME}"
-        echo "INFO: 正在从以下地址下载Gost:"
-        echo "$GOST_URL"
-        if ! wget --no-check-certificate -O "${FILENAME}" "${GOST_URL}"; then
-            echo -e "\033[0;31mERROR: Gost下载失败！请检查网络连接或上述URL的可访问性。\033[0m"
-            rm -f "${FILENAME}"
-            return 1
-        fi
-        echo "INFO: Gost下载成功。"
-        echo "INFO: 正在解压文件: ${FILENAME}"
-        if ! tar -xzf "${FILENAME}"; then
-            echo -e "\033[0;31mERROR: Gost解压失败！可能缺少tar工具或文件已损坏。\033[0m"
-            rm -f "${FILENAME}"
-            return 1
-        fi
-        echo "INFO: 解压成功。"
-        GOST_EXEC_PATH=$(find . -name gost -type f | head -n 1)
-        if [[ -z "$GOST_EXEC_PATH" ]]; then
-            echo -e "\033[0;31mERROR: 在解压文件中未找到'gost'可执行文件。\033[0m"
-            rm -f "${FILENAME}"
-            rm -rf gost_*
-            return 1
-        fi
-        echo "INFO: 正在移动 'gost' 到 /usr/local/bin/gost"
-        chmod +x "${GOST_EXEC_PATH}"
-        if ! mv "${GOST_EXEC_PATH}" /usr/local/bin/gost; then
-             echo -e "\033[0;31mERROR: 移动gost文件失败，请检查权限。\033[0m"
-             return 1
-        fi
-        echo "INFO: 正在清理临时文件..."
+    echo -e "\033[0;36mINFO: 正在安装 Gost v3 ...\033[0m"
+    # --- 使用你找到的、经过验证的 nightly build 链接 ---
+    FILENAME="gost_3.2.5-nightly.20250920_linux_amd64v3.tar.gz"
+    GOST_URL="https://github.com/go-gost/gost/releases/download/v3.2.5-nightly.20250920/${FILENAME}"
+
+    echo "INFO: 正在从以下地址下载Gost v3:"
+    echo "$GOST_URL"
+    # --- 使用 curl -L 下载 ---
+    if ! curl -L -o "${FILENAME}" "${GOST_URL}"; then
+        echo -e "\033[0;31mERROR: Gost v3 下载失败！ (curl 退出码: $?)\033[0m"
         rm -f "${FILENAME}"
-        rm -rf "$(dirname "${GOST_EXEC_PATH}")"
-        echo "INFO: 清理完成。"
+        return 1
     fi
+
+    if ! file "${FILENAME}" | grep -q 'gzip compressed data'; then
+        echo -e "\033[0;31mERROR: 下载的文件不是有效的压缩包 (可能是一个HTML错误页面)。请手动检查上述URL。\033[0m"
+        rm -f "${FILENAME}"
+        return 1
+    fi
+    echo "INFO: Gost下载成功。"
+
+    echo "INFO: 正在解压文件: ${FILENAME}"
+    if ! tar -xzf "${FILENAME}"; then
+        echo -e "\033[0;31mERROR: Gost解压失败！\033[0m"
+        rm -f "${FILENAME}"
+        return 1
+    fi
+    echo "INFO: 解压成功。"
+    
+    # 假设解压后可执行文件名是 gost
+    GOST_EXEC_PATH="gost" 
+    if [[ ! -f "$GOST_EXEC_PATH" ]]; then
+        echo -e "\033[0;31mERROR: 在解压文件中未找到'${GOST_EXEC_PATH}'可执行文件。\033[0m"
+        rm -f "${FILENAME}"
+        rm -f "${GOST_EXEC_PATH}"
+        return 1
+    fi
+
+    echo "INFO: 正在移动 'gost' 到 /usr/local/bin/gost"
+    chmod +x "${GOST_EXEC_PATH}"
+    if ! mv "${GOST_EXEC_PATH}" /usr/local/bin/gost; then
+         echo -e "\033[0;31mERROR: 移动gost文件失败，请检查权限。\033[0m"
+         return 1
+    fi
+    echo "INFO: 正在清理临时文件..."
+    rm -f "${FILENAME}"
+    echo "INFO: 清理完成。"
 
     if ! command -v gost &> /dev/null; then 
         echo -e "\033[0;31mERROR: Gost 安装最终失败，未知错误。\033[0m"
         return 1
     else
-        echo -e "\033[0;32mSUCCESS: Gost 已成功安装/确认存在。\033[0m"
+        echo -e "\033[0;32mSUCCESS: Gost v3 已成功安装/确认存在。版本：$(gost -V)\033[0m"
     fi
     echo
     
-    echo -e "\033[0;36mINFO: 正在为DNS解锁服务创建配置文件...\033[0m"
+    echo -e "\033[0;36mINFO: 正在为DNS解锁服务创建 Gost v3 配置文件...\033[0m"
     mkdir -p /etc/gost
     
     tee "${DNS_GOST_CONFIG_PATH}" > /dev/null <<'EOT'
 {
-    "services": [
-        {
-            "name": "dns-unlock-sni-80",
-            "addr": ":80",
-            "handler": { "type": "sni" },
-            "listener": { "type": "tcp" }
-        },
-        {
-            "name": "dns-unlock-sni-443",
-            "addr": ":443",
-            "handler": { "type": "sni" },
-            "listener": { "type": "tcp" }
-        }
-    ]
+  "services": [
+    {
+      "name": "dns-unlock-sni-80",
+      "addr": ":80",
+      "handler": { "type": "tcp" },
+      "listener": { "type": "tcp" },
+      "forwarder": { "nodes": [ { "name": "forwarder-80", "addr": "{host}:80" } ] }
+    },
+    {
+      "name": "dns-unlock-sni-443",
+      "addr": ":443",
+      "handler": { "type": "sni" },
+      "listener": { "type": "tcp" },
+      "forwarder": { "nodes": [ { "name": "forwarder-443", "addr": "{host}:{port}" } ] }
+    }
+  ],
+  "resolvers": [
+    { "name": "google-dns", "addr": "8.8.8.8:53", "protocol": "udp" }
+  ]
 }
 EOT
 
@@ -202,7 +209,7 @@ WantedBy=multi-user.target
 EOT
 
     systemctl daemon-reload; systemctl enable "${DNS_GOST_SERVICE_NAME}"; systemctl restart "${DNS_GOST_SERVICE_NAME}"
-    if systemctl is-active --quiet "${DNS_GOST_SERVICE_NAME}"; then echo -e "\033[0;32mSUCCESS: Gost DNS解锁服务 (${DNS_GOST_SERVICE_NAME}) 已成功启动。\033[0m"; else echo -e "\033[0;31mERROR: Gost DNS解锁服务启动失败。\033[0m"; return 1; fi
+    if systemctl is-active --quiet "${DNS_GOST_SERVICE_NAME}"; then echo -e "\033[0;32mSUCCESS: Gost DNS解锁服务 (${DNS_GOST_SERVICE_NAME}) 已成功启动。\033[0m"; else echo -e "\033[0;31mERROR: Gost DNS解锁服务启动失败，请使用 'systemctl status gost-dns.service' 查看日志。\033[0m"; return 1; fi
     echo
 
     echo -e "\033[0;36mINFO: 正在创建 Dnsmasq 子配置文件...\033[0m"
@@ -397,8 +404,9 @@ EOF
         echo -e "\033[0;31mERROR: Dnsmasq服务重启失败。\033[0m"; return 1;
     fi
     echo
-    echo -e "\033[0;32m🎉 恭喜！全新的 DNS 解锁服务已成功安装！它现在独立于您其他的Gost转发服务运行。\033[0m"
+    echo -e "\033[0;32m🎉 恭喜！全新的 DNS 解锁服务 (Gost v3) 已成功安装！它现在独立于您其他的Gost转发服务运行。\033[0m"
 }
+
 
 uninstall_dns_unlock_server() {
     clear
@@ -408,12 +416,11 @@ uninstall_dns_unlock_server() {
     systemctl disable "${DNS_GOST_SERVICE_NAME}" 2>/dev/null
     rm -f "${DNS_GOST_SERVICE_PATH}"
     systemctl daemon-reload
-    # 注意：这里不再删除 gost 二进制文件，因为它可能被其他脚本共用
-    # rm -f /usr/local/bin/gost
+    # 卸载时同样删除gost二进制，因为安装时是脚本管理的
+    rm -f /usr/local/bin/gost
     
     echo -e "\033[0;36mINFO: 正在删除 Gost DNS解锁配置文件...\033[0m"
     if [ -f "${DNS_GOST_CONFIG_PATH}" ]; then
-        # 不再进行备份，因为这个配置文件是专属的，不包含用户自定义内容
         rm -f "${DNS_GOST_CONFIG_PATH}"
         echo -e "INFO: 配置文件已删除。"
     fi
