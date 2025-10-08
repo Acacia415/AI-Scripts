@@ -110,9 +110,8 @@ install_dns_unlock_server() {
     echo
 
     echo -e "\033[0;36mINFO: 正在安装 Gost v3 ...\033[0m"
-    # --- 使用你找到的、经过验证的 nightly build 链接 ---
-    FILENAME="gost_3.2.5-nightly.20250920_linux_amd64v3.tar.gz"
-    GOST_URL="https://github.com/go-gost/gost/releases/download/v3.2.5-nightly.20250920/${FILENAME}"
+    FILENAME="gost_3.2.4_linux_amd64.tar.gz"
+    GOST_URL="https://github.com/go-gost/gost/releases/download/v3.2.4/${FILENAME}"
 
     echo "INFO: 正在从以下地址下载Gost v3:"
     echo "$GOST_URL"
