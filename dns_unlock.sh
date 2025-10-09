@@ -5,11 +5,11 @@
 # Description: A standalone script to install, manage, and uninstall
 #              a DNS-based unlock service using Dnsmasq and Gost.
 #              Includes smart checks to co-exist with other Gost installations.
-# Version: 4.2 (Auto-fix for systemd-resolved conflict)
+# Version: 4.3 (Converted Gost config to YAML & Optimized handlers)
 # =================================================================
 
 # --- 专属配置 ---
-DNS_GOST_CONFIG_PATH="/etc/gost/dns-unlock-config.json"
+DNS_GOST_CONFIG_PATH="/etc/gost/dns-unlock-config.yml" # <-- 已更新为 .yml
 DNS_GOST_SERVICE_NAME="gost-dns.service"
 DNS_GOST_SERVICE_PATH="/etc/systemd/system/${DNS_GOST_SERVICE_NAME}"
 
@@ -48,8 +48,8 @@ check_port_53() {
                 fi
                 # 再次检查端口是否已释放
                 if lsof -i :53 -sTCP:LISTEN -P -n >/dev/null; then
-                     echo -e "\033[0;31mERROR: 端口 53 仍然被占用，请手动检查。\033[0m"
-                     return 1
+                    echo -e "\033[0;31mERROR: 端口 53 仍然被占用，请手动检查。\033[0m"
+                    return 1
                 fi
                 echo -e "\033[0;32mSUCCESS: 端口 53 冲突已解决。\033[0m"
                 return 0
@@ -61,8 +61,8 @@ check_port_53() {
 
         echo -e "\033[0;33mWARNING: 端口 53 (DNS) 已被进程 '${process_name}' 占用。\033[0m"
         if [[ "$process_name" != "dnsmasq" ]]; then
-             echo -e "\033[0;31mERROR: 请先停止 '${process_name}' 服务后再试。\033[0m"
-             return 1
+            echo -e "\033[0;31mERROR: 请先停止 '${process_name}' 服务后再试。\033[0m"
+            return 1
         fi
     fi
     return 0
@@ -147,8 +147,11 @@ install_dns_unlock_server() {
         echo -e "\033[0;36mINFO: 将使用现有版本，跳过安装步骤。\033[0m"
     else
         echo -e "\033[0;36mINFO: 正在安装 Gost v3 ...\033[0m"
-        FILENAME="gost_3.2.4_linux_amd64.tar.gz"
-        GOST_URL="https://github.com/go-gost/gost/releases/download/v3.2.4/${FILENAME}"
+        local gost_version="3.2.4"
+        local bit=$(uname -m)
+        if [[ "$bit" == "x86_64" ]]; then bit="amd64"; elif [[ "$bit" == "aarch64" ]]; then bit="armv8"; fi
+        FILENAME="gost_${gost_version}_linux_${bit}.tar.gz"
+        GOST_URL="https://github.com/go-gost/gost/releases/download/v${gost_version}/${FILENAME}"
 
         echo "INFO: 正在从以下地址下载Gost v3:"
         echo "$GOST_URL"
@@ -181,31 +184,36 @@ install_dns_unlock_server() {
     fi
     echo
     
-    echo -e "\033[0;36mINFO: 正在为DNS解锁服务创建 Gost v3 配置文件...\033[0m"
+    echo -e "\033[0;36mINFO: 正在为DNS解锁服务创建 Gost v3 配置文件 (YAML)...\033[0m"
     mkdir -p /etc/gost
     
+    # <--核心修改：使用YAML格式并优化handler
     tee "${DNS_GOST_CONFIG_PATH}" > /dev/null <<'EOT'
-{
-  "services": [
-    {
-      "name": "dns-unlock-sni-80",
-      "addr": ":80",
-      "handler": { "type": "tcp" },
-      "listener": { "type": "tcp" },
-      "forwarder": { "nodes": [ { "name": "forwarder-80", "addr": "{host}:80" } ] }
-    },
-    {
-      "name": "dns-unlock-sni-443",
-      "addr": ":443",
-      "handler": { "type": "sni" },
-      "listener": { "type": "tcp" },
-      "forwarder": { "nodes": [ { "name": "forwarder-443", "addr": "{host}:{port}" } ] }
-    }
-  ],
-  "resolvers": [
-    { "name": "google-dns", "addr": "8.8.8.8:53", "protocol": "udp" }
-  ]
-}
+services:
+- name: "dns-unlock-http-80"
+  addr: ":80"
+  listener:
+    type: "tcp"
+  handler:
+    type: "forward"
+  forwarder:
+    nodes:
+    - name: "forwarder-80"
+      addr: "{host}:80"
+- name: "dns-unlock-https-443"
+  addr: ":443"
+  listener:
+    type: "tcp"
+  handler:
+    type: "sni"
+  forwarder:
+    nodes:
+    - name: "forwarder-443"
+      addr: "{host}:{port}"
+resolvers:
+- name: "google-dns"
+  addr: "8.8.8.8:53"
+  protocol: "udp"
 EOT
 
     echo -e "\033[0;36mINFO: 正在创建Systemd服务 (${DNS_GOST_SERVICE_NAME})...\033[0m"
@@ -226,7 +234,7 @@ WantedBy=multi-user.target
 EOT
 
     systemctl daemon-reload; systemctl enable "${DNS_GOST_SERVICE_NAME}"; systemctl restart "${DNS_GOST_SERVICE_NAME}"
-    if systemctl is-active --quiet "${DNS_GOST_SERVICE_NAME}"; then echo -e "\033[0;32mSUCCESS: Gost DNS解锁服务 (${DNS_GOST_SERVICE_NAME}) 已成功启动。\033[0m"; else echo -e "\033[0;31mERROR: Gost DNS解锁服务启动失败，请使用 'systemctl status gost-dns.service' 查看日志。\033[0m"; return 1; fi
+    if systemctl is-active --quiet "${DNS_GOST_SERVICE_NAME}"; then echo -e "\033[0;32mSUCCESS: Gost DNS解锁服务 (${DNS_GOST_SERVICE_NAME}) 已成功启动。\033[0m"; else echo -e "\033[0;31mERROR: Gost DNS解锁服务启动失败，请使用 'systemctl status ${DNS_GOST_SERVICE_NAME}' 查看日志。\033[0m"; return 1; fi
     echo
 
     echo -e "\033[0;36mINFO: 正在创建 Dnsmasq 子配置文件...\033[0m"
@@ -375,8 +383,6 @@ address=/img.vm-movie.jp/${PUBLIC_IP}
 address=/saima.zlzd.xyz/${PUBLIC_IP}
 address=/challenges.cloudflare.com/${PUBLIC_IP}
 address=/ai.com/${PUBLIC_IP}
-address=/auth0.com/${PUBLIC_IP}
-address=/identrust.com/${PUBLIC_IP}
 address=/openai.com/${PUBLIC_IP}
 address=/cdn.oaistatic.com/${PUBLIC_IP}
 address=/aiv-cdn.net/${PUBLIC_IP}
@@ -394,6 +400,15 @@ address=/primevideo.org/${PUBLIC_IP}
 address=/primevideo.tv/${PUBLIC_IP}
 address=/pv-cdn.net/${PUBLIC_IP}
 address=/chatgpt.com/${PUBLIC_IP}
+address=/auth0.com/${PUBLIC_IP}
+address=/sora.com/${PUBLIC_IP}
+address=/gemini.google.com/${PUBLIC_IP}
+address=/proactivebackend-pa.googleapis.com/${PUBLIC_IP}
+address=/aistudio.google.com/${PUBLIC_IP}
+address=/alkalimakersuite-pa.clients6.google.com/${PUBLIC_IP}
+address=/generativelanguage.googleapis.com/${PUBLIC_IP}
+address=/copilot.microsoft.com/${PUBLIC_IP}
+address=/oaiusercontent.com/${PUBLIC_IP}
 address=/cdn.usefathom.com/${PUBLIC_IP}
 address=/anthropic.com/${PUBLIC_IP}
 address=/claude.ai/${PUBLIC_IP}
