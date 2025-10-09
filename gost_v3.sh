@@ -1,10 +1,12 @@
 #! /bin/bash
+# shellcheck disable=SC2154
+
 Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_prefix="\033[42;37m" && Font_color_suffix="\033[0m"
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
 Error="${Red_font_prefix}[错误]${Font_color_suffix}"
-shell_version="2.3.0" # Upgraded version and added smart check
-ct_new_ver="3.2.4" # GOST v3 版本 (Updated as per user request)
-gost_conf_path="/etc/gost/config.json"
+shell_version="2.3.1" # Version updated after YAML bug fixes
+ct_new_ver="3.2.4" # GOST v3 版本
+gost_conf_path="/etc/gost/config.yml" # Using YAML config file
 raw_conf_path="/etc/gost/rawconf"
 backup_path="/root/gost_backups"
 
@@ -34,7 +36,7 @@ function check_sys() {
   bit=$(uname -m)
   if test "$bit" != "x86_64"; then
     echo "请输入你的芯片架构，/386/armv5/armv6/armv7/armv8"
-    read bit
+    read -r bit
   else
     bit="amd64"
   fi
@@ -112,7 +114,6 @@ EOF
 }
 
 function Install_ct() {
-  # --- 新增：智能检查 ---
   if command -v gost >/dev/null 2>&1; then
     echo -e "\033[0;33mWARNING: 检测到Gost已安装: $(command -v gost) ($(gost -V))\033[0m"
     read -p "是否继续并覆盖现有版本为 v${ct_new_ver}? (y/N): " choice
@@ -151,9 +152,7 @@ function Install_ct() {
   create_service_file
   
   if [[ ! -f ${gost_conf_path} ]]; then
-    echo '{
-  "services": []
-}' > ${gost_conf_path}
+    echo 'services: []' > "${gost_conf_path}"
   fi
   
   chmod -R 755 /etc/gost
@@ -179,8 +178,8 @@ function checknew() {
   fi
   checknew=$(gost -V 2>&1 | awk '{print $2}')
   echo "你的gost版本为:""$checknew"""
-  echo -n 是否更新\(y/n\)\:
-  read checknewnum
+  echo -n "是否更新(y/n): "
+  read -r checknewnum
   if [[ "$checknewnum" == "y" ]] || [[ "$checknewnum" == "Y" ]]; then
     Install_ct
   else
@@ -189,20 +188,34 @@ function checknew() {
 }
 
 function Uninstall_ct() {
+  echo -e "${Info} 正在停止并禁用gost后台服务..."
   systemctl stop gost
   systemctl disable gost
-  rm -rf /usr/bin/gost
-  rm -rf /usr/lib/systemd/system/gost.service
-  rm -rf /etc/gost
+  
+  echo -e "${Info} 正在删除gost核心程序和服务文件..."
+  rm -f /usr/bin/gost
+  rm -f /usr/lib/systemd/system/gost.service
   systemctl daemon-reload
-  echo "gost转发服务已成功删除"
+  
+  # 检查配置目录是否存在
+  if [ -d "/etc/gost" ]; then
+    echo -e "${Info} 正在删除由本脚本生成的配置文件..."
+    # 精确删除脚本创建的2个文件
+    rm -f /etc/gost/config.yml
+    rm -f /etc/gost/rawconf
+    echo -e "${Info} 已删除: /etc/gost/config.yml"
+    echo -e "${Info} 已删除: /etc/gost/rawconf"
+    echo -e "${Info} 保留 /etc/gost 目录下的其他文件。"
+  fi
+  
+  echo -e "\n${Green_font_prefix}[成功]${Font_color_suffix} gost卸载完成。"
 }
 
 function Start_ct() { check_service_exists && systemctl start gost && echo "已启动"; }
 function Stop_ct() { check_service_exists && systemctl stop gost && echo "已停止"; }
-function Restart_ct() { regenerate_json_config && restart_gost_safely; }
+function Restart_ct() { regenerate_yaml_config && restart_gost_safely; }
 
-# --- 配置生成核心逻辑 ---
+# --- 配置生成核心逻辑 (YAML Version) ---
 
 function eachconf_retrieve() {
   d_server=${trans_conf#*#}
@@ -213,103 +226,229 @@ function eachconf_retrieve() {
   is_encrypt=${flag_s_port%/*}
 }
 
-function regenerate_json_config() {
-    local services_json_parts=()
-    local chains_json_parts=()
+function regenerate_yaml_config() {
+    local chain_definitions=""
     local has_chains=false
+
+    echo "services:" > "$gost_conf_path"
 
     if [[ -s "$raw_conf_path" ]]; then
         while IFS= read -r trans_conf || [[ -n "$trans_conf" ]]; do
             eachconf_retrieve
-            service_name="service_$(echo "${is_encrypt}_${s_port}_${d_ip}_${d_port}" | md5sum | head -c 8)"
+            local service_name="service_$(echo "${is_encrypt}_${s_port}_${d_ip}_${d_port}" | md5sum | head -c 8)"
             
-            # --- Build Service JSON String ---
             case "$is_encrypt" in
                 nonencrypt)
-                    services_json_parts+=("{\"name\":\"${service_name}_tcp\",\"addr\":\":${s_port}\",\"handler\":{\"type\":\"tcp\"},\"listener\":{\"type\":\"tcp\"},\"forwarder\":{\"nodes\":[{\"name\":\"target\",\"addr\":\"${d_ip}:${d_port}\"}]}}")
-                    services_json_parts+=("{\"name\":\"${service_name}_udp\",\"addr\":\":${s_port}\",\"handler\":{\"type\":\"udp\"},\"listener\":{\"type\":\"udp\"},\"forwarder\":{\"nodes\":[{\"name\":\"target\",\"addr\":\"${d_ip}:${d_port}\"}]}}")
+                    cat >> "$gost_conf_path" <<EOF
+- name: "${service_name}_tcp"
+  addr: ":${s_port}"
+  listener:
+    type: "tcp"
+  handler:
+    type: "forward"
+  forwarder:
+    nodes:
+    - name: "target"
+      addr: "${d_ip}:${d_port}"
+- name: "${service_name}_udp"
+  addr: ":${s_port}"
+  listener:
+    type: "udp"
+  handler:
+    type: "forward"
+  forwarder:
+    nodes:
+    - name: "target"
+      addr: "${d_ip}:${d_port}"
+EOF
                     ;;
                 encrypt*|peertls|peerws|peerwss)
-                    services_json_parts+=("{\"name\":\"${service_name}\",\"addr\":\":${s_port}\",\"handler\":{\"type\":\"relay\",\"chain\":\"chain_${service_name}\"},\"listener\":{\"type\":\"tcp\"}}")
                     has_chains=true
+                    cat >> "$gost_conf_path" <<EOF
+- name: "${service_name}"
+  addr: ":${s_port}"
+  handler:
+    type: "relay"
+    chain: "chain_${service_name}"
+  listener:
+    type: "tcp"
+EOF
                     ;;
                 decrypttls|decryptwss)
-                    local tls_config=""
-                    if [ -f "$HOME/gost_cert/cert.pem" ] && [ -f "$HOME/gost_cert/key.pem" ]; then
-                        tls_config=",\"tls\":{\"certFile\":\"/root/gost_cert/cert.pem\",\"keyFile\":\"/root/gost_cert/key.pem\"}"
-                    fi
                     local listener_type=${is_encrypt//decrypt/}
-                    services_json_parts+=("{\"name\":\"${service_name}\",\"addr\":\":${s_port}\",\"handler\":{\"type\":\"relay\"},\"listener\":{\"type\":\"${listener_type}\"${tls_config}},\"forwarder\":{\"nodes\":[{\"name\":\"target\",\"addr\":\"${d_ip}:${d_port}\"}]}}")
+                    cat >> "$gost_conf_path" <<EOF
+- name: "${service_name}"
+  addr: ":${s_port}"
+  handler:
+    type: "relay"
+  listener:
+    type: "${listener_type}"
+EOF
+                    if [ -f "$HOME/gost_cert/cert.pem" ] && [ -f "$HOME/gost_cert/key.pem" ]; then
+                        cat >> "$gost_conf_path" <<EOF
+    tls:
+      certFile: "/root/gost_cert/cert.pem"
+      keyFile: "/root/gost_cert/key.pem"
+EOF
+                    fi
+                    cat >> "$gost_conf_path" <<EOF
+  forwarder:
+    nodes:
+    - name: "target"
+      addr: "${d_ip}:${d_port}"
+EOF
                     ;;
                 decryptws)
-                    services_json_parts+=("{\"name\":\"${service_name}\",\"addr\":\":${s_port}\",\"handler\":{\"type\":\"relay\"},\"listener\":{\"type\":\"ws\"},\"forwarder\":{\"nodes\":[{\"name\":\"target\",\"addr\":\"${d_ip}:${d_port}\"}]}}")
+                    cat >> "$gost_conf_path" <<EOF
+- name: "${service_name}"
+  addr: ":${s_port}"
+  handler:
+    type: "relay"
+  listener:
+    type: "ws"
+  forwarder:
+    nodes:
+    - name: "target"
+      addr: "${d_ip}:${d_port}"
+EOF
                     ;;
                 ss)
-                    services_json_parts+=("{\"name\":\"${service_name}\",\"addr\":\":${d_port}\",\"handler\":{\"type\":\"ss\",\"auth\":{\"password\":\"${s_port}\"},\"metadata\":{\"method\":\"${d_ip}\"}},\"listener\":{\"type\":\"tcp\"}}")
+                    cat >> "$gost_conf_path" <<EOF
+- name: "${service_name}"
+  addr: ":${d_port}"
+  handler:
+    type: "ss"
+    auth:
+      password: "${s_port}"
+    metadata:
+      method: "${d_ip}"
+  listener:
+    type: "tcp"
+EOF
                     ;;
                 socks)
-                    services_json_parts+=("{\"name\":\"${service_name}\",\"addr\":\":${d_port}\",\"handler\":{\"type\":\"socks5\",\"auth\":{\"username\":\"${d_ip}\",\"password\":\"${s_port}\"}},\"listener\":{\"type\":\"tcp\"}}")
+                    cat >> "$gost_conf_path" <<EOF
+- name: "${service_name}"
+  addr: ":${d_port}"
+  handler:
+    type: "socks5"
+    auth:
+      username: "${d_ip}"
+      password: "${s_port}"
+  listener:
+    type: "tcp"
+EOF
                     ;;
                 http)
-                    services_json_parts+=("{\"name\":\"${service_name}\",\"addr\":\":${d_port}\",\"handler\":{\"type\":\"http\",\"auth\":{\"username\":\"${d_ip}\",\"password\":\"${s_port}\"}},\"listener\":{\"type\":\"tcp\"}}")
+                    cat >> "$gost_conf_path" <<EOF
+- name: "${service_name}"
+  addr: ":${d_port}"
+  handler:
+    type: "http"
+    auth:
+      username: "${d_ip}"
+      password: "${s_port}"
+  listener:
+    type: "tcp"
+EOF
                     ;;
                 peerno)
-                    local nodes_json=$(awk '{printf "%s{\"name\":\"node_%s\",\"addr\":\"%s\"}", (NR==1?"":","), $0, $0}' "/root/$d_ip.txt" | tr -d '\n' | sed 's/:/_/g')
-                    services_json_parts+=("{\"name\":\"${service_name}_tcp\",\"addr\":\":${s_port}\",\"handler\":{\"type\":\"tcp\"},\"listener\":{\"type\":\"tcp\"},\"forwarder\":{\"nodes\":[${nodes_json}],\"selector\":{\"strategy\":\"${d_port}\"}}}")
-                    services_json_parts+=("{\"name\":\"${service_name}_udp\",\"addr\":\":${s_port}\",\"handler\":{\"type\":\"udp\"},\"listener\":{\"type\":\"udp\"},\"forwarder\":{\"nodes\":[${nodes_json}],\"selector\":{\"strategy\":\"${d_port}\"}}}")
+                    local nodes_yaml=""
+                    while IFS= read -r node_addr; do
+                        local node_name
+                        node_name=$(echo "$node_addr" | tr ':' '_')
+                        nodes_yaml+=$(printf '\n    - name: "node_%s"\n      addr: "%s"' "$node_name" "$node_addr")
+                    done < "/root/$d_ip.txt"
+
+                    cat >> "$gost_conf_path" <<EOF
+- name: "${service_name}_tcp"
+  addr: ":${s_port}"
+  listener:
+    type: "tcp"
+  handler:
+    type: "forward"
+  forwarder:
+    selector:
+      strategy: "${d_port}"
+    nodes:${nodes_yaml}
+- name: "${service_name}_udp"
+  addr: ":${s_port}"
+  listener:
+    type: "udp"
+  handler:
+    type: "forward"
+  forwarder:
+    selector:
+      strategy: "${d_port}"
+    nodes:${nodes_yaml}
+EOF
                     ;;
             esac
 
-            # --- Build Chain JSON String if needed ---
             case "$is_encrypt" in
                 encrypttls|encryptwss)
-                    local tls_dialer_opts=""
-                    if [[ ${is_cert} == [Yy] ]]; then tls_dialer_opts=",\"tls\":{\"secure\":true,\"serverName\":\"${d_ip}\"}"; fi
                     local dialer_type=${is_encrypt//encrypt/}
-                    chains_json_parts+=("{\"name\":\"chain_${service_name}\",\"hops\":[{\"name\":\"hop_${service_name}\",\"nodes\":[{\"name\":\"node_${service_name}\",\"addr\":\"${d_ip}:${d_port}\",\"connector\":{\"type\":\"relay\"},\"dialer\":{\"type\":\"${dialer_type}\"${tls_dialer_opts}}}]}]}")
+                    local tls_dialer_opts=""
+                    if [[ ${is_cert} == [Yy] ]]; then
+                        tls_dialer_opts=$(printf '\n      tls:\n        secure: true\n        serverName: "%s"' "${d_ip}")
+                    fi
+                    chain_definitions+=$(cat <<EOF
+- name: "chain_${service_name}"
+  hops:
+  - name: "hop_${service_name}"
+    nodes:
+    - name: "node_${service_name}"
+      addr: "${d_ip}:${d_port}"
+      connector:
+        type: "relay"
+      dialer:
+        type: "${dialer_type}"${tls_dialer_opts}
+EOF
+)
                     ;;
                 encryptws)
-                    chains_json_parts+=("{\"name\":\"chain_${service_name}\",\"hops\":[{\"name\":\"hop_${service_name}\",\"nodes\":[{\"name\":\"node_${service_name}\",\"addr\":\"${d_ip}:${d_port}\",\"connector\":{\"type\":\"relay\"},\"dialer\":{\"type\":\"ws\"}}]}]}")
+                     chain_definitions+=$(cat <<EOF
+- name: "chain_${service_name}"
+  hops:
+  - name: "hop_${service_name}"
+    nodes:
+    - name: "node_${service_name}"
+      addr: "${d_ip}:${d_port}"
+      connector:
+        type: "relay"
+      dialer:
+        type: "ws"
+EOF
+)
                     ;;
                 peertls|peerws|peerwss)
+                    has_chains=true # This was missing, chains would not be created for peer* types
                     local dialer_type=${is_encrypt//peer/}
-                    local nodes_json=$(awk -v dt="$dialer_type" '{printf "%s{\"name\":\"node_%s\",\"addr\":\"%s\",\"connector\":{\"type\":\"relay\"},\"dialer\":{\"type\":\"%s\"}}", (NR==1?"":","), $0, $0, dt}' "/root/$d_ip.txt" | tr -d '\n' | sed 's/:/_/g')
-                    chains_json_parts+=("{\"name\":\"chain_${service_name}\",\"hops\":[{\"name\":\"hop_${service_name}\",\"nodes\":[${nodes_json}],\"selector\":{\"strategy\":\"${d_port}\"}}]}")
+                    local nodes_yaml=""
+                    while IFS= read -r node_addr; do
+                        local node_name
+                        node_name=$(echo "$node_addr" | tr ':' '_')
+                        nodes_yaml+=$(printf '\n    - name: "node_%s"\n      addr: "%s"\n      connector:\n        type: "relay"\n      dialer:\n        type: "%s"' "$node_name" "$node_addr" "$dialer_type")
+                    done < "/root/$d_ip.txt"
+
+                    chain_definitions+=$(cat <<EOF
+- name: "chain_${service_name}"
+  hops:
+  - name: "hop_${service_name}"
+    selector:
+      strategy: "${d_port}"
+    nodes:${nodes_yaml}
+EOF
+)
                     ;;
             esac
         done < "$raw_conf_path"
     fi
 
-    # --- Assemble the final JSON file ---
-    {
-        echo "{"
-        echo "  \"services\": ["
-        local num_services=${#services_json_parts[@]}
-        for i in "${!services_json_parts[@]}"; do
-            echo -n "    ${services_json_parts[$i]}"
-            if [[ $i -lt $((num_services - 1)) ]]; then
-                echo ","
-            else
-                echo ""
-            fi
-        done
-        echo "  ]"
-        if [ "$has_chains" = true ]; then
-            echo ","
-            echo "  \"chains\": ["
-            local num_chains=${#chains_json_parts[@]}
-            for i in "${!chains_json_parts[@]}"; do
-                echo -n "    ${chains_json_parts[$i]}"
-                if [[ $i -lt $((num_chains - 1)) ]]; then
-                    echo ","
-                else
-                    echo ""
-                fi
-            done
-            echo "  ]"
-        fi
-        echo "}"
-    } > "$gost_conf_path"
+    if [ "$has_chains" = true ]; then
+        echo "chains:" >> "$gost_conf_path"
+        echo -e "${chain_definitions}" >> "$gost_conf_path"
+    fi
 }
 
 
@@ -445,7 +584,7 @@ function read_d_port() {
 }
 
 function writerawconf() {
-  echo "${flag_a}/${flag_b}#${flag_c}#${flag_d}" >> $raw_conf_path
+  echo "${flag_a}/${flag_b}#${flag_c}#${flag_d}" >> "$raw_conf_path"
 }
 
 function rawconf() {
@@ -476,7 +615,7 @@ function add_rule_menu() {
     if [ "$add_choice" == "1" ]; then
       rawconf
       if [ "$numprotocol" != "00" ]; then
-        regenerate_json_config
+        regenerate_yaml_config
         restart_gost_safely
       fi
     elif [ "$add_choice" == "00" ]; then
@@ -500,10 +639,10 @@ function delete_rule_menu() {
     if [ "$numdelete" == "00" ]; then
       break
     elif echo "$numdelete" | grep -q '^[0-9][0-9]*$'; then
-      total_lines=$(sed -n '$=' $raw_conf_path)
+      total_lines=$(sed -n '$=' "$raw_conf_path")
       if [ "$numdelete" -gt 0 ] && [ "$numdelete" -le "$total_lines" ]; then
-        sed -i "${numdelete}d" $raw_conf_path
-        regenerate_json_config
+        sed -i "${numdelete}d" "$raw_conf_path"
+        regenerate_yaml_config
         restart_gost_safely
         echo -e "${Info} 配置已删除。"
       else
@@ -553,7 +692,7 @@ function backup_gost() {
     echo -e "${Info} 开始备份gost配置..."
     mkdir -p ${backup_path}
     local backup_file="${backup_path}/gost_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
-    tar -zcvf ${backup_file} -C /etc gost
+    tar -zcvf "${backup_file}" -C /etc gost
     if [ $? -eq 0 ]; then
         echo -e "${Info} 备份成功！文件位于: ${Green_font_prefix}${backup_file}${Font_color_suffix}"
     else
@@ -563,20 +702,21 @@ function backup_gost() {
 }
 
 function restore_gost() {
-    if [ ! -d "${backup_path}" ] || [ -z "$(ls -A ${backup_path}/*.tar.gz 2>/dev/null)" ]; then
+    if [ ! -d "${backup_path}" ] || [ -z "$(ls -A "${backup_path}"/*.tar.gz 2>/dev/null)" ]; then
         echo -e "${Error} 未找到任何备份文件。"
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return
     fi
     echo -e "可用备份文件列表:"
-    select backup_file in $(ls -r ${backup_path}/*.tar.gz); do
+    # shellcheck disable=SC2012
+    select backup_file in $(ls -r "${backup_path}"/*.tar.gz); do
         [ -n "${backup_file}" ] && break || echo "无效选择"
     done
     read -p "这将覆盖当前所有配置，是否继续? [y/N]: " confirm
     if [[ ! ${confirm} =~ ^[yY]$ ]]; then
         echo -e "已取消恢复操作。"; return
     fi
-    tar -zxvf ${backup_file} -C /
+    tar -zxvf "${backup_file}" -C /
     if [ $? -eq 0 ]; then
         echo -e "${Info} 恢复成功！正在重启gost服务..."
         restart_gost_safely
@@ -588,8 +728,8 @@ function restore_gost() {
 
 function main_menu() {
   clear
-  update_sh
-  echo && echo -e "gost v3 一键安装配置脚本 ${Red_font_prefix}[v${shell_version}]${Font_color_suffix}"
+  # update_sh # Temporarily disable auto-update check
+  echo && echo -e "gost v3 一键安装配置脚本 ${Red_font_prefix}[v${shell_version}]${Font_color_suffix} (YAML-Fixed)"
   echo -e "
   ${Green_font_prefix}1.${Font_color_suffix} 安装 gost v3
   ${Green_font_prefix}2.${Font_color_suffix} 更新 gost v3
@@ -620,7 +760,7 @@ function main_menu() {
     7)
       rawconf
       if [ "$numprotocol" != "00" ]; then
-        regenerate_json_config
+        regenerate_yaml_config
         restart_gost_safely
         add_rule_menu
       fi
