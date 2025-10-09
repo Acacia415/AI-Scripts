@@ -1,10 +1,11 @@
 #!/bin/bash
 
 # =================================================================
-# DNS & Gost Unlock Service Manager (Conflict-Proof Version)
+# DNS & Gost Unlock Service Manager (Conflict-Aware & Full-Featured Version)
 # Description: A standalone script to install, manage, and uninstall
 #              a DNS-based unlock service using Dnsmasq and Gost.
-# Version: 4.0 (Final - Using user-provided working URL)
+#              Includes smart checks to co-exist with other Gost installations.
+# Version: 4.1 (Smart-Check Integrated)
 # =================================================================
 
 # --- 专属配置 ---
@@ -63,7 +64,7 @@ dns_unlock_menu() {
     while true; do
         clear
         echo -e "\033[0;36m=============================================\033[0m"
-        echo -e "\033[0;33m          DNS 解锁服务管理 (Gost v3 版)        \033[0m"
+        echo -e "\033[0;33m         DNS 解锁服务管理 (Gost v3 版)         \033[0m"
         echo -e "\033[0;36m=============================================\033[0m"
         echo " --- 服务端管理 ---"
         echo "  1. 安装/更新 DNS 解锁服务"
@@ -106,61 +107,49 @@ install_dns_unlock_server() {
     apt-get purge -y sniproxy >/dev/null 2>&1
     apt-get --fix-broken install -y >/dev/null 2>&1
     rm -f /etc/dnsmasq.d/custom_netflix.conf
-    rm -f /usr/local/bin/gost
+    # 清理动作不应删除gost主程序，智能检查会处理
     echo
 
-    echo -e "\033[0;36mINFO: 正在安装 Gost v3 ...\033[0m"
-    FILENAME="gost_3.2.4_linux_amd64.tar.gz"
-    GOST_URL="https://github.com/go-gost/gost/releases/download/v3.2.4/${FILENAME}"
+    # --- 智能检查Gost是否已安装 ---
+    local GOST_EXEC_PATH
+    GOST_EXEC_PATH=$(command -v gost)
 
-    echo "INFO: 正在从以下地址下载Gost v3:"
-    echo "$GOST_URL"
-    # --- 使用 curl -L 下载 ---
-    if ! curl -L -o "${FILENAME}" "${GOST_URL}"; then
-        echo -e "\033[0;31mERROR: Gost v3 下载失败！ (curl 退出码: $?)\033[0m"
-        rm -f "${FILENAME}"
-        return 1
-    fi
-
-    if ! file "${FILENAME}" | grep -q 'gzip compressed data'; then
-        echo -e "\033[0;31mERROR: 下载的文件不是有效的压缩包 (可能是一个HTML错误页面)。请手动检查上述URL。\033[0m"
-        rm -f "${FILENAME}"
-        return 1
-    fi
-    echo "INFO: Gost下载成功。"
-
-    echo "INFO: 正在解压文件: ${FILENAME}"
-    if ! tar -xzf "${FILENAME}"; then
-        echo -e "\033[0;31mERROR: Gost解压失败！\033[0m"
-        rm -f "${FILENAME}"
-        return 1
-    fi
-    echo "INFO: 解压成功。"
-    
-    # 假设解压后可执行文件名是 gost
-    GOST_EXEC_PATH="gost" 
-    if [[ ! -f "$GOST_EXEC_PATH" ]]; then
-        echo -e "\033[0;31mERROR: 在解压文件中未找到'${GOST_EXEC_PATH}'可执行文件。\033[0m"
-        rm -f "${FILENAME}"
-        rm -f "${GOST_EXEC_PATH}"
-        return 1
-    fi
-
-    echo "INFO: 正在移动 'gost' 到 /usr/local/bin/gost"
-    chmod +x "${GOST_EXEC_PATH}"
-    if ! mv "${GOST_EXEC_PATH}" /usr/local/bin/gost; then
-         echo -e "\033[0;31mERROR: 移动gost文件失败，请检查权限。\033[0m"
-         return 1
-    fi
-    echo "INFO: 正在清理临时文件..."
-    rm -f "${FILENAME}"
-    echo "INFO: 清理完成。"
-
-    if ! command -v gost &> /dev/null; then 
-        echo -e "\033[0;31mERROR: Gost 安装最终失败，未知错误。\033[0m"
-        return 1
+    if [[ -n "$GOST_EXEC_PATH" ]]; then
+        echo -e "\033[0;32m检测到 Gost 已安装: ${GOST_EXEC_PATH} ($(gost -V))\033[0m"
+        echo -e "\033[0;36mINFO: 将使用现有版本，跳过安装步骤。\033[0m"
     else
-        echo -e "\033[0;32mSUCCESS: Gost v3 已成功安装/确认存在。版本：$(gost -V)\033[0m"
+        echo -e "\033[0;36mINFO: 正在安装 Gost v3 ...\033[0m"
+        FILENAME="gost_3.2.4_linux_amd64.tar.gz"
+        GOST_URL="https://github.com/go-gost/gost/releases/download/v3.2.4/${FILENAME}"
+
+        echo "INFO: 正在从以下地址下载Gost v3:"
+        echo "$GOST_URL"
+        if ! curl -L -o "${FILENAME}" "${GOST_URL}"; then
+            echo -e "\033[0;31mERROR: Gost v3 下载失败！ (curl 退出码: $?)\033[0m"
+            rm -f "${FILENAME}"
+            return 1
+        fi
+
+        if ! file "${FILENAME}" | grep -q 'gzip compressed data'; then
+            echo -e "\033[0;31mERROR: 下载的文件不是有效的压缩包。请手动检查上述URL。\033[0m"
+            rm -f "${FILENAME}"
+            return 1
+        fi
+
+        tar -xzf "${FILENAME}" || { echo -e "\033[0;31mERROR: Gost解压失败！\033[0m"; rm -f "${FILENAME}"; return 1; }
+        
+        chmod +x "gost"
+        mv "gost" /usr/local/bin/gost || { echo -e "\033[0;31mERROR: 移动gost文件失败，请检查权限。\033[0m"; return 1; }
+        
+        rm -f "${FILENAME}"
+        GOST_EXEC_PATH="/usr/local/bin/gost" # 更新路径变量
+        
+        if ! command -v gost &> /dev/null; then 
+            echo -e "\033[0;31mERROR: Gost 安装最终失败，未知错误。\033[0m"
+            return 1
+        else
+            echo -e "\033[0;32mSUCCESS: Gost v3 已成功安装。版本：$(gost -V)\033[0m"
+        fi
     fi
     echo
     
@@ -192,6 +181,7 @@ install_dns_unlock_server() {
 EOT
 
     echo -e "\033[0;36mINFO: 正在创建Systemd服务 (${DNS_GOST_SERVICE_NAME})...\033[0m"
+    # 使用检测到的或新安装的gost路径，确保兼容性
     tee "${DNS_GOST_SERVICE_PATH}" > /dev/null <<EOT
 [Unit]
 Description=GOST DNS Unlock Service
@@ -199,7 +189,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/gost -C ${DNS_GOST_CONFIG_PATH}
+ExecStart=${GOST_EXEC_PATH} -C ${DNS_GOST_CONFIG_PATH}
 Restart=always
 User=root
 
@@ -374,6 +364,15 @@ address=/primevideo.org/${PUBLIC_IP}
 address=/primevideo.tv/${PUBLIC_IP}
 address=/pv-cdn.net/${PUBLIC_IP}
 address=/chatgpt.com/${PUBLIC_IP}
+address=/auth0.com/${PUBLIC_IP}
+address=/sora.com/${PUBLIC_IP}
+address=/gemini.google.com/${PUBLIC_IP}
+address=/proactivebackend-pa.googleapis.com/${PUBLIC_IP}
+address=/aistudio.google.com/${PUBLIC_IP}
+address=/alkalimakersuite-pa.clients6.google.com/${PUBLIC_IP}
+address=/generativelanguage.googleapis.com/${PUBLIC_IP}
+address=/copilot.microsoft.com/${PUBLIC_IP}
+address=/oaiusercontent.com/${PUBLIC_IP}
 address=/cdn.usefathom.com/${PUBLIC_IP}
 address=/anthropic.com/${PUBLIC_IP}
 address=/claude.ai/${PUBLIC_IP}
@@ -414,17 +413,20 @@ uninstall_dns_unlock_server() {
     systemctl stop "${DNS_GOST_SERVICE_NAME}" 2>/dev/null
     systemctl disable "${DNS_GOST_SERVICE_NAME}" 2>/dev/null
     rm -f "${DNS_GOST_SERVICE_PATH}"
+    rm -f "${DNS_GOST_CONFIG_PATH}"
     systemctl daemon-reload
-    # 卸载时同样删除gost二进制，因为安装时是脚本管理的
-    rm -f /usr/local/bin/gost
     
-    echo -e "\033[0;36mINFO: 正在删除 Gost DNS解锁配置文件...\033[0m"
-    if [ -f "${DNS_GOST_CONFIG_PATH}" ]; then
-        rm -f "${DNS_GOST_CONFIG_PATH}"
-        echo -e "INFO: 配置文件已删除。"
+    # --- 智能卸载检查 ---
+    # 定义主脚本的服务路径 (根据gost.sh脚本通常的路径)
+    MAIN_GOST_SERVICE_PATH="/usr/lib/systemd/system/gost.service" 
+    if [[ -f "${MAIN_GOST_SERVICE_PATH}" ]]; then
+        echo -e "\033[0;33mWARNING: 检测到主Gost转发服务(${MAIN_GOST_SERVICE_PATH})存在。\033[0m"
+        echo -e "\033[0;36mINFO: 为避免破坏主服务，将不会删除 'gost' 程序本体。\033[0m"
+    else
+        echo -e "\033[0;36mINFO: 未检测到其他Gost服务，将一并删除 'gost' 程序本体。\033[0m"
+        # 卸载时同样删除gost二进制，因为安装时是脚本管理的
+        rm -f "$(command -v gost)"
     fi
-    
-    echo -e "\033[0;32mSUCCESS: Gost DNS解锁服务已卸载。\033[0m"
     echo
     
     echo -e "\033[0;36mINFO: 正在卸载 Dnsmasq 服务及相关配置...\033[0m"
