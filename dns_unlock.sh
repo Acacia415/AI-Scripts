@@ -5,7 +5,7 @@
 # Description: A standalone script to install, manage, and uninstall
 #              a DNS-based unlock service using Dnsmasq and Gost.
 #              Includes smart checks to co-exist with other Gost installations.
-# Version: 4.1 (Smart-Check Integrated)
+# Version: 4.2 (Auto-fix for systemd-resolved conflict)
 # =================================================================
 
 # --- 专属配置 ---
@@ -27,11 +27,39 @@ check_port_53() {
     if ! command -v lsof &> /dev/null; then apt-get update >/dev/null 2>&1 && apt-get install -y lsof >/dev/null; fi
     if lsof -i :53 -sTCP:LISTEN -P -n >/dev/null; then
         local process_name=$(ps -p $(lsof -i :53 -sTCP:LISTEN -P -n -t) -o comm=)
-        echo -e "\033[0;33mWARNING: 端口 53 (DNS) 已被进程 '${process_name}' 占用。\033[0m"
+        
         if [[ "$process_name" == "systemd-resolve" ]]; then
-            echo -e "\033[0;31mERROR: 请先禁用 systemd-resolved (sudo systemctl disable --now systemd-resolved) 后重试。\033[0m"
-            return 1
+            echo -e "\033[0;33mWARNING: 端口 53 (DNS) 已被系统服务 'systemd-resolved' 占用。\033[0m"
+            read -p "是否允许脚本自动禁用该服务并修复DNS配置? (Y/n): " choice
+            if [[ "$choice" =~ ^[yY]$ ]] || [[ -z "$choice" ]]; then
+                echo -e "\033[0;36mINFO: 正在停止并禁用 systemd-resolved...\033[0m"
+                systemctl disable --now systemd-resolved
+                
+                # 等待端口释放
+                sleep 2
+
+                # 修复由 systemd-resolved 管理的 /etc/resolv.conf
+                if [ -L /etc/resolv.conf ]; then
+                    echo -e "\033[0;36mINFO: /etc/resolv.conf 是一个符号链接，正在重新创建它以确保服务器网络正常...\033[0m"
+                    rm /etc/resolv.conf
+                    echo "nameserver 8.8.8.8" | tee /etc/resolv.conf > /dev/null
+                    echo "nameserver 1.1.1.1" | tee -a /etc/resolv.conf > /dev/null
+                    echo -e "\033[0;32mSUCCESS: /etc/resolv.conf 已修复。\033[0m"
+                fi
+                # 再次检查端口是否已释放
+                if lsof -i :53 -sTCP:LISTEN -P -n >/dev/null; then
+                     echo -e "\033[0;31mERROR: 端口 53 仍然被占用，请手动检查。\033[0m"
+                     return 1
+                fi
+                echo -e "\033[0;32mSUCCESS: 端口 53 冲突已解决。\033[0m"
+                return 0
+            else
+                echo -e "\033[0;31mERROR: 操作已取消。请手动禁用 systemd-resolved (sudo systemctl disable --now systemd-resolved) 后重试。\033[0m"
+                return 1
+            fi
         fi
+
+        echo -e "\033[0;33mWARNING: 端口 53 (DNS) 已被进程 '${process_name}' 占用。\033[0m"
         if [[ "$process_name" != "dnsmasq" ]]; then
              echo -e "\033[0;31mERROR: 请先停止 '${process_name}' 服务后再试。\033[0m"
              return 1
@@ -347,6 +375,8 @@ address=/img.vm-movie.jp/${PUBLIC_IP}
 address=/saima.zlzd.xyz/${PUBLIC_IP}
 address=/challenges.cloudflare.com/${PUBLIC_IP}
 address=/ai.com/${PUBLIC_IP}
+address=/auth0.com/${PUBLIC_IP}
+address=/identrust.com/${PUBLIC_IP}
 address=/openai.com/${PUBLIC_IP}
 address=/cdn.oaistatic.com/${PUBLIC_IP}
 address=/aiv-cdn.net/${PUBLIC_IP}
@@ -364,15 +394,6 @@ address=/primevideo.org/${PUBLIC_IP}
 address=/primevideo.tv/${PUBLIC_IP}
 address=/pv-cdn.net/${PUBLIC_IP}
 address=/chatgpt.com/${PUBLIC_IP}
-address=/auth0.com/${PUBLIC_IP}
-address=/sora.com/${PUBLIC_IP}
-address=/gemini.google.com/${PUBLIC_IP}
-address=/proactivebackend-pa.googleapis.com/${PUBLIC_IP}
-address=/aistudio.google.com/${PUBLIC_IP}
-address=/alkalimakersuite-pa.clients6.google.com/${PUBLIC_IP}
-address=/generativelanguage.googleapis.com/${PUBLIC_IP}
-address=/copilot.microsoft.com/${PUBLIC_IP}
-address=/oaiusercontent.com/${PUBLIC_IP}
 address=/cdn.usefathom.com/${PUBLIC_IP}
 address=/anthropic.com/${PUBLIC_IP}
 address=/claude.ai/${PUBLIC_IP}
@@ -520,7 +541,7 @@ manage_iptables_rules() {
                 if ! iptables -C INPUT -p tcp --dport $port -j DROP &>/dev/null; then iptables -A INPUT -p tcp --dport $port -j DROP; fi
                 if [[ "$port" == "53" ]]; then if ! iptables -C INPUT -p udp --dport $port -j DROP &>/dev/null; then iptables -A INPUT -p udp --dport $port -j DROP; fi; fi
             done
-            echo -e "\033[0;32m'默认拒绝' 规则已应用/确认存在。\033[0m"
+            echo -e "\032m'默认拒绝' 规则已应用/确认存在。\033[0m"
             netfilter-persistent save && echo -e "\033[0;32m防火墙规则已保存。\033[0m" || echo -e "\033[0;31m防火墙规则保存失败。\033[0m"
             read -n 1 -s -r -p "按任意键继续..."
             ;;
