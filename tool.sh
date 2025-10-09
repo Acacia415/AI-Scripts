@@ -1771,6 +1771,46 @@ install_fail2ban() {
     fi
 }
 
+# ======================= 安装 acme.sh =======================
+install_acme() {
+    clear
+    # 添加来源提示
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/acme-script${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    # 执行安装流程（增加错误处理和自动清理）
+    if wget -O acme.sh https://raw.githubusercontent.com/Acacia415/acme-script/refs/heads/main/acme.sh; then
+        chmod +x acme.sh
+        ./acme.sh
+        rm -f acme.sh  # 执行后清理脚本
+    else
+        echo -e "${RED}下载 acme.sh 安装脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
+# ======================= 安装 Gost v3 =======================
+install_gost_v3() {
+    clear
+    # 添加来源提示
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    # 执行安装流程（增加错误处理和自动清理）
+    if wget -O gost_v3.sh https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/gost_v3.sh; then
+        chmod +x gost_v3.sh
+        ./gost_v3.sh
+        rm -f gost_v3.sh  # 执行后清理脚本
+    else
+        echo -e "${RED}下载 Gost v3 安装脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
 # ======================= 脚本更新 =======================
 update_script() {
   echo -e "${YELLOW}开始更新脚本...${NC}"
@@ -1831,6 +1871,8 @@ main_menu() {
     echo -e "23. TCP性能优化 (BBR+fq)"
     echo -e "24. 恢复TCP原始配置"
     echo -e "25. 安装Fail2Ban"
+    echo -e "26. 安装 acme.sh"
+    echo -e "27. 安装 Gost v3"
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
@@ -1936,6 +1978,14 @@ main_menu() {
         ;;
       25)
         install_fail2ban 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      26)
+        install_acme 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      27)
+        install_gost_v3 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       99)  
