@@ -1305,7 +1305,7 @@ install_shell_beautify() {
         echo -e "${GREEN} ✓ oh-my-zsh 已安装${NC}"
     fi
 
-    echo -e "${CYAN}[5/6] 设置Spaceship主题...${NC}"
+    echo -e "${CYAN}[5/6] 设置Spaceship主题并自定义...${NC}"
     ZSH_CUSTOM="$HOME/.oh-my-zsh/custom"
     SPACESHIP_REPO="https://github.com/spaceship-prompt/spaceship-prompt.git"
     SPACESHIP_DIR="$ZSH_CUSTOM/themes/spaceship-prompt"
@@ -1329,15 +1329,21 @@ install_shell_beautify() {
 
     # 配置 .zshrc 文件
     sed -i 's/^ZSH_THEME=.*/ZSH_THEME="spaceship"/' ~/.zshrc
-    
-    # --- ✨ 这是您需要的修改 ✨ ---
-    # 将箭头设置为 Powerlevel10k 风格的 ❯
+
+    # 自定义Docker图标
+    if grep -q "^SPACESHIP_DOCKER_SYMBOL=" ~/.zshrc; then
+        sed -i 's/^SPACESHIP_DOCKER_SYMBOL=.*/SPACESHIP_DOCKER_SYMBOL="D "/' ~/.zshrc
+    else
+        sed -i '/^ZSH_THEME="spaceship"/i SPACESHIP_DOCKER_SYMBOL="D "' ~/.zshrc
+    fi
+
+    # 自定义箭头符号
     if grep -q "^SPACESHIP_CHAR_SYMBOL=" ~/.zshrc; then
         sed -i 's/^SPACESHIP_CHAR_SYMBOL=.*/SPACESHIP_CHAR_SYMBOL="❯ "/' ~/.zshrc
     else
         sed -i '/^ZSH_THEME="spaceship"/i SPACESHIP_CHAR_SYMBOL="❯ "' ~/.zshrc
     fi
-    echo -e "${GREEN} ✓ .zshrc 配置完成 (箭头已设为 ❯)${NC}"
+    echo -e "${GREEN} ✓ .zshrc 配置完成 (图标已自定义)${NC}"
 
     echo -e "${CYAN}[6/6] 设置默认shell...${NC}"
     if [ "$SHELL" != "$(which zsh)" ]; then
