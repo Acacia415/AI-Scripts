@@ -1276,7 +1276,7 @@ install_shell_beautify() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
 
     echo -e "${CYAN}[1/6] 更新软件源...${NC}"
-    apt-get update
+    apt-get update > /dev/null 2>&1
 
     echo -e "${CYAN}[2/6] 安装依赖组件...${NC}"
     if ! command -v git &> /dev/null; then
@@ -1305,22 +1305,46 @@ install_shell_beautify() {
         echo -e "${GREEN} ✓ oh-my-zsh 已安装${NC}"
     fi
 
-    echo -e "${CYAN}[5/6] 设置ultima主题...${NC}"
-    ULTIMA_REPO="https://github.com/egorlem/ultima.zsh-theme"
-    TEMP_DIR="$HOME/ultima-shell"
-    THEME_DEST="$HOME/.oh-my-zsh/themes"
+    # ------------------- 修改部分开始 -------------------
+    echo -e "${CYAN}[5/6] 设置Spaceship主题...${NC}"
+    ZSH_CUSTOM="$HOME/.oh-my-zsh/custom"
+    SPACESHIP_REPO="https://github.com/spaceship-prompt/spaceship-prompt.git"
+    SPACESHIP_DIR="$ZSH_CUSTOM/themes/spaceship-prompt"
+    SPACESHIP_SYMLINK="$ZSH_CUSTOM/themes/spaceship.zsh-theme"
 
-    rm -rf "$TEMP_DIR"
-    git clone -q "$ULTIMA_REPO" "$TEMP_DIR"
-    if [ -f "$TEMP_DIR/ultima.zsh-theme" ]; then
-        mv -f "$TEMP_DIR/ultima.zsh-theme" "$THEME_DEST/ultima.zsh-theme"
-        echo -e "${GREEN} ✓ 主题安装完成${NC}"
-    else
-        echo -e "${RED}❌ 克隆失败或找不到主题文件${NC}"
+    # 为了确保干净的安装，先删除旧文件
+    rm -rf "$SPACESHIP_DIR"
+    rm -f "$SPACESHIP_SYMLINK"
+
+    # 克隆主题仓库
+    git clone --depth=1 "$SPACESHIP_REPO" "$SPACESHIP_DIR" > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}❌ 主题克隆失败！请检查网络或Git配置。${NC}"
         return 1
     fi
 
-    sed -i 's/ZSH_THEME=.*/ZSH_THEME="ultima"/' ~/.zshrc
+    # 创建主题符号链接
+    ln -s "$SPACESHIP_DIR/spaceship.zsh-theme" "$SPACESHIP_SYMLINK"
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}❌ 创建符号链接失败！${NC}"
+        return 1
+    fi
+    echo -e "${GREEN} ✓ 主题文件安装完成${NC}"
+
+    # 配置 .zshrc 文件
+    # 1. 设置主题为 spaceship
+    sed -i 's/^ZSH_THEME=.*/ZSH_THEME="spaceship"/' ~/.zshrc
+
+    # 2. 添加或修改自定义箭头符号，并确保它在 ZSH_THEME 行之上
+    if grep -q "^SPACESHIP_CHAR_SYMBOL=" ~/.zshrc; then
+        # 如果已存在，则修改它
+        sed -i 's/^SPACESHIP_CHAR_SYMBOL=.*/SPACESHIP_CHAR_SYMBOL="> "/' ~/.zshrc
+    else
+        # 如果不存在，则在 ZSH_THEME 行前插入
+        sed -i '/^ZSH_THEME="spaceship"/i SPACESHIP_CHAR_SYMBOL="> "' ~/.zshrc
+    fi
+    echo -e "${GREEN} ✓ .zshrc 配置完成${NC}"
+    # ------------------- 修改部分结束 -------------------
 
     echo -e "${CYAN}[6/6] 设置默认shell...${NC}"
     if [ "$SHELL" != "$(which zsh)" ]; then
