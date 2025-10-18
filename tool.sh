@@ -5,6 +5,51 @@
 # 项目地址：https://github.com/Acacia415/AI-Scripts
 # ==========================================
 
+if [[ "$(realpath "$0" 2>/dev/null)" != "/usr/local/bin/p" ]]; then
+
+    SCRIPT_URL="https://link.irisu.de/toolbox"
+
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    NC='\033[0m'
+
+    echo -e "${GREEN}--- IRIS 工具箱安装程序 ---${NC}"
+
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${RED}错误：请使用 root 权限运行本脚本 (例如: sudo bash <(curl ...))${NC}"
+        exit 1
+    fi
+
+    if [ -n "$SUDO_USER" ]; then
+        USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+        if [ -d "$USER_HOME" ]; then
+            echo "正在清理旧的 alias 配置 (如果存在)..."
+            sed -i '/^alias p=/d' "$USER_HOME/.bashrc" 2>/dev/null
+            sed -i '/^alias p=/d' "$USER_HOME/.profile" 2>/dev/null
+            sed -i '/^alias p=/d' "$USER_HOME/.bash_profile" 2>/dev/null
+        fi
+    fi
+
+    echo "正在从 $SCRIPT_URL 下载并安装工具箱..."
+    
+    if curl -fsSL "$SCRIPT_URL" -o /usr/local/bin/p; then
+        chmod +x /usr/local/bin/p
+        echo -e "${GREEN}[+] 已成功创建快捷命令：p ✅${NC}"
+        echo -e "${GREEN}    现在您可以在终端中直接输入 'p' 来运行此工具箱。${NC}"
+        echo -e "${GREEN}    如果命令未立即生效，请尝试重新打开一个新的终端窗口。${NC}"
+    else
+        echo -e "${RED}下载脚本失败。请检查您的网络连接或 URL 是否正确。${NC}"
+        exit 1
+    fi
+    
+    exit 0
+fi
+
+# ==========================================
+# IRIS自用工具箱 - GitHub一键版
+# 项目地址：https://github.com/Acacia415/AI-Scripts
+# ==========================================
+
 # 全局颜色定义
 RED='\033[31m'
 GREEN='\033[32m'
@@ -12,31 +57,6 @@ YELLOW='\033[33m'
 BLUE='\033[34m'
 CYAN='\033[36m'
 NC='\033[0m'
-
-# ===================== IRIS 工具箱快捷键自动安装 (新版) =====================
-
-# 确保以 root 权限运行
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}请使用 root 权限运行本脚本 (例如: sudo bash $0)${NC}"
-    exit 1
-fi
-
-# 1. 清理旧的 alias 快捷方式 (参考 kejilion.sh)
-sed -i '/^alias p=/d' ~/.bashrc > /dev/null 2>&1
-sed -i '/^alias p=/d' ~/.profile > /dev/null 2>&1
-sed -i '/^alias p=/d' ~/.bash_profile > /dev/null 2>&1
-
-# 2. 将脚本复制到固定位置并创建快捷方式 (参考 kejilion.sh)
-cp -f "$(realpath "$0")" ~/tool.sh > /dev/null 2>&1
-cp -f ~/tool.sh /usr/local/bin/p > /dev/null 2>&1
-chmod +x /usr/local/bin/p
-
-# 3. 只有在首次运行或直接执行脚本文件时才显示此消息
-if [[ $(realpath "$0") != "/usr/local/bin/p" ]]; then
-    echo -e "${GREEN}[+] 已创建快捷命令：p ✅${NC}"
-    echo -e "${GREEN}    现在您可以在终端中直接输入 'p' 来运行此工具箱。${NC}"
-fi
-
 
 # ======================= 系统信息查询 =======================
 display_system_info() {
@@ -1861,14 +1881,13 @@ main_menu() {
   while true; do
     clear
     echo -e "${CYAN}"
-    echo "  _____ _____  _____  _____   _______ ____   ____  _      ____   ______   __"
-    echo " |_   _|  __ \|_   _|/ ____| |__   __/ __ \ / __ \| |    |  _ \ / __ \ \ / /"
-    echo "   | | | |__) | | | | (___      | | | |  | | |  | | |    | |_) | |  | \ V / "
-    echo "   | | |  _  /  | |  \___ \     | | | |  | | |  | | |    |  _ <| |  | |> <  "
-    echo "  _| |_| | \ \ _| |_ ____) |    | | | |__| | |__| | |____| |_) | |__| / . \ "
-    echo " |_____|_|  \_\_____|_____/     |_|  \____/ \____/|______|____/ \____/_/ \_\\"
-    echo -e "                                                              ${NC}"
-    echo -e "${YELLOW}==================================================${NC}"
+    echo "  _   ___ ___  _ ___ "
+    echo " (_) | _ \ __|(_)_ _|"
+    echo " | | |   / _| | | |  "
+    echo " |_| |_|_\___||_||___|"
+    echo "    T O O L B O X    "
+    echo -e "${NC}"
+    echo -e "${YELLOW}==================================================${NC}"
     echo -e "1. 系统信息查询"
     echo -e "2. 开启root用户登录"
     echo -e "3. 安装流量监控服务"
