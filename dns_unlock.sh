@@ -5,7 +5,7 @@
 # Description: A standalone script to install, manage, and uninstall
 #              a DNS-based unlock service using Dnsmasq and Gost.
 #              Includes smart checks to co-exist with other Gost installations.
-# Version: 4.5 (Multi-rule deletion in firewall management)
+# Version: 4.6 (Fix Dnsmasq non-local network issue)
 # =================================================================
 
 # --- 专属配置 ---
@@ -100,7 +100,7 @@ dns_unlock_menu() {
     while true; do
         clear
         echo -e "${BLUE}=============================================${NC}"
-        echo -e "${YELLOW}             DNS 解锁服务管理                  ${NC}"
+        echo -e "${YELLOW}         DNS 解锁服务管理 (Gost v3 版)         ${NC}"
         echo -e "${BLUE}=============================================${NC}"
         echo " --- 服务端管理 ---"
         echo "  1. 安装/更新 DNS 解锁服务"
@@ -268,6 +268,7 @@ no-poll
 all-servers
 cache-size=2048
 local-ttl=60
+interface=* # Listen on all network interfaces to accept queries from non-local IPs
 # Upstream DNS Servers
 server=8.8.8.8
 server=1.1.1.1
