@@ -13,7 +13,7 @@ BLUE='\033[34m'
 CYAN='\033[36m'
 NC='\033[0m'
 
-# ===================== IRIS 工具箱快捷键自动安装 (新版) =====================
+# ===================== IRIS 工具箱快捷键自动安装 =====================
 
 # 确保以 root 权限运行
 if [ "$EUID" -ne 0 ]; then
@@ -21,22 +21,32 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# 1. 清理旧的 alias 快捷方式 (参考 kejilion.sh)
+# 1. 清理旧的 alias 快捷方式
 sed -i '/^alias p=/d' ~/.bashrc > /dev/null 2>&1
 sed -i '/^alias p=/d' ~/.profile > /dev/null 2>&1
 sed -i '/^alias p=/d' ~/.bash_profile > /dev/null 2>&1
 
-# 2. 将脚本复制到固定位置并创建快捷方式 (参考 kejilion.sh)
-cp -f "$(realpath "$0")" ~/tool.sh > /dev/null 2>&1
-cp -f ~/tool.sh /usr/local/bin/p > /dev/null 2>&1
+# 2. 定义本地脚本存放路径
+LOCAL_SCRIPT="$HOME/tool.sh"
+
+# 3. 判断执行方式
+if [[ "$0" == "/dev/fd/"* || "$0" == "/proc/self/fd/"* ]]; then
+    # 通过 bash <(curl …) 执行
+    curl -fsSL https://link.irisu.de/toolbox -o "$LOCAL_SCRIPT"
+else
+    # 本地文件执行
+    cp -f "$(realpath "$0")" "$LOCAL_SCRIPT"
+fi
+
+# 4. 将脚本复制到 /usr/local/bin/p 并赋予可执行权限
+cp -f "$LOCAL_SCRIPT" /usr/local/bin/p
 chmod +x /usr/local/bin/p
 
-# 3. 只有在首次运行或直接执行脚本文件时才显示此消息
+# 5. 提示信息（首次运行或直接执行脚本时显示）
 if [[ $(realpath "$0") != "/usr/local/bin/p" ]]; then
     echo -e "${GREEN}[+] 已创建快捷命令：p ✅${NC}"
     echo -e "${GREEN}    现在您可以在终端中直接输入 'p' 来运行此工具箱。${NC}"
 fi
-
 
 # ======================= 系统信息查询 =======================
 display_system_info() {
@@ -1861,13 +1871,31 @@ main_menu() {
   while true; do
     clear
     echo -e "${CYAN}"
-    echo "  _____ _____  _____  _____   _______ ____   ____  _      ____   ______   __"
-    echo " |_   _|  __ \|_   _|/ ____| |__   __/ __ \ / __ \| |    |  _ \ / __ \ \ / /"
-    echo "   | | | |__) | | | | (___      | | | |  | | |  | | |    | |_) | |  | \ V / "
-    echo "   | | |  _  /  | |  \___ \     | | | |  | | |  | | |    |  _ <| |  | |> <  "
-    echo "  _| |_| | \ \ _| |_ ____) |    | | | |__| | |__| | |____| |_) | |__| / . \ "
-    echo " |_____|_|  \_\_____|_____/     |_|  \____/ \____/|______|____/ \____/_/ \_\\"
-    echo -e "                                                              ${NC}"
+    
+    # 检测 figlet 是否安装
+    if ! command -v figlet >/dev/null 2>&1; then
+        echo "检测到 figlet 未安装，正在自动安装..."
+        # Debian/Ubuntu 系统安装
+        if command -v apt >/dev/null 2>&1; then
+            sudo apt update && sudo apt install -y figlet
+        # CentOS/RHEL 系统安装
+        elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y figlet
+        else
+            echo "请手动安装 figlet 后再运行脚本"
+        fi
+    fi
+
+    # 使用 figlet 输出 IRIS TOOLBOX，删除空行
+    if command -v figlet >/dev/null 2>&1; then
+        figlet -f small "IRIS TOOLBOX" | awk 'NF'
+    else
+        echo "IRIS TOOLBOX"  # 如果安装失败，用简单文字替代
+    fi
+
+    echo -e "${NC}"  # 恢复默认颜色
+
+    # 菜单部分
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "1. 系统信息查询"
     echo -e "2. 开启root用户登录"
@@ -1900,7 +1928,7 @@ main_menu() {
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
     echo -e "${YELLOW}==================================================${NC}"
-
+    
     read -p "请输入选项 : " choice
     case $choice in
       1)
