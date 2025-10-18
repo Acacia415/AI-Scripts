@@ -1,13 +1,4 @@
 #!/bin/bash
-
-# =================================================================
-# DNS & Gost Unlock Service Manager (Conflict-Aware & Full-Featured Version)
-# Description: A standalone script to install, manage, and uninstall
-#              a DNS-based unlock service using Dnsmasq and Gost.
-#              Includes smart checks to co-exist with other Gost installations.
-# Version: 4.6 (Fix Dnsmasq non-local network issue)
-# =================================================================
-
 # --- 专属配置 ---
 DNS_GOST_CONFIG_PATH="/etc/gost/dns-unlock-config.yml"
 DNS_GOST_SERVICE_NAME="gost-dns.service"
@@ -100,7 +91,7 @@ dns_unlock_menu() {
     while true; do
         clear
         echo -e "${BLUE}=============================================${NC}"
-        echo -e "${YELLOW}         DNS 解锁服务管理 (Gost v3 版)         ${NC}"
+        echo -e "${YELLOW}           DNS 解锁服务管理           ${NC}"
         echo -e "${BLUE}=============================================${NC}"
         echo " --- 服务端管理 ---"
         echo "  1. 安装/更新 DNS 解锁服务"
@@ -129,7 +120,7 @@ dns_unlock_menu() {
 
 install_dns_unlock_server() {
     clear
-    echo -e "${YELLOW}--- DNS解锁服务 安装/更新 (Gost V3) ---${NC}"
+    echo -e "${YELLOW}--- DNS解锁服务 安装/更新 ---${NC}"
 
     echo -e "${BLUE}信息: 正在安装/检查核心依赖...${NC}"
     apt-get update >/dev/null 2>&1
@@ -137,7 +128,7 @@ install_dns_unlock_server() {
     if ! check_port_53; then return 1; fi
     if ! check_ports_80_443; then return 1; fi
 
-    echo -e "${BLUE}信息: 正在清理旧环境 (包括旧版Gost)...${NC}"
+    echo -e "${BLUE}信息: 正在清理旧环境...${NC}"
     systemctl stop sniproxy 2>/dev/null
     systemctl stop "${DNS_GOST_SERVICE_NAME}" 2>/dev/null
     apt-get purge -y sniproxy >/dev/null 2>&1
@@ -153,7 +144,7 @@ install_dns_unlock_server() {
         echo -e "${GREEN}检测到 Gost 已安装: ${GOST_EXEC_PATH} ($(${GOST_EXEC_PATH} -V))${NC}"
         echo -e "${BLUE}信息: 将使用现有版本，跳过安装步骤。${NC}"
     else
-        echo -e "${BLUE}信息: 正在安装最新版 Gost v3 ...${NC}"
+        echo -e "${BLUE}信息: 正在安装最新版 Gost ...${NC}"
         LATEST_GOST_VERSION=$(curl -s "https://api.github.com/repos/go-gost/gost/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | cut -c 2-)
         local gost_version=${LATEST_GOST_VERSION:-"3.2.4"} # 如果API失败则回退到指定版本
         local bit
@@ -165,7 +156,7 @@ install_dns_unlock_server() {
         echo "信息: 正在从以下地址下载Gost (v${gost_version}):"
         echo "${GOST_URL}"
         if ! curl -L -o "${FILENAME}" "${GOST_URL}"; then
-            echo -e "${RED}错误: Gost v3 下载失败！ (curl 退出码: $?)${NC}"
+            echo -e "${RED}错误: Gost 下载失败！ (curl 退出码: $?)${NC}"
             rm -f "${FILENAME}"
             return 1
         fi
@@ -193,7 +184,7 @@ install_dns_unlock_server() {
     fi
     echo
 
-    echo -e "${BLUE}信息: 正在为DNS解锁服务创建 Gost v3 配置文件 (YAML)...${NC}"
+    echo -e "${BLUE}信息: 正在为DNS解锁服务创建 Gost 配置文件 (YAML)...${NC}"
     mkdir -p /etc/gost
 
     # --- Gost 配置说明 ---
@@ -451,7 +442,7 @@ EOF
         echo -e "${RED}错误: Dnsmasq服务重启失败。${NC}"; return 1;
     fi
     echo
-    echo -e "${GREEN}🎉 恭喜！全新的 DNS 解锁服务 (Gost v3) 已成功安装！它现在独立于您其他的Gost转发服务运行。${NC}"
+    echo -e "${GREEN}🎉 恭喜！全新的 DNS 解锁服务已成功安装！它现在独立于您其他的Gost转发服务运行。${NC}"
 }
 
 
@@ -544,14 +535,37 @@ manage_iptables_rules() {
         read -p "请输入选项: " rule_choice
         case $rule_choice in
         1)
-            read -p "请输入要加入白名单的IP (单个IP): " ip
-            if [[ -z "$ip" ]]; then continue; fi
-            for port in 53 80 443; do
-                iptables -I INPUT -s "$ip" -p tcp --dport "$port" -j ACCEPT
-                if [[ "$port" == "53" ]]; then iptables -I INPUT -s "$ip" -p udp --dport "$port" -j ACCEPT; fi
+            read -p "请输入要加入白名单的IP (单个或多个, 用空格隔开): " ips
+            if [[ -z "$ips" ]]; then continue; fi
+
+            local added_count=0
+            local invalid_input=false
+            for ip in $ips; do
+                # Simple validation for IP format
+                if ! [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    echo -e "${RED}输入错误: '$ip' 不是一个有效的 IP 地址格式。${NC}"
+                    invalid_input=true
+                    continue
+                fi
+
+                for port in 53 80 443; do
+                    iptables -I INPUT -s "$ip" -p tcp --dport "$port" -j ACCEPT
+                    if [[ "$port" == "53" ]]; then iptables -I INPUT -s "$ip" -p udp --dport "$port" -j ACCEPT; fi
+                done
+                echo -e "${GREEN}IP $ip 已添加至端口 53, 80, 443 白名单。${NC}"
+                ((added_count++))
             done
-            echo -e "${GREEN}IP $ip 已添加至端口 53, 80, 443 白名单。${NC}"
-            netfilter-persistent save && echo -e "${GREEN}防火墙规则已保存。${NC}" || echo -e "${RED}防火墙规则保存失败。${NC}"
+
+            if [[ "$invalid_input" == true ]]; then
+                 echo -e "${YELLOW}部分输入无效，操作已跳过。${NC}"
+            fi
+
+            if (( added_count > 0 )); then
+                echo -e "${GREEN}共添加了 ${added_count} 个IP至白名单。${NC}"
+                netfilter-persistent save && echo -e "${GREEN}防火墙规则已保存。${NC}" || echo -e "${RED}防火墙规则保存失败。${NC}"
+            else
+                echo -e "${YELLOW}未执行任何有效的添加操作。${NC}"
+            fi
             read -n 1 -s -r -p "按任意键继续..."
             ;;
         2)
