@@ -1,10 +1,5 @@
 #!/bin/bash
 
-# ==========================================
-# IRIS自用工具箱 - GitHub一键版
-# 项目地址：https://github.com/Acacia415/AI-Scripts
-# ==========================================
-
 if [[ "$(realpath "$0" 2>/dev/null)" != "/usr/local/bin/p" ]]; then
 
     SCRIPT_URL="https://link.irisu.de/toolbox"
@@ -32,13 +27,14 @@ if [[ "$(realpath "$0" 2>/dev/null)" != "/usr/local/bin/p" ]]; then
 
     echo "正在从 $SCRIPT_URL 下载并安装工具箱..."
     
-    if curl -fsSL "$SCRIPT_URL" -o /usr/local/bin/p; then
+    # 修正：使用管道和 tee 命令来写入文件，增强权限兼容性
+    if curl -fsSL "$SCRIPT_URL" | tee /usr/local/bin/p > /dev/null; then
         chmod +x /usr/local/bin/p
         echo -e "${GREEN}[+] 已成功创建快捷命令：p ✅${NC}"
         echo -e "${GREEN}    现在您可以在终端中直接输入 'p' 来运行此工具箱。${NC}"
         echo -e "${GREEN}    如果命令未立即生效，请尝试重新打开一个新的终端窗口。${NC}"
     else
-        echo -e "${RED}下载脚本失败。请检查您的网络连接或 URL 是否正确。${NC}"
+        echo -e "${RED}下载或写入脚本失败。请检查您的网络连接或系统权限。${NC}"
         exit 1
     fi
     
