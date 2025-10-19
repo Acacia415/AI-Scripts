@@ -21,6 +21,22 @@ fi
 
 # ======================= 帮助函数 =======================
 
+# 检测并自动安装iptables
+check_and_install_iptables() {
+    if ! command -v iptables &>/dev/null; then
+        echo -e "${YELLOW}警告: iptables 未安装，正在自动安装...${NC}"
+        apt-get update >/dev/null 2>&1
+        apt-get install -y iptables >/dev/null 2>&1
+        if command -v iptables &>/dev/null; then
+            echo -e "${GREEN}成功: iptables 已成功安装。${NC}"
+        else
+            echo -e "${RED}错误: iptables 安装失败，某些功能可能无法使用。${NC}"
+            return 1
+        fi
+    fi
+    return 0
+}
+
 check_port_53() {
     if ! command -v lsof &> /dev/null; then apt-get update >/dev/null 2>&1 && apt-get install -y lsof >/dev/null; fi
     if lsof -i :53 -sTCP:LISTEN -P -n >/dev/null; then
@@ -135,11 +151,81 @@ ensure_ipv4_preference() {
     echo -e "${GREEN}成功: 已设置 IPv4 优先。${NC}"
 }
 
+# 使用iptables阻断IPv6关键端口
+block_ipv6_ports() {
+    echo -e "${BLUE}信息: 正在使用ip6tables阻断IPv6端口以防止解锁绕过...${NC}"
+    
+    # 检查ip6tables是否可用
+    if ! command -v ip6tables &>/dev/null; then
+        echo -e "${YELLOW}警告: ip6tables未安装，正在安装...${NC}"
+        apt-get update >/dev/null 2>&1
+        apt-get install -y iptables >/dev/null 2>&1
+    fi
+    
+    if ! command -v ip6tables &>/dev/null; then
+        echo -e "${RED}错误: 无法安装ip6tables，跳过IPv6阻断。${NC}"
+        return 1
+    fi
+    
+    # 阻断IPv6的DNS(53)、HTTP(80)、HTTPS(443)出站
+    for port in 53 80 443; do
+        for proto in tcp udp; do
+            # 跳过80/443的UDP（不存在）
+            if [[ "$port" != "53" ]] && [[ "$proto" == "udp" ]]; then
+                continue
+            fi
+            
+            # 检查规则是否已存在
+            if ! ip6tables -C OUTPUT -p "${proto}" --dport "${port}" -m comment --comment "dns-unlock-block-ipv6" -j REJECT &>/dev/null; then
+                ip6tables -I OUTPUT -p "${proto}" --dport "${port}" -m comment --comment "dns-unlock-block-ipv6" -j REJECT
+                echo -e "${GREEN}已阻断IPv6 ${proto^^}/${port}端口${NC}"
+            fi
+        done
+    done
+    
+    # 持久化规则
+    if command -v netfilter-persistent &>/dev/null; then
+        netfilter-persistent save >/dev/null 2>&1 && echo -e "${GREEN}IPv6阻断规则已持久化。${NC}"
+    fi
+    
+    echo -e "${GREEN}成功: IPv6关键端口已阻断，防止绕过DNS解锁。${NC}"
+    return 0
+}
+
+# 移除IPv6端口阻断规则
+unblock_ipv6_ports() {
+    echo -e "${BLUE}信息: 正在移除IPv6端口阻断规则...${NC}"
+    
+    if ! command -v ip6tables &>/dev/null; then
+        echo -e "${YELLOW}提示: ip6tables未安装，跳过。${NC}"
+        return 0
+    fi
+    
+    # 移除所有带dns-unlock-block-ipv6标记的规则
+    while ip6tables -L OUTPUT -n --line-numbers | grep -q "dns-unlock-block-ipv6"; do
+        local line_num=$(ip6tables -L OUTPUT -n --line-numbers | grep "dns-unlock-block-ipv6" | head -1 | awk '{print $1}')
+        if [[ -n "$line_num" ]]; then
+            ip6tables -D OUTPUT "$line_num"
+        else
+            break
+        fi
+    done
+    
+    # 持久化规则
+    if command -v netfilter-persistent &>/dev/null; then
+        netfilter-persistent save >/dev/null 2>&1
+    fi
+    
+    echo -e "${GREEN}成功: IPv6端口阻断规则已移除。${NC}"
+    return 0
+}
+
 enforce_dns_only_to_server() {
     local server_ip="$1"
     echo -e "${BLUE}信息: 正在应用防火墙规则，强制 DNS 仅发往 ${server_ip}...${NC}"
-    if ! command -v iptables &>/dev/null; then
-        echo -e "${RED}错误: 未找到 iptables，无法应用 DNS 强制规则。${NC}"
+    # 自动检测并安装iptables
+    if ! check_and_install_iptables; then
+        echo -e "${RED}错误: iptables 不可用，无法应用 DNS 强制规则。${NC}"
         return 1
     fi
     for proto in udp tcp; do
@@ -157,6 +243,11 @@ enforce_dns_only_to_server() {
 
 revert_dns_enforcement_rules() {
     echo -e "${BLUE}信息: 正在移除由脚本添加的 DNS 强制规则...${NC}"
+    # 检查iptables是否可用
+    if ! command -v iptables &>/dev/null; then
+        echo -e "${YELLOW}警告: iptables 未安装，跳过规则移除。${NC}"
+        return 0
+    fi
     local server_ip=""
     if [ -f /etc/resolv.conf ]; then
         server_ip=$(awk '/^nameserver[ \t]+([0-9]{1,3}\.){3}[0-9]{1,3}/{print $2; exit}' /etc/resolv.conf)
@@ -191,10 +282,11 @@ dns_unlock_menu() {
         echo " --- 客户端管理 ---"
         echo "  4. 设置本机为 DNS 客户端"
         echo "  5. 还原客户端 DNS 设置"
+        echo "  6. 管理IPv6端口阻断（防绕过）"
         echo " --------------------------------------------"
         echo "  0. 退出脚本"
         echo -e "${BLUE}=============================================${NC}"
-        read -p "请输入选项 [0-5]: " choice
+        read -p "请输入选项 [0-6]: " choice
 
         case $choice in
             1) install_dns_unlock_server; echo; read -n 1 -s -r -p "按任意键返回..." ;;
@@ -202,6 +294,7 @@ dns_unlock_menu() {
             3) manage_iptables_rules ;;
             4) setup_dns_client; echo; read -n 1 -s -r -p "按任意键返回..." ;;
             5) uninstall_dns_client; echo; read -n 1 -s -r -p "按任意键返回..." ;;
+            6) manage_ipv6_blocking ;;  
             0) break ;;
             *) echo -e "${RED}无效选项，请重新输入!${NC}"; sleep 2 ;;
         esac
@@ -587,12 +680,35 @@ setup_dns_client() {
     set_resolv_conf "$server_ip"
 
     # 3) （推荐）设置系统 IPv4 优先，避免 AAAA 泄漏
-    read -p "是否设置系统 IPv4 优先（/etc/gai.conf，推荐）? (Y/n): " set_v4
-    if [[ "$set_v4" =~ ^[yY]$ ]] || [[ -z "$set_v4" ]]; then
-        ensure_ipv4_preference
-    else
-        echo -e "${YELLOW}提示: 已跳过 IPv4 优先设置，某些程序可能优先走 IPv6 导致绕过解锁。${NC}"
-    fi
+    echo -e "${YELLOW}重要: 如果您的系统支持IPv6，必须采取措施防止绕过解锁！${NC}"
+    echo -e "${BLUE}可选方案：${NC}"
+    echo "  1. 设置IPv4优先（推荐）"
+    echo "  2. 使用防火墙阻断IPv6关键端口（更彻底）"
+    echo "  3. 两者都启用（最安全）"
+    echo "  4. 都不启用（不推荐）"
+    read -p "请选择 [1-4，默认3]: " ipv6_choice
+    
+    case "${ipv6_choice:-3}" in
+        1)
+            ensure_ipv4_preference
+            ;;
+        2)
+            block_ipv6_ports
+            ;;
+        3)
+            ensure_ipv4_preference
+            block_ipv6_ports
+            ;;
+        4)
+            echo -e "${RED}警告: 未采取任何IPv6防护措施！${NC}"
+            echo -e "${RED}如果系统支持IPv6，DNS解锁很可能会失效！${NC}"
+            ;;
+        *)
+            echo -e "${YELLOW}无效选择，默认执行方案3（最安全）${NC}"
+            ensure_ipv4_preference
+            block_ipv6_ports
+            ;;
+    esac
 
     # 4) （可选）强制 DNS 仅发往 A，防止程序私自换 DNS
     read -p "是否添加防火墙规则，强制所有 DNS 仅发往 ${server_ip} ? (y/N): " enforce_dns
@@ -609,6 +725,8 @@ setup_dns_client() {
 uninstall_dns_client() {
     clear
     echo -e "${YELLOW}--- 卸载/还原 DNS 客户端设置 ---${NC}"
+    # 移除IPv6端口阻断规则
+    unblock_ipv6_ports
     # 移除由脚本添加的 DNS 强制规则
     revert_dns_enforcement_rules
     echo -e "${BLUE}信息: 正在解锁 DNS 配置文件...${NC}"
@@ -637,7 +755,76 @@ uninstall_dns_client() {
     fi
 }
 
+manage_ipv6_blocking() {
+    while true; do
+        clear
+        echo -e "${YELLOW}══════ IPv6 端口阻断管理 ══════${NC}"
+        echo -e "${BLUE}防止应用通过IPv6绕过DNS解锁${NC}"
+        echo ""
+        
+        # 显示当前IPv6阻断状态
+        if command -v ip6tables &>/dev/null && ip6tables -L OUTPUT -n | grep -q "dns-unlock-block-ipv6"; then
+            echo -e "${GREEN}状态: IPv6端口阻断已启用${NC}"
+            echo -e "${BLUE}当前阻断的端口:${NC}"
+            ip6tables -L OUTPUT -n --line-numbers | grep "dns-unlock-block-ipv6" | while read line; do
+                echo "  $line"
+            done
+        else
+            echo -e "${YELLOW}状态: IPv6端口阻断未启用${NC}"
+        fi
+        
+        echo -e "${YELLOW}────────────────────────────────${NC}"
+        echo "1. 启用IPv6端口阻断 (53/80/443)"
+        echo "2. 禁用IPv6端口阻断"
+        echo "3. 查看当前IPv6连接状态"
+        echo "0. 返回上级菜单"
+        echo -e "${YELLOW}═══════════════════════════════${NC}"
+        read -p "请输入选项: " ipv6_choice
+        
+        case $ipv6_choice in
+            1)
+                block_ipv6_ports
+                echo
+                read -n 1 -s -r -p "按任意键继续..."
+                ;;
+            2)
+                unblock_ipv6_ports
+                echo
+                read -n 1 -s -r -p "按任意键继续..."
+                ;;
+            3)
+                echo -e "${BLUE}当前IPv6连接状态:${NC}"
+                if command -v ss &>/dev/null; then
+                    echo -e "${YELLOW}IPv6 TCP连接:${NC}"
+                    ss -6tn state established 2>/dev/null | head -20
+                    echo -e "${YELLOW}IPv6 监听端口:${NC}"
+                    ss -6tln 2>/dev/null | head -20
+                else
+                    echo -e "${YELLOW}IPv6网络配置:${NC}"
+                    ip -6 addr show 2>/dev/null | grep -v "^\s*valid_lft"
+                fi
+                echo
+                read -n 1 -s -r -p "按任意键继续..."
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo -e "${RED}无效选项!${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
 manage_iptables_rules() {
+    # 首先确保iptables已安装
+    if ! check_and_install_iptables; then
+        echo -e "${RED}错误: 无法继续，iptables 是必需的。${NC}"
+        read -n 1 -s -r -p "按任意键返回..."
+        return 1
+    fi
+    
     if ! dpkg -l | grep -q 'iptables-persistent'; then
         echo -e "${YELLOW}警告: 'iptables-persistent' 未安装，规则可能无法自动持久化。${NC}"
         read -p "是否现在尝试安装? (y/N): " install_confirm
