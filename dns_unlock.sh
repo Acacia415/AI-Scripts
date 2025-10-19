@@ -85,6 +85,96 @@ check_ports_80_443() {
 }
 
 
+# ======================= 客户端辅助函数 =======================
+
+disable_systemd_resolved_if_running() {
+    if systemctl is-active --quiet systemd-resolved; then
+        echo -e "${YELLOW}警告: 检测到 systemd-resolved 正在运行，可能拦截 127.0.0.53:53。${NC}"
+        read -p "是否禁用并停止 systemd-resolved，并解除 /etc/resolv.conf 软链接? (Y/n): " choice
+        if [[ "$choice" =~ ^[yY]$ ]] || [[ -z "$choice" ]]; then
+            systemctl disable --now systemd-resolved
+            # 若 resolv.conf 为软链接，则移除并创建普通文件
+            if [ -L /etc/resolv.conf ]; then
+                rm -f /etc/resolv.conf
+                touch /etc/resolv.conf
+            fi
+            echo -e "${GREEN}成功: 已禁用 systemd-resolved。${NC}"
+        else
+            echo -e "${YELLOW}提示: 已跳过禁用 systemd-resolved，可能导致 DNS 配置被覆盖或劫持。${NC}"
+        fi
+    fi
+}
+
+set_resolv_conf() {
+    local server_ip="$1"
+    echo -e "${BLUE}信息: 正在备份当前的 DNS 配置...${NC}"
+    if [ -f /etc/resolv.conf ]; then
+        chattr -i /etc/resolv.conf 2>/dev/null
+        cp /etc/resolv.conf "/etc/resolv.conf.bak_$(date +%Y%m%d_%H%M%S)"
+    fi
+    echo -e "${BLUE}信息: 正在写入新的 DNS 配置 (nameserver ${server_ip})...${NC}"
+    printf "nameserver %s\n" "$server_ip" > /etc/resolv.conf
+    if chattr +i /etc/resolv.conf; then
+        echo -e "${GREEN}成功: /etc/resolv.conf 已锁定，防止被覆盖。${NC}"
+    else
+        echo -e "${YELLOW}警告: 无法锁定 /etc/resolv.conf（缺少 chattr 或不支持），继续。${NC}"
+    fi
+}
+
+ensure_ipv4_preference() {
+    echo -e "${BLUE}信息: 正在设置系统优先使用 IPv4（/etc/gai.conf）...${NC}"
+    if [ -f /etc/gai.conf ]; then
+        if grep -qE '^\s*#\s*precedence ::ffff:0:0/96 100' /etc/gai.conf; then
+            sed -i 's/^\s*#\s*precedence ::ffff:0:0\/96 100/precedence ::ffff:0:0\/96 100/' /etc/gai.conf
+        elif ! grep -qE '^\s*precedence ::ffff:0:0/96 100' /etc/gai.conf; then
+            echo 'precedence ::ffff:0:0/96 100' >> /etc/gai.conf
+        fi
+    else
+        echo 'precedence ::ffff:0:0/96 100' > /etc/gai.conf
+    fi
+    echo -e "${GREEN}成功: 已设置 IPv4 优先。${NC}"
+}
+
+enforce_dns_only_to_server() {
+    local server_ip="$1"
+    echo -e "${BLUE}信息: 正在应用防火墙规则，强制 DNS 仅发往 ${server_ip}...${NC}"
+    if ! command -v iptables &>/dev/null; then
+        echo -e "${RED}错误: 未找到 iptables，无法应用 DNS 强制规则。${NC}"
+        return 1
+    fi
+    for proto in udp tcp; do
+        if ! iptables -C OUTPUT -p "${proto}" --dport 53 -d "${server_ip}" -m comment --comment "dns-unlock-enforce-dns" -j ACCEPT &>/dev/null; then
+            iptables -I OUTPUT -p "${proto}" --dport 53 -d "${server_ip}" -m comment --comment "dns-unlock-enforce-dns" -j ACCEPT
+        fi
+        if ! iptables -C OUTPUT -p "${proto}" --dport 53 -m comment --comment "dns-unlock-enforce-dns" -j REJECT &>/dev/null; then
+            iptables -A OUTPUT -p "${proto}" --dport 53 -m comment --comment "dns-unlock-enforce-dns" -j REJECT
+        fi
+    done
+    if command -v netfilter-persistent &>/dev/null; then
+        netfilter-persistent save >/dev/null 2>&1 && echo -e "${GREEN}成功: 防火墙规则已持久化。${NC}"
+    fi
+}
+
+revert_dns_enforcement_rules() {
+    echo -e "${BLUE}信息: 正在移除由脚本添加的 DNS 强制规则...${NC}"
+    local server_ip=""
+    if [ -f /etc/resolv.conf ]; then
+        server_ip=$(awk '/^nameserver[ \t]+([0-9]{1,3}\.){3}[0-9]{1,3}/{print $2; exit}' /etc/resolv.conf)
+    fi
+    for proto in udp tcp; do
+        if [[ -n "$server_ip" ]] && iptables -C OUTPUT -p "${proto}" --dport 53 -d "${server_ip}" -m comment --comment "dns-unlock-enforce-dns" -j ACCEPT &>/dev/null; then
+            iptables -D OUTPUT -p "${proto}" --dport 53 -d "${server_ip}" -m comment --comment "dns-unlock-enforce-dns" -j ACCEPT
+        fi
+        while iptables -C OUTPUT -p "${proto}" --dport 53 -m comment --comment "dns-unlock-enforce-dns" -j REJECT &>/dev/null; do
+            iptables -D OUTPUT -p "${proto}" --dport 53 -m comment --comment "dns-unlock-enforce-dns" -j REJECT || break
+        done
+    done
+    if command -v netfilter-persistent &>/dev/null; then
+        netfilter-persistent save >/dev/null 2>&1 && echo -e "${GREEN}成功: 防火墙规则变更已持久化。${NC}"
+    fi
+}
+
+
 # ======================= 核心功能函数 =======================
 
 dns_unlock_menu() {
@@ -248,6 +338,10 @@ EOT
     if [[ -z "$PUBLIC_IP" ]]; then echo -e "${RED}错误: 无法获取公网IP地址。${NC}"; return 1; fi
     
     DNSMASQ_CONFIG_FILE="/etc/dnsmasq.d/custom_unlock.conf"
+    # 可选：启用 AAAA 过滤，防止 IPv6 泄漏（默认启用）
+    read -p "是否在服务端启用 AAAA 过滤（filter-aaaa）以防 IPv6 泄漏？(Y/n): " enable_filter_aaaa
+    local FILTER_AAAA_LINE=""
+    if [[ "$enable_filter_aaaa" =~ ^[yY]$ ]] || [[ -z "$enable_filter_aaaa" ]]; then FILTER_AAAA_LINE="filter-aaaa"; fi
     
     tee "$DNSMASQ_CONFIG_FILE" > /dev/null <<EOF
 # --- DNSMASQ CONFIG MODULE MANAGED BY SCRIPT ---
@@ -257,6 +351,7 @@ bogus-priv
 no-resolv
 no-poll
 all-servers
+$FILTER_AAAA_LINE
 cache-size=2048
 local-ttl=60
 interface=* # Listen on all network interfaces to accept queries from non-local IPs
@@ -484,21 +579,38 @@ setup_dns_client() {
     echo -e "${YELLOW}--- 设置 DNS 客户端 ---${NC}"
     read -p "请输入您的 DNS 解锁服务器的 IP 地址: " server_ip
     if ! [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo -e "${RED}错误: 您输入的不是一个有效的 IP 地址。${NC}"; return 1; fi
-    echo -e "${BLUE}信息: 正在备份当前的 DNS 配置...${NC}"
-    if [ -f /etc/resolv.conf ]; then
-        chattr -i /etc/resolv.conf 2>/dev/null
-        cp /etc/resolv.conf "/etc/resolv.conf.bak_$(date +%Y%m%d_%H%M%S)"
-        echo -e "${GREEN}信息: 原有配置已备份至 /etc/resolv.conf.bak_...${NC}"
+
+    # 1) （推荐）禁用 systemd-resolved，避免 stub 劫持；解除 resolv.conf 软链
+    disable_systemd_resolved_if_running
+
+    # 2) 写入并锁定 resolv.conf 指向 A
+    set_resolv_conf "$server_ip"
+
+    # 3) （推荐）设置系统 IPv4 优先，避免 AAAA 泄漏
+    read -p "是否设置系统 IPv4 优先（/etc/gai.conf，推荐）? (Y/n): " set_v4
+    if [[ "$set_v4" =~ ^[yY]$ ]] || [[ -z "$set_v4" ]]; then
+        ensure_ipv4_preference
+    else
+        echo -e "${YELLOW}提示: 已跳过 IPv4 优先设置，某些程序可能优先走 IPv6 导致绕过解锁。${NC}"
     fi
-    echo -e "${BLUE}信息: 正在写入新的 DNS 配置...${NC}"
-    echo "nameserver $server_ip" > /etc/resolv.conf
-    echo -e "${BLUE}信息: 正在锁定 DNS 配置文件以防被覆盖...${NC}"
-    if chattr +i /etc/resolv.conf; then echo -e "${GREEN}成功: 客户端 DNS 已成功设置为 ${server_ip} 并已锁定！${NC}"; else echo -e "${RED}错误: 锁定 /etc/resolv.conf 文件失败。${NC}"; fi
+
+    # 4) （可选）强制 DNS 仅发往 A，防止程序私自换 DNS
+    read -p "是否添加防火墙规则，强制所有 DNS 仅发往 ${server_ip} ? (y/N): " enforce_dns
+    if [[ "$enforce_dns" =~ ^[yY]$ ]]; then
+        enforce_dns_only_to_server "$server_ip"
+    else
+        echo -e "${YELLOW}提示: 未启用 DNS 强制规则，若有程序绕过 /etc/resolv.conf，可能仍出现异常。${NC}"
+    fi
+
+    echo -e "${GREEN}成功: 客户端 DNS 已完成设置。${NC}"
+    echo -e "${BLUE}建议测试:${NC} dig +short chatgpt.com ; curl --socks5 与 --socks5-hostname 对比访问。"
 }
 
 uninstall_dns_client() {
     clear
     echo -e "${YELLOW}--- 卸载/还原 DNS 客户端设置 ---${NC}"
+    # 移除由脚本添加的 DNS 强制规则
+    revert_dns_enforcement_rules
     echo -e "${BLUE}信息: 正在解锁 DNS 配置文件...${NC}"
     chattr -i /etc/resolv.conf 2>/dev/null
     local latest_backup
@@ -511,6 +623,17 @@ uninstall_dns_client() {
         echo -e "${YELLOW}警告: 未找到备份文件。正在设置为通用 DNS (8.8.8.8)...${NC}"
         echo "nameserver 8.8.8.8" > /etc/resolv.conf
         echo -e "${GREEN}成功: DNS 已设置为通用公共服务器。${NC}"
+    fi
+    # 可选：恢复 systemd-resolved
+    if systemctl list-unit-files | grep -q '^systemd-resolved.service'; then
+        read -p "是否重新启用并启动 systemd-resolved? (y/N): " reenable_sr
+        if [[ "$reenable_sr" =~ ^[yY]$ ]]; then
+            if [ -f /run/systemd/resolve/stub-resolv.conf ]; then
+                rm -f /etc/resolv.conf
+                ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+            fi
+            systemctl enable --now systemd-resolved && echo -e "${GREEN}已重新启用 systemd-resolved。${NC}"
+        fi
     fi
 }
 
