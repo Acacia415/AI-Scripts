@@ -321,6 +321,29 @@ install_speedtest() {
 }
 
 
+# ======================= BestTrace回程测试 =======================
+install_besttrace() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}BestTrace三网回程延迟路由测试${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    # 检查是否已安装wget
+    if ! command -v wget &> /dev/null; then
+        echo -e "${CYAN}安装wget...${NC}"
+        if ! sudo apt-get update || ! sudo apt-get install -y wget; then
+            echo -e "${RED}安装wget失败！${NC}"
+            return 1
+        fi
+    fi
+    
+    # 下载并执行besttrace脚本
+    echo -e "${CYAN}开始BestTrace测试...${NC}"
+    wget -qO- git.io/besttrace | bash
+    
+    echo -e "${GREEN}BestTrace测试完成！${NC}"
+}
+
 
 # ====================== 修改后的Nginx管理函数 =======================
 nginx_main() {
@@ -709,21 +732,22 @@ main_menu() {
     echo -e "11. 安装 3X-UI 管理面板"
     echo -e "12. 流媒体解锁检测"
     echo -e "13. Speedtest网络测速"
-    echo -e "14. 开放所有端口"
-    echo -e "15. Caddy反代管理"
-    echo -e "16. Nginx管理"
-    echo -e "17. IP优先级设置"
-    echo -e "18. TCP性能优化"
-    echo -e "19. 命令行美化"
-    echo -e "20. DNS解锁服务"
-    echo -e "21. 安装Sub-Store"
-    echo -e "22. 搭建TG图床"
-    echo -e "23. TCP性能优化 (BBR+fq)"
-    echo -e "24. 恢复TCP原始配置"
-    echo -e "25. 安装Fail2Ban"
-    echo -e "26. 安装 acme.sh"
-    echo -e "27. 安装 Gost v3"
-    echo -e "28. 修改主机名"
+    echo -e "14. BestTrace回程测试"
+    echo -e "15. 开放所有端口"
+    echo -e "16. Caddy反代管理"
+    echo -e "17. Nginx管理"
+    echo -e "18. IP优先级设置"
+    echo -e "19. TCP性能优化"
+    echo -e "20. 命令行美化"
+    echo -e "21. DNS解锁服务"
+    echo -e "22. 安装Sub-Store"
+    echo -e "23. 搭建TG图床"
+    echo -e "24. TCP性能优化 (BBR+fq)"
+    echo -e "25. 恢复TCP原始配置"
+    echo -e "26. 安装Fail2Ban"
+    echo -e "27. 安装 acme.sh"
+    echo -e "28. 安装 Gost v3"
+    echo -e "29. 修改主机名"
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
@@ -783,63 +807,67 @@ main_menu() {
         install_speedtest 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      14)
-        open_all_ports
+      14)  
+        install_besttrace 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       15)
-        caddy_manager
+        open_all_ports
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       16)
-        nginx_main
+        caddy_manager
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       17)
-        modify_ip_preference
+        nginx_main
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       18)
-        install_magic_tcp 
+        modify_ip_preference
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       19)
+        install_magic_tcp 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      20)
         install_shell_beautify
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      20)  
+      21)  
         install_dns_unlock
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      21)
+      22)
         install_substore
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      22)  
+      23)  
         install_tg_image_host 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      23)
+      24)
         optimize_tcp_bbr
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      24)
+      25)
         restore_tcp_config
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      25)
+      26)
         install_fail2ban 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      26)
+      27)
         install_acme 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      27)
+      28)
         install_gost_v3 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      28)
+      29)
         change_hostname 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
