@@ -8,8 +8,12 @@
 AI-Scripts/
 ├── tool.sh                          # 主菜单脚本
 ├── README.md                        # 项目说明文档
-├── SCRIPTS_MAPPING.md               # 脚本拆分映射文档
-│
+├── dns_unlock.sh                    # DNS解锁脚本
+├── gost_v3.sh                       # 使用gostv3转发端口
+├── install_fail2ban.sh              # 安装fail2ban
+├── install_imghub.sh                # 安装TG图床
+├── nginx-manager.sh                 # Nginx反代管理
+├── iptables.sh                      # iptables转发
 ├── display_system_info.sh           # 系统信息查询
 ├── enable_root_login.sh             # 开启root用户登录
 ├── install_traffic_monitor.sh       # 安装流量监控服务
