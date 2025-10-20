@@ -8,23 +8,23 @@
 AI-Scripts/
 ├── tool.sh                          # 主菜单脚本
 ├── README.md                        # 项目说明文档
+├── caddy_manager.sh                 # Caddy反代管理
+├── display_system_info.sh           # 系统信息查询
 ├── dns_unlock.sh                    # DNS解锁脚本
+├── enable_root_login.sh             # 开启root用户登录
 ├── gost_v3.sh                       # 使用gostv3转发端口
 ├── install_fail2ban.sh              # 安装fail2ban
 ├── install_imghub.sh                # 安装TG图床
-├── nginx-manager.sh                 # Nginx反代管理
-├── iptables.sh                      # iptables转发
-├── display_system_info.sh           # 系统信息查询
-├── enable_root_login.sh             # 开启root用户登录
-├── install_traffic_monitor.sh       # 安装流量监控服务
-├── uninstall_traffic_monitor.sh     # 完全卸载流量监控
-├── open_all_ports.sh                # 开放所有端口
-├── caddy_manager.sh                 # Caddy反代管理
-├── modify_ip_preference.sh          # IP优先级设置
 ├── install_shell_beautify.sh        # 命令行美化
 ├── install_substore.sh              # 安装Sub-Store
+├── install_traffic_monitor.sh       # 安装流量监控服务
+├── iptables.sh                      # iptables转发
+├── modify_ip_preference.sh          # IP优先级设置
+├── nginx-manager.sh                 # Nginx反代管理
+├── open_all_ports.sh                # 开放所有端口
 ├── optimize_tcp_bbr.sh              # TCP性能优化(BBR+fq)
-└── restore_tcp_config.sh            # 恢复TCP原始配置
+├── restore_tcp_config.sh            # 恢复TCP原始配置
+└── uninstall_traffic_monitor.sh     # 完全卸载流量监控
 ```
 
 ## 🚀 快速开始
