@@ -52,6 +52,82 @@ fi
 
 
 
+# ======================= 系统信息查询 =======================
+display_system_info() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/display_system_info.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/display_system_info.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
+# ======================= 开启root用户登录 =======================
+enable_root_login() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/enable_root_login.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/enable_root_login.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
+# ======================= 安装流量监控服务 =======================
+install_traffic_monitor() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/install_traffic_monitor.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_traffic_monitor.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
+# ======================= 完全卸载流量监控 =======================
+uninstall_traffic_monitor() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/uninstall_traffic_monitor.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/uninstall_traffic_monitor.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
 # ======================= 安装snell协议 =======================
 install_snell() {
     clear
@@ -414,6 +490,26 @@ install_gost_v3() {
     fi
 }
 
+# ======================= 修改主机名 =======================
+change_hostname() {
+    clear
+    # 添加来源提示
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    # 执行安装流程（增加错误处理和自动清理）
+    if wget -O change_hostname.sh https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/change_hostname.sh; then
+        chmod +x change_hostname.sh
+        ./change_hostname.sh
+        rm -f change_hostname.sh  # 执行后清理脚本
+    else
+        echo -e "${RED}下载主机名修改脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
 # ======================= 脚本更新 =======================
 update_script() {
   echo -e "${YELLOW}开始更新脚本...${NC}"
@@ -494,6 +590,7 @@ main_menu() {
     echo -e "25. 安装Fail2Ban"
     echo -e "26. 安装 acme.sh"
     echo -e "27. 安装 Gost v3"
+    echo -e "28. 修改主机名"
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
@@ -502,63 +599,19 @@ main_menu() {
     read -p "请输入选项 : " choice
     case $choice in
       1)
-        clear
-        echo -e "${YELLOW}══════════════════${NC}"
-        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
-        echo -e "${YELLOW}══════════════════${NC}"
-        local install_script="/tmp/display_system_info.sh"
-        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/display_system_info.sh; then
-            chmod +x "$install_script"
-            "$install_script"
-            rm -f "$install_script"
-        else
-            echo -e "${RED}下载脚本失败！${NC}"
-        fi
+        display_system_info
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       2)
-        clear
-        echo -e "${YELLOW}══════════════════${NC}"
-        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
-        echo -e "${YELLOW}══════════════════${NC}"
-        local install_script="/tmp/enable_root_login.sh"
-        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/enable_root_login.sh; then
-            chmod +x "$install_script"
-            "$install_script"
-            rm -f "$install_script"
-        else
-            echo -e "${RED}下载脚本失败！${NC}"
-        fi
+        enable_root_login
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       3)
-        clear
-        echo -e "${YELLOW}══════════════════${NC}"
-        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
-        echo -e "${YELLOW}══════════════════${NC}"
-        local install_script="/tmp/install_traffic_monitor.sh"
-        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_traffic_monitor.sh; then
-            chmod +x "$install_script"
-            "$install_script"
-            rm -f "$install_script"
-        else
-            echo -e "${RED}下载脚本失败！${NC}"
-        fi
+        install_traffic_monitor
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       4)
-        clear
-        echo -e "${YELLOW}══════════════════${NC}"
-        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
-        echo -e "${YELLOW}══════════════════${NC}"
-        local install_script="/tmp/uninstall_traffic_monitor.sh"
-        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/uninstall_traffic_monitor.sh; then
-            chmod +x "$install_script"
-            "$install_script"
-            rm -f "$install_script"
-        else
-            echo -e "${RED}下载脚本失败！${NC}"
-        fi
+        uninstall_traffic_monitor
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       5) 
@@ -728,6 +781,10 @@ main_menu() {
         ;;
       27)
         install_gost_v3 
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      28)
+        change_hostname 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       99)  
