@@ -10,25 +10,104 @@ NC='\033[0m'
 
 # ======================= 流量监控安装 =======================
 install_traffic_monitor() {
-  # 检查依赖并安装
-check_dependencies() {
-    local deps=("ipset" "iptables" "ip")
+  # 检查并安装依赖
+  check_dependencies() {
+    echo -e "${CYAN}正在检查系统依赖...${NC}"
+    
+    # 定义所需依赖
+    local deps=("ipset" "iptables" "ip" "bc" "ss" "awk")
     local missing=()
     
+    # 检测缺失的命令
     for dep in "${deps[@]}"; do
         if ! command -v $dep &>/dev/null; then
             missing+=("$dep")
         fi
     done
-    if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "${YELLOW}正在安装缺失依赖：${missing[*]}${NC}"
-        apt-get update
-        if ! apt-get install -y ipset iptables iproute2; then
-            return 1
-        fi
+    
+    # 如果没有缺失依赖，直接返回
+    if [ ${#missing[@]} -eq 0 ]; then
+        echo -e "${GREEN}✓ 所有依赖已安装${NC}"
+        return 0
     fi
+    
+    echo -e "${YELLOW}⚠️  检测到缺失依赖：${missing[*]}${NC}"
+    echo -e "${CYAN}正在自动安装...${NC}"
+    
+    # 检测系统类型并安装
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+    elif [ -f /etc/redhat-release ]; then
+        OS="rhel"
+    else
+        OS=$(uname -s)
+    fi
+    
+    case "${OS}" in
+        ubuntu|debian|kali|linuxmint)
+            echo -e "${BLUE}检测到 Debian/Ubuntu 系统${NC}"
+            apt-get update -qq
+            if apt-get install -y ipset iptables iproute2 bc; then
+                echo -e "${GREEN}✓ 依赖安装成功${NC}"
+            else
+                echo -e "${RED}✗ 依赖安装失败${NC}"
+                return 1
+            fi
+            ;;
+        centos|rhel|rocky|almalinux|fedora)
+            echo -e "${BLUE}检测到 CentOS/RHEL 系统${NC}"
+            if command -v dnf &>/dev/null; then
+                if dnf install -y ipset iptables iproute bc; then
+                    echo -e "${GREEN}✓ 依赖安装成功${NC}"
+                else
+                    echo -e "${RED}✗ 依赖安装失败${NC}"
+                    return 1
+                fi
+            else
+                if yum install -y ipset iptables iproute bc; then
+                    echo -e "${GREEN}✓ 依赖安装成功${NC}"
+                else
+                    echo -e "${RED}✗ 依赖安装失败${NC}"
+                    return 1
+                fi
+            fi
+            ;;
+        alpine)
+            echo -e "${BLUE}检测到 Alpine Linux${NC}"
+            if apk add --no-cache ipset iptables iproute2 bc; then
+                echo -e "${GREEN}✓ 依赖安装成功${NC}"
+            else
+                echo -e "${RED}✗ 依赖安装失败${NC}"
+                return 1
+            fi
+            ;;
+        arch|manjaro)
+            echo -e "${BLUE}检测到 Arch Linux${NC}"
+            if pacman -S --noconfirm ipset iptables iproute2 bc; then
+                echo -e "${GREEN}✓ 依赖安装成功${NC}"
+            else
+                echo -e "${RED}✗ 依赖安装失败${NC}"
+                return 1
+            fi
+            ;;
+        *)
+            echo -e "${RED}✗ 不支持的系统类型: ${OS}${NC}"
+            echo -e "${YELLOW}请手动安装以下依赖: ipset iptables iproute2 bc${NC}"
+            return 1
+            ;;
+    esac
+    
     return 0
-}
+  }
+  
+  # ▼▼▼ 执行依赖检查 ▼▼▼
+  if ! check_dependencies; then
+    echo -e "${RED}依赖安装失败，无法继续！${NC}"
+    read -p "按任意键返回..."
+    return 1
+  fi
+  echo ""
 
   #---------- 生成主监控脚本 ----------#
   echo -e "\n${CYAN}[1/4] 生成主脚本到 /root/ip_blacklist.sh${NC}"
