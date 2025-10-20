@@ -79,11 +79,11 @@ modify_ip_preference() {
         echo -e "2. 设置IPv6优先"
         echo -e "3. 恢复系统默认"
         echo -e "\n${CYAN}[IPv6管理]${NC}"
-        echo -e "5. 禁用IPv6"
-        echo -e "6. 恢复IPv6"
-        echo -e "7. 自动配置IPv6"
+        echo -e "4. 禁用IPv6"
+        echo -e "5. 恢复IPv6"
+        echo -e "6. 自动配置IPv6"
         echo -e "\n${CYAN}[其他]${NC}"
-        echo -e "4. 查看详细配置"
+        echo -e "7. 查看详细配置"
         echo -e "0. 返回主菜单"
         
         show_current_status
@@ -444,22 +444,22 @@ EOF
                 read -r
                 ;;
             4)
-                show_detailed_config
-                ;;
-            5)
                 disable_ipv6
                 echo -e "\n按回车键继续..."
                 read -r
                 ;;
-            6)
+            5)
                 enable_ipv6
                 echo -e "\n按回车键继续..."
                 read -r
                 ;;
-            7)
+            6)
                 auto_config_ipv6
                 echo -e "\n按回车键继续..."
                 read -r
+                ;;
+            7)
+                show_detailed_config
                 ;;
             0)
                 return
