@@ -510,6 +510,139 @@ change_hostname() {
     fi
 }
 
+# ======================= 开放所有端口 =======================
+open_all_ports() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/open_all_ports.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/open_all_ports.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
+# ======================= Caddy反代管理 =======================
+caddy_manager() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/caddy_manager.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/caddy_manager.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
+# ======================= IP优先级设置 =======================
+modify_ip_preference() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/modify_ip_preference.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/modify_ip_preference.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
+# ======================= 命令行美化 =======================
+install_shell_beautify() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/install_shell_beautify.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_shell_beautify.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
+# ======================= 安装Sub-Store =======================
+install_substore() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/install_substore.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_substore.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
+# ======================= TCP性能优化(BBR+fq) =======================
+optimize_tcp_bbr() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/optimize_tcp_bbr.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/optimize_tcp_bbr.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
+# ======================= 恢复TCP原始配置 =======================
+restore_tcp_config() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/restore_tcp_config.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/restore_tcp_config.sh; then
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
 # ======================= 脚本更新 =======================
 update_script() {
   echo -e "${YELLOW}开始更新脚本...${NC}"
@@ -651,33 +784,11 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       14)
-        clear
-        echo -e "${YELLOW}══════════════════${NC}"
-        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
-        echo -e "${YELLOW}══════════════════${NC}"
-        local install_script="/tmp/open_all_ports.sh"
-        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/open_all_ports.sh; then
-            chmod +x "$install_script"
-            "$install_script"
-            rm -f "$install_script"
-        else
-            echo -e "${RED}下载脚本失败！${NC}"
-        fi
+        open_all_ports
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       15)
-        clear
-        echo -e "${YELLOW}══════════════════${NC}"
-        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
-        echo -e "${YELLOW}══════════════════${NC}"
-        local install_script="/tmp/caddy_manager.sh"
-        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/caddy_manager.sh; then
-            chmod +x "$install_script"
-            "$install_script"
-            rm -f "$install_script"
-        else
-            echo -e "${RED}下载脚本失败！${NC}"
-        fi
+        caddy_manager
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       16)
@@ -685,18 +796,7 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       17)
-        clear
-        echo -e "${YELLOW}══════════════════${NC}"
-        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
-        echo -e "${YELLOW}══════════════════${NC}"
-        local install_script="/tmp/modify_ip_preference.sh"
-        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/modify_ip_preference.sh; then
-            chmod +x "$install_script"
-            "$install_script"
-            rm -f "$install_script"
-        else
-            echo -e "${RED}下载脚本失败！${NC}"
-        fi
+        modify_ip_preference
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       18)
@@ -704,18 +804,7 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       19)
-        clear
-        echo -e "${YELLOW}══════════════════${NC}"
-        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
-        echo -e "${YELLOW}══════════════════${NC}"
-        local install_script="/tmp/install_shell_beautify.sh"
-        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_shell_beautify.sh; then
-            chmod +x "$install_script"
-            "$install_script"
-            rm -f "$install_script"
-        else
-            echo -e "${RED}下载脚本失败！${NC}"
-        fi
+        install_shell_beautify
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       20)  
@@ -723,18 +812,7 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       21)
-        clear
-        echo -e "${YELLOW}══════════════════${NC}"
-        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
-        echo -e "${YELLOW}══════════════════${NC}"
-        local install_script="/tmp/install_substore.sh"
-        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_substore.sh; then
-            chmod +x "$install_script"
-            "$install_script"
-            rm -f "$install_script"
-        else
-            echo -e "${RED}下载脚本失败！${NC}"
-        fi
+        install_substore
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       22)  
@@ -742,33 +820,11 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       23)
-        clear
-        echo -e "${YELLOW}══════════════════${NC}"
-        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
-        echo -e "${YELLOW}══════════════════${NC}"
-        local install_script="/tmp/optimize_tcp_bbr.sh"
-        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/optimize_tcp_bbr.sh; then
-            chmod +x "$install_script"
-            "$install_script"
-            rm -f "$install_script"
-        else
-            echo -e "${RED}下载脚本失败！${NC}"
-        fi
+        optimize_tcp_bbr
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       24)
-        clear
-        echo -e "${YELLOW}══════════════════${NC}"
-        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
-        echo -e "${YELLOW}══════════════════${NC}"
-        local install_script="/tmp/restore_tcp_config.sh"
-        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/restore_tcp_config.sh; then
-            chmod +x "$install_script"
-            "$install_script"
-            rm -f "$install_script"
-        else
-            echo -e "${RED}下载脚本失败！${NC}"
-        fi
+        restore_tcp_config
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       25)
