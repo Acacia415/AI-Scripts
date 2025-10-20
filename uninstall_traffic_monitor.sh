@@ -31,21 +31,42 @@ uninstall_service() {
     rm -vf /etc/systemd/system/ip_blacklist.service /root/ip_blacklist.sh
 
     echo -e "\n${YELLOW}[3/6] 清理网络规则...${NC}"
-    # 分步清理策略
+    # 安全清理策略：仅删除本脚本创建的规则
     {
-        echo -e "${YELLOW}[步骤3.1] 清除动态规则${NC}"
-        iptables -S | grep -E 'TRAFFIC_BLOCK|whitelist|banlist' | sed 's/^-A//' | xargs -rL1 iptables -D 2>/dev/null || true
+        echo -e "${YELLOW}[步骤3.1] 从INPUT链移除TRAFFIC_BLOCK跳转${NC}"
+        # 只删除指向TRAFFIC_BLOCK的规则
+        iptables -D INPUT -j TRAFFIC_BLOCK 2>/dev/null || true
 
-        echo -e "${YELLOW}[步骤3.2] 清理自定义链${NC}"
-        iptables -D INPUT -j TRAFFIC_BLOCK 2>/dev/null
-        iptables -F TRAFFIC_BLOCK 2>/dev/null
-        iptables -X TRAFFIC_BLOCK 2>/dev/null
+        echo -e "${YELLOW}[步骤3.2] 清空并删除TRAFFIC_BLOCK自定义链${NC}"
+        # 清空链中的所有规则
+        iptables -F TRAFFIC_BLOCK 2>/dev/null || true
+        # 删除自定义链
+        iptables -X TRAFFIC_BLOCK 2>/dev/null || true
 
-        echo -e "${YELLOW}[步骤3.3] 刷新全局规则${NC}"
-        iptables -F 2>/dev/null && iptables -X 2>/dev/null
+        echo -e "${YELLOW}[步骤3.3] 验证规则清理${NC}"
+        # 检查是否还有残留的相关规则
+        remaining=$(iptables -S | grep -c -E 'TRAFFIC_BLOCK|whitelist|banlist' || true)
+        if [ "$remaining" -gt 0 ]; then
+            echo -e "${YELLOW}发现 $remaining 条相关规则，正在清理...${NC}"
+            # 逐条删除包含关键字的规则
+            iptables -S | grep -E 'TRAFFIC_BLOCK|whitelist|banlist' | while read -r line; do
+                # 将 -A 改为 -D 来删除规则
+                delete_cmd=$(echo "$line" | sed 's/^-A/-D/')
+                eval "iptables $delete_cmd" 2>/dev/null || true
+            done
+        else
+            echo -e "${GREEN}✓ 未发现残留规则${NC}"
+        fi
 
-        echo -e "${YELLOW}[步骤3.4] 持久化清理${NC}"
-        iptables-save | grep -vE 'TRAFFIC_BLOCK|banlist|whitelist' | iptables-restore
+        echo -e "${YELLOW}[步骤3.4] 更新持久化规则${NC}"
+        # 仅从持久化文件中移除相关规则，保留其他规则
+        if [ -f /etc/iptables/rules.v4 ]; then
+            echo -e "${CYAN}备份现有规则到 /etc/iptables/rules.v4.bak${NC}"
+            cp /etc/iptables/rules.v4 /etc/iptables/rules.v4.bak
+            iptables-save | grep -vE 'TRAFFIC_BLOCK|banlist|whitelist' > /etc/iptables/rules.v4.tmp
+            mv /etc/iptables/rules.v4.tmp /etc/iptables/rules.v4
+            echo -e "${GREEN}✓ 已保留其他防火墙规则${NC}"
+        fi
     } || true
 
     # 内核级清理
@@ -66,7 +87,22 @@ uninstall_service() {
     } || true
 
     echo -e "\n${YELLOW}[4/6] 删除配置...${NC}"
-    rm -vf /etc/ipset.conf /etc/iptables/rules.v4
+    # 只删除ipset配置，保留iptables规则文件（已在步骤3.4中更新）
+    if [ -f /etc/ipset.conf ]; then
+        echo -e "${CYAN}备份ipset配置到 /etc/ipset.conf.bak${NC}"
+        cp /etc/ipset.conf /etc/ipset.conf.bak
+        # 从ipset配置中移除whitelist和banlist
+        grep -vE 'whitelist|banlist' /etc/ipset.conf > /etc/ipset.conf.tmp 2>/dev/null || true
+        if [ -s /etc/ipset.conf.tmp ]; then
+            mv /etc/ipset.conf.tmp /etc/ipset.conf
+            echo -e "${GREEN}✓ 已保留其他ipset配置${NC}"
+        else
+            rm -f /etc/ipset.conf /etc/ipset.conf.tmp
+            echo -e "${GREEN}✓ ipset配置文件已清空${NC}"
+        fi
+    fi
+    # 删除日志轮替配置
+    rm -vf /etc/logrotate.d/iptables_ban 2>/dev/null || true
 
     echo -e "\n${YELLOW}[5/6] 重置系统...${NC}"
     systemctl daemon-reload
@@ -79,7 +115,8 @@ uninstall_service() {
     echo -n "IPTables链: " && { iptables -L TRAFFIC_BLOCK &>/dev/null && check_fail=1 && echo -e "${RED}存在${NC}" || echo -e "${GREEN}已移除${NC}"; }
     echo -n "IPSet黑名单: " && { ipset list banlist &>/dev/null && check_fail=1 && echo -e "${RED}存在${NC}" || echo -e "${GREEN}已移除${NC}"; }
     echo -n "IPSet白名单: " && { ipset list whitelist &>/dev/null && check_fail=1 && echo -e "${RED}存在${NC}" || echo -e "${GREEN}已移除${NC}"; }
-    echo -n "残留配置文件: " && { ls /etc/ipset.conf /etc/iptables/rules.v4 &>/dev/null && check_fail=1 && echo -e "${RED}存在${NC}" || echo -e "${GREEN}已清除${NC}"; }
+    echo -n "日志轮替配置: " && { [ -f /etc/logrotate.d/iptables_ban ] && check_fail=1 && echo -e "${RED}存在${NC}" || echo -e "${GREEN}已清除${NC}"; }
+    echo -n "残留规则检查: " && { iptables -S | grep -qE 'TRAFFIC_BLOCK|banlist|whitelist' && check_fail=1 && echo -e "${RED}存在${NC}" || echo -e "${GREEN}已清除${NC}"; }
 
     [ $check_fail -eq 0 ] && echo -e "\n${GREEN}✅ 卸载完成，无残留${NC}" || echo -e "\n${RED}⚠️  检测到残留组件，请重启系统${NC}"
 }
