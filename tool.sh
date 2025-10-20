@@ -48,431 +48,9 @@ if [[ $(realpath "$0") != "/usr/local/bin/p" ]]; then
     echo -e "${GREEN}    现在您可以在终端中直接输入 'p' 来运行此工具箱。${NC}"
 fi
 
-# ======================= 系统信息查询 =======================
-display_system_info() {
-    # 检查依赖
-    check_deps() {
-        local deps=(jq whois)
-        local missing=()
-        for dep in "${deps[@]}"; do
-            if ! command -v $dep &>/dev/null; then
-                missing+=("$dep")
-            fi
-        done
-        if [ ${#missing[@]} -gt 0 ]; then
-            echo -e "${YELLOW}正在安装依赖：${missing[*]}${NC}"
-            apt-get update >/dev/null 2>&1
-            apt-get install -y "${missing[@]}" >/dev/null 2>&1
-        fi
-    }
 
-    # 获取公网IP信息
-    get_ip_info() {
-        local ipv4=$(curl -s4 ifconfig.me)
-        local ipv6=$(curl -s6 ifconfig.me)
-        echo "$ipv4" "$ipv6"
-    }
 
-    # 获取ASN信息
-    get_asn() {
-        local ip=$1
-        whois -h whois.radb.net -- "-i origin $ip" 2>/dev/null | grep -i descr: | head -1 | awk -F': ' '{print $2}' | xargs
-    }
 
-    # 获取地理信息
-    get_geo() {
-        local ip=$1
-        curl -s "https://ipinfo.io/$ip/json" 2>/dev/null | jq -r '[.country, .city] | join(" ")' 
-    }
-
-    # 获取CPU使用率
-    get_cpu_usage() {
-        echo $(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{printf "%.1f%%", 100 - $1}')
-    }
-
-    # 主显示逻辑
-    clear
-    check_deps
-    read ipv4 ipv6 <<< $(get_ip_info)
-    
-    echo -e "${CYAN}\n系统信息查询"
-    echo "------------------------"
-    echo -e "主机名\t: ${GREEN}$(hostname)${NC}"
-    echo -e "运营商\t: ${GREEN}$(get_asn $ipv4)${NC}"
-    echo "------------------------"
-    echo -e "系统版本\t: ${GREEN}$(lsb_release -sd)${NC}"
-    echo -e "内核版本\t: ${GREEN}$(uname -r)${NC}"
-    echo "------------------------"
-    echo -e "CPU架构\t: ${GREEN}$(uname -m)${NC}"
-    echo -e "CPU型号\t: ${GREEN}$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)${NC}"
-    echo -e "CPU核心\t: ${GREEN}$(nproc) 核${NC}"
-    echo -e "CPU占用\t: ${GREEN}$(get_cpu_usage)${NC}"
-    echo "------------------------"
-    echo -e "物理内存\t: ${GREEN}$(free -m | awk '/Mem/{printf "%.2f/%.2f MB (%.2f%%)", $3, $2, $3/$2*100}')${NC}"
-    echo -e "虚拟内存\t: ${GREEN}$(free -m | awk '/Swap/{printf "%.2f/%.2f MB (%.2f%%)", $3, $2, ($3/$2)*100}')${NC}"
-    echo -e "硬盘使用\t: ${GREEN}$(df -h / | awk 'NR==2{printf "%s/%s (%s)", $3, $2, $5}')${NC}"
-    echo "------------------------"
-    echo -e "公网IPv4\t: ${GREEN}${ipv4:-未检测到}${NC}"
-    echo -e "公网IPv6\t: ${GREEN}${ipv6:-未检测到}${NC}"
-    echo -e "地理位置\t: ${GREEN}$(get_geo $ipv4)${NC}"
-    echo -e "系统时区\t: ${GREEN}$(timedatectl | grep "Time zone" | awk '{print $3}')${NC}"
-    echo -e "运行时间\t: ${GREEN}$(awk '{printf "%d天%d时%d分", $1/86400, ($1%86400)/3600, ($1%3600)/60}' /proc/uptime)${NC}"
-    echo "------------------------"
-}
-
-# ======================= 开启root登录 =======================
-enable_root_login() {
-  # 移除文件保护属性
-  lsattr /etc/passwd /etc/shadow >/dev/null 2>&1
-  chattr -i /etc/passwd /etc/shadow >/dev/null 2>&1
-  chattr -a /etc/passwd /etc/shadow >/dev/null 2>&1
-
-  # 交互设置密码
-  read -p "请输入自定义 root 密码: " mima
-  if [[ -n $mima ]]; then
-    # 修改密码和SSH配置
-    echo root:$mima | chpasswd root
-    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config
-    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config
-    sed -i 's/^#\?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/g' /etc/ssh/sshd_config
-    
-    # 重启SSH服务
-    systemctl restart sshd
-    
-    echo -e "\n${GREEN}配置完成！请手动重启服务器使部分设置生效！${NC}"
-    echo -e "------------------------------------------"
-    echo -e "VPS 当前用户名：root"
-    echo -e "VPS 当前 root 密码：$mima"
-    echo -e "------------------------------------------"
-    echo -e "${YELLOW}请使用以下方式登录："
-    echo -e "1. 密码方式登录"
-    echo -e "2. keyboard-interactive 验证方式${NC}\n"
-  else
-    echo -e "${RED}密码不能为空，设置失败！${NC}"
-  fi
-}
-
-# ======================= 流量监控安装 =======================
-install_traffic_monitor() {
-  # 检查依赖并安装
-check_dependencies() {
-    local deps=("ipset" "iptables" "ip")
-    local missing=()
-    
-    for dep in "${deps[@]}"; do
-        if ! command -v $dep &>/dev/null; then
-            missing+=("$dep")
-        fi
-    done
-    if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "${YELLOW}正在安装缺失依赖：${missing[*]}${NC}"
-        apt-get update
-        if ! apt-get install -y ipset iptables iproute2; then
-            return 1
-        fi
-    fi
-    return 0
-}
-
-  #---------- 生成主监控脚本 ----------#
-  echo -e "\n${CYAN}[1/4] 生成主脚本到 /root/ip_blacklist.sh${NC}"
-  cat > /root/ip_blacklist.sh <<'EOF'
-#!/bin/bash
-
-# 彩色输出定义
-RED='\033[31m'
-GREEN='\033[32m'
-YELLOW='\033[33m'
-BLUE='\033[34m'
-CYAN='\033[36m'
-NC='\033[0m'
-
-# 检查root权限
-if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}错误：此脚本必须以root权限运行！${NC}"
-    exit 1
-fi
-
-# 加载ipset规则
-if [ -f /etc/ipset.conf ]; then
-    ipset restore -! < /etc/ipset.conf
-fi
-
-#---------- 核心初始化 ----------#
-init_system() {
-    # 创建ipset集合
-    ipset create whitelist hash:ip timeout 0 2>/dev/null || true
-    ipset create banlist hash:ip timeout 86400 2>/dev/null || true
-
-    # 配置iptables规则
-    iptables -N TRAFFIC_BLOCK 2>/dev/null
-    iptables -F TRAFFIC_BLOCK 2>/dev/null
-    
-    # 白名单优先规则
-    iptables -C INPUT -j TRAFFIC_BLOCK 2>/dev/null || iptables -I INPUT -j TRAFFIC_BLOCK
-    iptables -A TRAFFIC_BLOCK -m set --match-set whitelist src -j ACCEPT
-    iptables -A TRAFFIC_BLOCK -m set --match-set banlist src -j DROP
-
-    # 获取活动网卡
-    INTERFACE=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n1)
-    [ -z "$INTERFACE" ] && {
-        echo -e "${RED}未找到有效的网卡接口！${NC}"
-        exit 1
-    }
-    echo -e "监控网卡: ${GREEN}$INTERFACE${NC}"
-}
-
-#---------- 流量监控逻辑 ----------#
-start_monitor() {
-    declare -A ip_first_seen
-    LIMIT=40  # 流量阈值(MB/s)
-    LOG_FILE="/var/log/iptables_ban.log"
-
-    while true; do
-        # 实时流量计算
-        RX_BYTES_1=$(cat /sys/class/net/$INTERFACE/statistics/rx_bytes)
-        TX_BYTES_1=$(cat /sys/class/net/$INTERFACE/statistics/tx_bytes)
-        sleep 1
-        RX_BYTES_2=$(cat /sys/class/net/$INTERFACE/statistics/rx_bytes)
-        TX_BYTES_2=$(cat /sys/class/net/$INTERFACE/statistics/tx_bytes)
-
-        RX_RATE=$(echo "scale=2; ($RX_BYTES_2 - $RX_BYTES_1) / 1048576" | bc)
-        TX_RATE=$(echo "scale=2; ($TX_BYTES_2 - $TX_BYTES_1) / 1048576" | bc)
-
-        echo -e "[$(date +%H:%M:%S)] 接收: ${BLUE}${RX_RATE}MB/s${NC} 发送: ${CYAN}${TX_RATE}MB/s${NC}"
-
-        # 超速处理逻辑
-        if (( $(echo "$RX_RATE > $LIMIT || $TX_RATE > $LIMIT" | bc -l) )); then
-            echo -e "\n${YELLOW}⚠️  检测到流量超限！正在分析连接...${NC}"
-            
-            # 获取可疑IP（排除SSH和白名单）
-            IP_LIST=$(ss -ntu state established | awk -v port=22 '
-                NR > 1 {
-                    match($5, /:([0-9]+)$/, port_arr);
-                    current_port = port_arr[1];
-                    ip = gensub(/\[|\]/, "", "g", substr($5, 1, RSTART-1));
-                    if (current_port != port && ip != "0.0.0.0") {
-                        print ip;
-                    }
-                }' | sort | uniq -c | sort -nr)
-            
-            BAN_IP=$(echo "$IP_LIST" | awk 'NR==1 && $2 != "" {print $2}')
-            
-            # 跳过白名单IP
-            if [[ -n "$BAN_IP" ]] && ! ipset test whitelist "$BAN_IP" &>/dev/null; then
-                current_time=$(date +%s)
-                
-                if [[ -z "${ip_first_seen[$BAN_IP]}" ]]; then
-                    ip_first_seen[$BAN_IP]=$current_time
-                    echo -e "首次发现 ${RED}$BAN_IP${NC} 超速于 $(date -d @$current_time '+%H:%M:%S')"
-                else
-                    duration=$(( current_time - ip_first_seen[$BAN_IP] ))
-                    
-                    if (( duration >= 60 )); then
-                        echo -e "${RED}🚫 封禁 $BAN_IP（持续超速 ${duration}秒）${NC}"
-                        ipset add banlist "$BAN_IP" timeout 86400
-                        echo "$(date '+%Y-%m-%d %H:%M:%S') 封禁 $BAN_IP RX:${RX_RATE}MB/s TX:${TX_RATE}MB/s 持续:${duration}秒" >> $LOG_FILE
-                        unset ip_first_seen[$BAN_IP]
-                    else
-                        echo -e "IP ${YELLOW}$BAN_IP${NC} 已超速 ${duration}秒（需满60秒触发封禁）"
-                    fi
-                fi
-            else
-                echo -e "${YELLOW}⚠️  未找到有效封禁目标或目标在白名单中${NC}"
-            fi
-        else
-            ip_first_seen=()
-        fi
-
-        # +++ 新增CPU优化 +++
-        sleep 0.5  # 降低CPU占用
-    done
-}
-
-# 主执行流程
-init_system
-start_monitor
-EOF
-
-  #---------- 白名单交互配置 ----------#
-  echo -e "\n${CYAN}[2/4] 白名单配置${NC}"
-  function validate_ip() {
-      local ip=$1
-      local pattern='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(/([12][0-9]|3[0-2]|[0-9]))?$'
-      [[ $ip =~ $pattern ]] && return 0 || return 1
-  }
-
-  ipset create whitelist hash:ip 2>/dev/null || true
-
-  read -p $'\033[33m是否要配置白名单IP？(y/N) \033[0m' REPLY
-  if [[ "${REPLY,,}" == "y" ]]; then
-      echo -e "\n${CYAN}请输入IP地址（支持格式示例）："
-      echo -e "  • 单个IP: 192.168.1.1"
-      echo -e "  • IP段: 10.0.0.0/24"
-      echo -e "  • 多个IP用空格分隔${NC}"
-      
-      while :; do
-          read -p $'\033[33m请输入IP（多个用空格分隔，直接回车结束）: \033[0m' input
-          [[ -z "$input" ]] && break
-          
-          IFS=' ' read -ra ips <<< "$input"
-          for ip in "${ips[@]}"; do
-              if validate_ip "$ip"; then
-                  if ipset add whitelist "$ip" 2>/dev/null; then
-                      echo -e "${GREEN} ✓ 成功添加：$ip${NC}"
-                  else
-                      echo -e "${YELLOW} ⚠️  已存在：$ip${NC}"
-                  fi
-              else
-                  echo -e "${RED} ✗ 无效格式：$ip${NC}"
-              fi
-          done
-      done
-  else
-      echo -e "${CYAN}已跳过白名单配置${NC}"
-  fi
-
-  #---------- 持久化配置 ----------#
-  echo -e "\n${CYAN}[3/4] 保存防火墙规则${NC}"
-  mkdir -p /etc/ipset
-  ipset save > /etc/ipset.conf
-  iptables-save > /etc/iptables/rules.v4
-
-  #---------- 系统服务配置 ----------#
-  echo -e "\n${CYAN}[4/4] 配置系统服务${NC}"
-  chmod +x /root/ip_blacklist.sh
-
-  cat > /etc/systemd/system/ip_blacklist.service <<EOF
-[Unit]
-Description=IP流量监控与封禁服务
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=/bin/bash /root/ip_blacklist.sh
-Restart=always
-RestartSec=3
-User=root
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  systemctl daemon-reload
-  systemctl enable --now ip_blacklist.service
-
-  # +++ 新增日志轮替配置 +++
-  echo -e "\n${CYAN}[附加] 配置日志轮替规则${NC}"
-  sudo tee /etc/logrotate.d/iptables_ban <<'EOF'
-/var/log/iptables_ban.log {
-    daily
-    rotate 7
-    missingok
-    notifempty
-    compress
-    delaycompress
-}
-EOF
-
-  # ▼▼▼ 新增：立即触发日志轮替 ▼▼▼
-  sudo logrotate -f /etc/logrotate.d/iptables_ban
-
-  # 完成提示
-  echo -e "\n${GREEN}✅ 部署完成！${NC}"
-  echo -e "白名单IP列表："
-  ipset list whitelist -output save | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?' | sed 's/^/  ➤ /'
-  echo -e "\n管理命令："
-  echo -e "  查看日志: ${CYAN}journalctl -u ip_blacklist.service -f${NC}"
-  echo -e "  临时解封: ${CYAN}ipset del banlist <IP地址>${NC}"
-  echo -e "  添加白名单: ${CYAN}ipset add whitelist <IP地址>${NC}"
-  # +++ 新增日志管理提示 +++
-  echo -e "\n日志管理："
-  echo -e "  • 实时日志: ${CYAN}tail -f /var/log/iptables_ban.log${NC}"
-  echo -e "  • 日志轮替: ${CYAN}每天自动压缩，保留最近7天日志${NC}"
-}
-
-# ======================= 流量监控卸载 =======================
-uninstall_service() {
-    # 彩色定义
-    RED='\033[31m'
-    GREEN='\033[32m'
-    YELLOW='\033[33m'
-    NC='\033[0m'
-
-    # 权限检查
-    if [ "$(id -u)" -ne 0 ]; then
-        echo -e "${RED}错误：请使用sudo运行此脚本${NC}"
-        return 1
-    fi
-
-    clear
-    echo -e "${RED}⚠️ ⚠️ ⚠️  危险操作警告 ⚠️ ⚠️ ⚠️ ${NC}"
-    echo -e "${YELLOW}此操作将执行以下操作："
-    echo -e "1. 永久删除所有防火墙规则"
-    echo -e "2. 清除全部流量监控数据"
-    echo -e "3. 移除所有相关系统服务${NC}\n"
-    read -p "确定要彻底卸载所有组件吗？[y/N] " confirm
-    [[ ! "$confirm" =~ [yY] ]] && echo "操作已取消" && return
-
-    echo -e "\n${YELLOW}[1/6] 停止服务...${NC}"
-    systemctl disable --now ip_blacklist.service 2>/dev/null || true
-
-    echo -e "\n${YELLOW}[2/6] 删除文件...${NC}"
-    rm -vf /etc/systemd/system/ip_blacklist.service /root/ip_blacklist.sh
-
-    echo -e "\n${YELLOW}[3/6] 清理网络规则...${NC}"
-    # 分步清理策略
-    {
-        echo -e "${YELLOW}[步骤3.1] 清除动态规则${NC}"
-        iptables -S | grep -E 'TRAFFIC_BLOCK|whitelist|banlist' | sed 's/^-A//' | xargs -rL1 iptables -D 2>/dev/null || true
-
-        echo -e "${YELLOW}[步骤3.2] 清理自定义链${NC}"
-        iptables -D INPUT -j TRAFFIC_BLOCK 2>/dev/null
-        iptables -F TRAFFIC_BLOCK 2>/dev/null
-        iptables -X TRAFFIC_BLOCK 2>/dev/null
-
-        echo -e "${YELLOW}[步骤3.3] 刷新全局规则${NC}"
-        iptables -F 2>/dev/null && iptables -X 2>/dev/null
-
-        echo -e "${YELLOW}[步骤3.4] 持久化清理${NC}"
-        iptables-save | grep -vE 'TRAFFIC_BLOCK|banlist|whitelist' | iptables-restore
-    } || true
-
-    # 内核级清理
-    {
-        echo -e "${YELLOW}[步骤3.5] 清理ipset集合${NC}"
-        ipset list whitelist &>/dev/null && {
-            ipset flush whitelist
-            ipset destroy whitelist
-        }
-        ipset list banlist &>/dev/null && {
-            ipset flush banlist
-            ipset destroy banlist
-        }
-        echo -e "${YELLOW}[步骤3.6] 卸载内核模块（安全模式）${NC}"
-        rmmod ip_set_hash_net 2>/dev/null || true
-        rmmod xt_set 2>/dev/null || true
-        rmmod ip_set 2>/dev/null || true
-    } || true
-
-    echo -e "\n${YELLOW}[4/6] 删除配置...${NC}"
-    rm -vf /etc/ipset.conf /etc/iptables/rules.v4
-
-    echo -e "\n${YELLOW}[5/6] 重置系统...${NC}"
-    systemctl daemon-reload
-    systemctl reset-failed
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
-    echo -e "\n${YELLOW}[6/6] 验证卸载...${NC}"
-    local check_fail=0
-    echo -n "服务状态: " && { systemctl status ip_blacklist.service &>/dev/null && check_fail=1 && echo -e "${RED}存在${NC}" || echo -e "${GREEN}已移除${NC}"; }
-    echo -n "IPTables链: " && { iptables -L TRAFFIC_BLOCK &>/dev/null && check_fail=1 && echo -e "${RED}存在${NC}" || echo -e "${GREEN}已移除${NC}"; }
-    echo -n "IPSet黑名单: " && { ipset list banlist &>/dev/null && check_fail=1 && echo -e "${RED}存在${NC}" || echo -e "${GREEN}已移除${NC}"; }
-    echo -n "IPSet白名单: " && { ipset list whitelist &>/dev/null && check_fail=1 && echo -e "${RED}存在${NC}" || echo -e "${GREEN}已移除${NC}"; }
-    echo -n "残留配置文件: " && { ls /etc/ipset.conf /etc/iptables/rules.v4 &>/dev/null && check_fail=1 && echo -e "${RED}存在${NC}" || echo -e "${GREEN}已清除${NC}"; }
-
-    [ $check_fail -eq 0 ] && echo -e "\n${GREEN}✅ 卸载完成，无残留${NC}" || echo -e "\n${RED}⚠️  检测到残留组件，请重启系统${NC}"
-}
 
 # ======================= 安装snell协议 =======================
 install_snell() {
@@ -666,260 +244,7 @@ install_speedtest() {
     speedtest --accept-license --accept-gdpr
 }
 
-# ======================= 开放所有端口 =======================
-open_all_ports() {
-    clear
-    echo -e "${RED}════════════ 安全警告 ════════════${NC}"
-    echo -e "${YELLOW}此操作将：${NC}"
-    echo -e "1. 清空所有防火墙规则"
-    echo -e "2. 设置默认策略为全部允许"
-    echo -e "3. 完全开放所有网络端口"
-    echo -e "${RED}═════════════════════════════════${NC}"
-    read -p "确认继续操作？[y/N] " confirm
-    
-    if [[ $confirm =~ ^[Yy]$ ]]; then
-        echo -e "${CYAN}正在重置防火墙规则...${NC}"
-        
-        # 设置默认策略
-        sudo iptables -P INPUT ACCEPT
-        sudo iptables -P FORWARD ACCEPT
-        sudo iptables -P OUTPUT ACCEPT
-        
-        # 清空所有规则
-        sudo iptables -F
-        sudo iptables -X
-        sudo iptables -Z
-        
-        echo -e "${GREEN}所有端口已开放！${NC}"
-        echo -e "${YELLOW}当前防火墙规则：${NC}"
-        sudo iptables -L -n --line-numbers
-    else
-        echo -e "${BLUE}已取消操作${NC}"
-    fi
-}
 
-# ======================= Caddy反代管理 =======================
-configure_caddy_reverse_proxy() {
-    # 环境常量定义
-    local CADDY_SERVICE="/lib/systemd/system/caddy.service"
-    local CADDYFILE="/etc/caddy/Caddyfile"
-    local TEMP_CONF=$(mktemp)
-    local domain ip port
-
-    # 首次安装检测
-    if ! command -v caddy &>/dev/null; then
-        echo -e "${CYAN}开始安装Caddy服务器...${NC}"
-        
-        # 安装依赖组件（显示进度）
-        echo -e "${YELLOW}[1/5] 安装依赖组件...${NC}"
-        sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https 2>&1 | \
-            while read line; do 
-                echo "  ▸ $line"
-            done
-        
-        # 添加官方软件源（显示进度）
-        echo -e "\n${YELLOW}[2/5] 添加Caddy官方源...${NC}"
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
-            sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | \
-            sudo tee /etc/apt/sources.list.d/caddy-stable.list | \
-            sed 's/^/  ▸ /'
-        # 更新软件源（显示进度）
-        echo -e "\n${YELLOW}[3/5] 更新软件源...${NC}"
-        sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/caddy-stable.list" \
-            -o Dir::Etc::sourceparts="-" \
-            -o APT::Get::List-Cleanup="0" 2>&1 | \
-            grep -v '^$' | \
-            sed 's/^/  ▸ /'
-        # 安装Caddy（显示进度）
-        echo -e "\n${YELLOW}[4/5] 安装Caddy...${NC}"
-        sudo apt-get install -y caddy 2>&1 | \
-            grep --line-buffered -E 'Unpacking|Setting up' | \
-            sed 's/^/  ▸ /'
-        # 初始化配置（显示进度）
-        echo -e "\n${YELLOW}[5/5] 初始化配置...${NC}"
-        sudo mkdir -vp /etc/caddy | sed 's/^/  ▸ /'
-        [ ! -f "$CADDYFILE" ] && sudo touch "$CADDYFILE"
-        echo -e "# Caddyfile自动生成配置\n# 手动修改后请执行 systemctl reload caddy" | \
-            sudo tee "$CADDYFILE" | sed 's/^/  ▸ /'
-        sudo chown caddy:caddy "$CADDYFILE"
-        
-        echo -e "${GREEN}✅ Caddy安装完成，版本：$(caddy version)${NC}"
-    else
-        echo -e "${CYAN}检测到Caddy已安装，版本：$(caddy version)${NC}"
-    fi
-
-    # 配置输入循环
-    while : ; do
-        # 域名输入验证
-        until [[ $domain =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]]; do
-            read -p "请输入域名（无需https://）：" domain
-            domain=$(echo "$domain" | sed 's/https\?:\/\///g')
-            [[ $domain =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]] || echo -e "${RED}域名格式无效！示例：example.com${NC}"
-        done
-
-        # 目标IP输入（支持域名/IPv4/IPv6）
-        read -p "请输入目标服务器地址（默认为localhost）:" ip
-        ip=${ip:-localhost}
-
-        # 端口输入验证
-        until [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1 -a "$port" -le 65535 ]; do
-            read -p "请输入目标端口号（1-65535）:" port
-            [[ $port =~ ^[0-9]+$ ]] || { echo -e "${RED}端口必须为数字！"; continue; }
-            [ "$port" -ge 1 -a "$port" -le 65535 ] || echo -e "${RED}端口范围1-65535！"
-        done
-
-        # 配置冲突检测
-        if sudo caddy validate --config "$CADDYFILE" --adapter caddyfile 2>/dev/null; then
-            if grep -q "^$domain {" "$CADDYFILE"; then
-                echo -e "${YELLOW}⚠ 检测到现有配置："
-                grep -A3 "^$domain {" "$CADDYFILE"
-                read -p "要覆盖此配置吗？[y/N] " overwrite
-                [[ $overwrite =~ ^[Yy]$ ]] || continue
-                sudo caddy adapt --config "$CADDYFILE" --adapter caddyfile | \
-                awk -v domain="$domain" '/^'$domain' {/{flag=1} !flag; /^}/{flag=0}' | \
-                sudo tee "$TEMP_CONF" >/dev/null
-                sudo mv "$TEMP_CONF" "$CADDYFILE"
-            fi
-        else
-            echo -e "${YELLOW}⚠ 当前配置文件存在错误，将创建新配置${NC}"
-            sudo truncate -s 0 "$CADDYFILE"
-        fi
-
-        # 生成配置块
-        echo -e "\n# 自动生成配置 - $(date +%F)" | sudo tee -a "$CADDYFILE" >/dev/null
-        cat <<EOF | sudo tee -a "$CADDYFILE" >/dev/null
-$domain {
-    reverse_proxy $ip:$port {
-        header_up Host {host}
-        header_up X-Real-IP {remote}
-        header_up X-Forwarded-For {remote}
-        header_up X-Forwarded-Proto {scheme}
-    }
-    encode gzip
-    tls {
-        protocols tls1.2 tls1.3
-        ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-    }
-}
-EOF
-
-        # 格式化配置文件
-        sudo caddy fmt "$CADDYFILE" --overwrite
-
-        # 配置验证与生效
-        if ! sudo caddy validate --config "$CADDYFILE"; then
-            echo -e "${RED}配置验证失败！错误详情："
-            sudo caddy validate --config "$CADDYFILE" 2>&1 | grep -v "valid"
-            sudo sed -i "/# 自动生成配置 - $(date +%F)/,+6d" "$CADDYFILE"
-            return 1
-        fi
-
-        # 服务热重载
-        if systemctl is-active caddy &>/dev/null; then
-            sudo systemctl reload caddy || sudo systemctl restart caddy
-        else
-            sudo systemctl enable --now caddy &>/dev/null
-        fi
-
-        echo -e "${GREEN}✅ 配置生效成功！访问地址：https://$domain${NC}"
-        read -p "是否继续添加配置？[y/N] " more
-        [[ $more =~ ^[Yy]$ ]] || break
-
-        # 重置变量进行下一轮循环
-        domain=""
-        ip=""
-        port=""
-    done
-
-    # 清理临时文件
-    rm -f "$TEMP_CONF"
-}
-
-# ======================= 卸载Caddy =======================
-uninstall_caddy() {
-    echo -e "${RED}警告：此操作将完全移除Caddy及所有相关配置！${NC}"
-    read -p "确定要卸载Caddy吗？(y/N) " confirm
-    [[ ! $confirm =~ ^[Yy]$ ]] && return
-
-    # 停止服务
-    echo -e "${CYAN}停止Caddy服务...${NC}"
-    sudo systemctl stop caddy.service 2>/dev/null
-
-    # 卸载软件包
-    if command -v caddy &>/dev/null; then
-        echo -e "${CYAN}卸载Caddy程序...${NC}"
-        sudo apt-get purge -y caddy 2>/dev/null
-    fi
-
-    # 删除配置文件
-    declare -a caddy_files=(
-        "/etc/caddy"
-        "/lib/systemd/system/caddy.service"
-        "/usr/share/keyrings/caddy-stable-archive-keyring.gpg"
-        "/etc/apt/sources.list.d/caddy-stable.list"
-        "/var/lib/caddy"
-        "/etc/ssl/caddy"
-    )
-
-    # 删除文件及目录
-    echo -e "${CYAN}清理残留文件...${NC}"
-    for target in "${caddy_files[@]}"; do
-        if [[ -e $target ]]; then
-            echo "删除：$target"
-            sudo rm -rf "$target"
-        fi
-    done
-
-    # 删除APT源更新
-    sudo apt-get update 2>/dev/null
-
-    # 清除无人值守安装标记（如有）
-    sudo rm -f /var/lib/cloud/instances/*/sem/config_apt_source
-
-    # 删除日志（可选）
-    read -p "是否删除所有Caddy日志文件？(y/N) " del_log
-    if [[ $del_log =~ ^[Yy]$ ]]; then
-        sudo journalctl --vacuum-time=1s --quiet
-        sudo rm -f /var/log/caddy/*.log 2>/dev/null
-    fi
-
-    echo -e "${GREEN}✅ Caddy已完全卸载，再见！${NC}"
-}
-
-# ======================= Caddy子菜单 =======================
-show_caddy_menu() {
-    clear
-    echo -e "${CYAN}=== Caddy 管理脚本 v1.2 ===${NC}"
-    echo "1. 安装/配置反向代理"
-    echo "2. 完全卸载Caddy"
-    echo "3. 返回主菜单"
-    echo -e "${YELLOW}===============================${NC}"
-}
-# ======================= Cady主逻辑 =======================
-caddy_main() {
-    while true; do
-        show_caddy_menu
-        read -p "请输入Caddy管理选项：" caddy_choice
-        case $caddy_choice in
-            1) 
-                configure_caddy_reverse_proxy
-                read -p "按回车键返回菜单..." 
-                ;;
-            2) 
-                uninstall_caddy
-                read -p "按回车键返回菜单..." 
-                ;;
-            3) 
-                break
-                ;;
-            *) 
-                echo -e "${RED}无效选项！${NC}"
-                sleep 1
-                ;;
-        esac
-    done
-}
 
 # ====================== 修改后的Nginx管理函数 =======================
 nginx_main() {
@@ -941,309 +266,6 @@ nginx_main() {
     
 }
 
-# ======================= IP优先级设置 =======================
-modify_ip_preference() {
-    # 权限检查
-    if [ "$(id -u)" -ne 0 ]; then
-        echo -e "${RED}错误：请使用sudo运行此脚本${NC}"
-        return 1
-    fi
-    
-    # 配置文件路径
-    CONF_FILE="/etc/gai.conf"
-    BACKUP_FILE="/etc/gai.conf.bak"
-    
-    # 显示当前状态
-    show_current_status() {
-        echo -e "\n${YELLOW}当前优先级配置：${NC}"
-        
-        if [ ! -f "$CONF_FILE" ]; then
-            echo -e "  ▸ ${YELLOW}配置文件不存在，使用系统默认（通常IPv6优先）${NC}"
-        elif grep -qE "^precedence ::ffff:0:0/96[[:space:]]+100" "$CONF_FILE" 2>/dev/null; then
-            echo -e "  ▸ ${GREEN}IPv4优先模式${NC}"
-        elif grep -qE "^precedence ::ffff:0:0/96[[:space:]]+10" "$CONF_FILE" 2>/dev/null; then
-            echo -e "  ▸ ${GREEN}IPv6优先模式（显式配置）${NC}"
-        else
-            echo -e "  ▸ ${YELLOW}自定义或默认配置${NC}"
-        fi
-        
-        # 显示实际测试结果
-        echo -e "\n${YELLOW}实际连接测试：${NC}"
-        test_connectivity
-    }
-    
-    # 测试实际连接优先级
-    test_connectivity() {
-        # 测试一个同时支持IPv4和IPv6的域名
-        local test_host="www.google.com"
-        
-        # 尝试获取解析结果
-        if command -v getent >/dev/null 2>&1; then
-            local result=$(getent ahosts "$test_host" 2>/dev/null | head -1)
-            if echo "$result" | grep -q ":"; then
-                echo -e "  ▸ 当前系统倾向使用 ${GREEN}IPv6${NC}"
-            elif echo "$result" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"; then
-                echo -e "  ▸ 当前系统倾向使用 ${GREEN}IPv4${NC}"
-            else
-                echo -e "  ▸ ${YELLOW}无法确定当前优先级${NC}"
-            fi
-        else
-            echo -e "  ▸ ${YELLOW}无法测试（getent命令不可用）${NC}"
-        fi
-    }
-    
-    # 交互式菜单
-    interactive_menu() {
-        clear
-        echo -e "${GREEN}=== IP协议优先级设置 ===${NC}"
-        echo -e "1. 设置IPv4优先 (推荐)"
-        echo -e "2. 设置IPv6优先"
-        echo -e "3. 恢复系统默认"
-        echo -e "4. 查看详细配置"
-        echo -e "0. 返回主菜单"
-        
-        show_current_status
-        
-        echo ""
-        read -p "请输入选项 [0-4]: " choice
-    }
-    
-    # 应用IPv4优先配置
-    apply_ipv4_preference() {
-        echo -e "${YELLOW}\n[1/3] 备份原配置...${NC}"
-        if [ -f "$CONF_FILE" ]; then
-            cp -f "$CONF_FILE" "$BACKUP_FILE" 2>/dev/null || true
-            echo -e "  ▸ 已备份到 $BACKUP_FILE"
-        else
-            echo -e "  ▸ 原配置文件不存在，跳过备份"
-        fi
-        
-        echo -e "${YELLOW}[2/3] 生成新配置...${NC}"
-        cat > "$CONF_FILE" << 'EOF'
-# Configuration for getaddrinfo(3).
-#
-# This file is managed by the network toolbox script
-# Last modified: $(date)
-#
-# IPv4 preferred configuration
-
-# Label definitions
-label ::1/128       0
-label ::/0          1
-label 2002::/16     2
-label ::/96         3
-label ::ffff:0:0/96 4
-label fec0::/10     5
-label fc00::/7      6
-label 2001:0::/32   7
-
-# Precedence definitions
-# Higher value = higher priority
-# Default IPv6 would be 40, we set IPv4-mapped to 100
-precedence ::1/128       50
-precedence ::/0          40
-precedence 2002::/16     30
-precedence ::/96         20
-precedence ::ffff:0:0/96 100
-
-# Scope definitions  
-scopev4 ::ffff:169.254.0.0/112  2
-scopev4 ::ffff:127.0.0.0/104    2
-scopev4 ::ffff:0.0.0.0/96       14
-EOF
-        
-        echo -e "${YELLOW}[3/3] 验证配置...${NC}"
-        if [ -f "$CONF_FILE" ]; then
-            echo -e "  ▸ ${GREEN}配置文件创建成功${NC}"
-            
-            # 清除DNS缓存（如果systemd-resolved在运行）
-            if systemctl is-active --quiet systemd-resolved; then
-                echo -e "  ▸ 清除DNS缓存..."
-                systemd-resolve --flush-caches 2>/dev/null || true
-            fi
-            
-            # 如果nscd在运行，重启它
-            if systemctl is-active --quiet nscd; then
-                echo -e "  ▸ 重启nscd服务..."
-                systemctl restart nscd 2>/dev/null || true
-            fi
-        else
-            echo -e "  ▸ ${RED}配置文件创建失败${NC}"
-            return 1
-        fi
-    }
-    
-    # 应用IPv6优先配置
-    apply_ipv6_preference() {
-        echo -e "${YELLOW}\n[1/3] 备份原配置...${NC}"
-        if [ -f "$CONF_FILE" ]; then
-            cp -f "$CONF_FILE" "$BACKUP_FILE" 2>/dev/null || true
-            echo -e "  ▸ 已备份到 $BACKUP_FILE"
-        else
-            echo -e "  ▸ 原配置文件不存在，跳过备份"
-        fi
-        
-        echo -e "${YELLOW}[2/3] 生成新配置...${NC}"
-        cat > "$CONF_FILE" << 'EOF'
-# Configuration for getaddrinfo(3).
-#
-# This file is managed by the network toolbox script
-# Last modified: $(date)
-#
-# IPv6 preferred configuration (explicit)
-
-# Label definitions
-label ::1/128       0
-label ::/0          1
-label 2002::/16     2
-label ::/96         3
-label ::ffff:0:0/96 4
-label fec0::/10     5
-label fc00::/7      6
-label 2001:0::/32   7
-
-# Precedence definitions
-# Higher value = higher priority
-# IPv6 set to 40, IPv4-mapped to 10 (lower priority)
-precedence ::1/128       50
-precedence ::/0          40
-precedence 2002::/16     30
-precedence ::/96         20
-precedence ::ffff:0:0/96 10
-
-# Scope definitions
-scopev4 ::ffff:169.254.0.0/112  2
-scopev4 ::ffff:127.0.0.0/104    2
-scopev4 ::ffff:0.0.0.0/96       14
-EOF
-        
-        echo -e "${YELLOW}[3/3] 验证配置...${NC}"
-        if [ -f "$CONF_FILE" ]; then
-            echo -e "  ▸ ${GREEN}配置文件创建成功${NC}"
-            
-            # 清除DNS缓存
-            if systemctl is-active --quiet systemd-resolved; then
-                echo -e "  ▸ 清除DNS缓存..."
-                systemd-resolve --flush-caches 2>/dev/null || true
-            fi
-            
-            # 重启nscd
-            if systemctl is-active --quiet nscd; then
-                echo -e "  ▸ 重启nscd服务..."
-                systemctl restart nscd 2>/dev/null || true
-            fi
-        else
-            echo -e "  ▸ ${RED}配置文件创建失败${NC}"
-            return 1
-        fi
-    }
-    
-    # 恢复默认配置
-    restore_default() {
-        echo -e "${YELLOW}\n恢复默认配置...${NC}"
-        
-        if [ -f "$BACKUP_FILE" ]; then
-            echo -e "  ▸ 发现备份文件，是否从备份恢复？[y/N]: "
-            read -r restore_backup
-            if [[ "$restore_backup" =~ ^[Yy]$ ]]; then
-                cp -f "$BACKUP_FILE" "$CONF_FILE"
-                echo -e "  ▸ ${GREEN}已从备份恢复${NC}"
-            else
-                rm -f "$CONF_FILE"
-                echo -e "  ▸ ${GREEN}已删除配置文件，将使用系统默认${NC}"
-            fi
-        else
-            if [ -f "$CONF_FILE" ]; then
-                echo -e "  ▸ 删除配置文件..."
-                rm -f "$CONF_FILE"
-                echo -e "  ▸ ${GREEN}已恢复为系统默认配置${NC}"
-            else
-                echo -e "  ▸ ${YELLOW}配置文件不存在，已是默认状态${NC}"
-            fi
-        fi
-        
-        # 清除缓存
-        if systemctl is-active --quiet systemd-resolved; then
-            systemd-resolve --flush-caches 2>/dev/null || true
-        fi
-        if systemctl is-active --quiet nscd; then
-            systemctl restart nscd 2>/dev/null || true
-        fi
-    }
-    
-    # 查看详细配置
-    show_detailed_config() {
-        echo -e "\n${YELLOW}=== 详细配置信息 ===${NC}"
-        
-        if [ -f "$CONF_FILE" ]; then
-            echo -e "\n${GREEN}当前 /etc/gai.conf 内容：${NC}"
-            echo "----------------------------------------"
-            cat "$CONF_FILE"
-            echo "----------------------------------------"
-        else
-            echo -e "${YELLOW}配置文件不存在，使用系统默认设置${NC}"
-        fi
-        
-        echo -e "\n${GREEN}测试解析结果：${NC}"
-        for host in "www.google.com" "www.cloudflare.com" "www.github.com"; do
-            echo -e "\n  测试 $host:"
-            if command -v getent >/dev/null 2>&1; then
-                getent ahosts "$host" 2>/dev/null | head -3 | while read -r line; do
-                    echo "    $line"
-                done
-            else
-                echo "    ${YELLOW}getent 命令不可用${NC}"
-            fi
-        done
-        
-        echo -e "\n${YELLOW}按回车键继续...${NC}"
-        read -r
-    }
-    
-    # 主循环
-    while true; do
-        interactive_menu
-        
-        case $choice in
-            1)
-                apply_ipv4_preference
-                echo -e "${GREEN}\n✅ 已设置为IPv4优先模式！${NC}"
-                echo -e "${YELLOW}提示：${NC}"
-                echo -e "  • 更改立即生效"
-                echo -e "  • 部分应用可能需要重启才能应用新设置"
-                echo -e "  • 可以使用 'curl -4 ifconfig.me' 测试IPv4连接"
-                echo -e "\n按回车键继续..."
-                read -r
-                ;;
-            2)
-                apply_ipv6_preference
-                echo -e "${GREEN}\n✅ 已设置为IPv6优先模式！${NC}"
-                echo -e "${YELLOW}提示：${NC}"
-                echo -e "  • 更改立即生效"
-                echo -e "  • 部分应用可能需要重启才能应用新设置"
-                echo -e "  • 可以使用 'curl -6 ifconfig.me' 测试IPv6连接"
-                echo -e "\n按回车键继续..."
-                read -r
-                ;;
-            3)
-                restore_default
-                echo -e "${GREEN}\n✅ 操作完成！${NC}"
-                echo -e "\n按回车键继续..."
-                read -r
-                ;;
-            4)
-                show_detailed_config
-                ;;
-            0)
-                return
-                ;;
-            *)
-                echo -e "${RED}无效选项，请重新输入${NC}"
-                sleep 1
-                ;;
-        esac
-    done
-}
 
 # ======================= TCP性能优化 =======================
 install_magic_tcp() {
@@ -1278,98 +300,6 @@ install_magic_tcp() {
     fi
 }
 
-# ======================= 命令行美化 =======================
-install_shell_beautify() {
-    clear
-    echo -e "${YELLOW}════════════════════════════════════${NC}"
-    echo -e "${CYAN}正在安装命令行美化组件...${NC}"
-    echo -e "${YELLOW}════════════════════════════════════${NC}"
-
-    echo -e "${CYAN}[1/6] 更新软件源...${NC}"
-    apt-get update > /dev/null 2>&1
-
-    echo -e "${CYAN}[2/6] 安装依赖组件...${NC}"
-    if ! command -v git &> /dev/null; then
-        apt-get install -y git > /dev/null
-    else
-        echo -e "${GREEN} ✓ Git 已安装${NC}"
-    fi
-
-    echo -e "${CYAN}[3/6] 检查zsh...${NC}"
-    if ! command -v zsh &> /dev/null; then
-        echo -e "${YELLOW}未检测到zsh，正在安装...${NC}"
-        apt-get install -y zsh > /dev/null
-    else
-        echo -e "${GREEN} ✓ Zsh 已安装${NC}"
-    fi
-
-    echo -e "${CYAN}[4/6] 配置oh-my-zsh...${NC}"
-    if [ ! -d "$HOME/.oh-my-zsh" ]; then
-        echo -e "首次安装oh-my-zsh..."
-        sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}oh-my-zsh安装失败！请检查网络连接${NC}"
-            return 1
-        fi
-    else
-        echo -e "${GREEN} ✓ oh-my-zsh 已安装${NC}"
-    fi
-
-    echo -e "${CYAN}[5/6] 设置Spaceship主题并自定义...${NC}"
-    ZSH_CUSTOM="$HOME/.oh-my-zsh/custom"
-    SPACESHIP_REPO="https://github.com/spaceship-prompt/spaceship-prompt.git"
-    SPACESHIP_DIR="$ZSH_CUSTOM/themes/spaceship-prompt"
-    SPACESHIP_SYMLINK="$ZSH_CUSTOM/themes/spaceship.zsh-theme"
-
-    rm -rf "$SPACESHIP_DIR"
-    rm -f "$SPACESHIP_SYMLINK"
-
-    git clone --depth=1 "$SPACESHIP_REPO" "$SPACESHIP_DIR" > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}❌ 主题克隆失败！请检查网络或Git配置。${NC}"
-        return 1
-    fi
-
-    ln -s "$SPACESHIP_DIR/spaceship.zsh-theme" "$SPACESHIP_SYMLINK"
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}❌ 创建符号链接失败！${NC}"
-        return 1
-    fi
-    echo -e "${GREEN} ✓ 主题文件安装完成${NC}"
-
-    # 配置 .zshrc 文件
-    sed -i 's/^ZSH_THEME=.*/ZSH_THEME="spaceship"/' ~/.zshrc
-
-    # 自定义Docker图标
-    if grep -q "^SPACESHIP_DOCKER_SYMBOL=" ~/.zshrc; then
-        sed -i 's/^SPACESHIP_DOCKER_SYMBOL=.*/SPACESHIP_DOCKER_SYMBOL="D "/' ~/.zshrc
-    else
-        sed -i '/^ZSH_THEME="spaceship"/i SPACESHIP_DOCKER_SYMBOL="D "' ~/.zshrc
-    fi
-
-    # 自定义箭头符号
-    if grep -q "^SPACESHIP_CHAR_SYMBOL=" ~/.zshrc; then
-        sed -i 's/^SPACESHIP_CHAR_SYMBOL=.*/SPACESHIP_CHAR_SYMBOL="❯ "/' ~/.zshrc
-    else
-        sed -i '/^ZSH_THEME="spaceship"/i SPACESHIP_CHAR_SYMBOL="❯ "' ~/.zshrc
-    fi
-    echo -e "${GREEN} ✓ .zshrc 配置完成 (图标已自定义)${NC}"
-
-    echo -e "${CYAN}[6/6] 设置默认shell...${NC}"
-    if [ "$SHELL" != "$(which zsh)" ]; then
-        chsh -s $(which zsh) >/dev/null
-    fi
-
-    echo -e "\n${GREEN}✅ 美化完成！重启终端后生效${NC}"
-    read -p "$(echo -e "${YELLOW}是否立即生效主题？[${GREEN}Y${YELLOW}/n] ${NC}")" confirm
-    confirm=${confirm:-Y}
-    if [[ "${confirm^^}" == "Y" ]]; then
-        echo -e "${GREEN}正在应用新配置...${NC}"
-        exec zsh
-    else
-        echo -e "\n${YELLOW}可稍后手动执行：${CYAN}exec zsh ${YELLOW}生效配置${NC}"
-    fi
-}
 
 # ======================= DNS解锁服务 =======================
 install_dns_unlock() {
@@ -1392,145 +322,6 @@ install_dns_unlock() {
     fi
 }
 
-# ======================= Sub-Store安装模块 =======================
-install_substore() {
-    local secret_key
-    local compose_file="docker-compose.yml" # 定义 docker-compose 文件名
-
-    # 检查 docker-compose.yml 是否存在，并尝试从中提取 secret_key
-    if [ -f "$compose_file" ]; then
-        extracted_key=$(sed -n 's|.*SUB_STORE_FRONTEND_BACKEND_PATH=/\([0-9a-fA-F]\{32\}\).*|\1|p' "$compose_file" | head -n 1)
-        if [[ -n "$extracted_key" && ${#extracted_key} -eq 32 ]]; then
-            secret_key="$extracted_key"
-            echo -e "${GREEN}检测到已存在的密钥，将继续使用: ${secret_key}${NC}"
-        else
-            echo -e "${YELLOW}未能从现有的 ${compose_file} 中提取有效密钥，或文件格式不符。${NC}"
-        fi
-    fi
-
-    # 如果 secret_key 仍然为空 (文件不存在或提取失败)，则生成一个新的密钥
-    if [ -z "$secret_key" ]; then
-        secret_key=$(openssl rand -hex 16)
-        echo -e "${YELLOW}生成新的密钥: ${secret_key}${NC}"
-    fi
-
-    mkdir -p /root/sub-store-data
-
-    echo -e "${YELLOW}清理旧容器和相关配置...${NC}"
-    docker rm -f sub-store >/dev/null 2>&1 || true
-    # 优先使用 docker compose (v2)，如果失败则尝试 docker-compose (v1)
-    if docker compose -p sub-store down >/dev/null 2>&1; then
-        echo -e "${CYAN}使用 'docker compose down' 清理项目。${NC}"
-    elif command -v docker-compose &>/dev/null && docker-compose -p sub-store -f "$compose_file" down >/dev/null 2>&1; then
-        echo -e "${CYAN}使用 'docker-compose down' 清理项目。${NC}"
-    else
-        echo -e "${YELLOW}未找到 docker-compose.yml 或无法执行 down 命令，可能没有旧项目需要清理。${NC}"
-    fi
-
-    echo -e "${YELLOW}创建/更新 ${compose_file} 配置文件...${NC}"
-    cat <<EOF > "$compose_file"
-version: '3.8' # 建议使用较新的compose版本，例如3.8
-services:
-  sub-store:
-    image: xream/sub-store:latest
-    container_name: sub-store
-    restart: unless-stopped
-    environment:
-      - SUB_STORE_FRONTEND_BACKEND_PATH=/$secret_key
-    ports:
-      - "3001:3001"
-    volumes:
-      - /root/sub-store-data:/opt/app/data
-EOF
-
-    echo -e "${YELLOW}拉取最新镜像 (xream/sub-store:latest)...${NC}"
-    # 优先使用 docker compose (v2)，如果失败则尝试 docker-compose (v1)
-    local pull_cmd_success=false
-    if docker compose -p sub-store pull sub-store; then
-        pull_cmd_success=true
-    elif command -v docker-compose &>/dev/null && docker-compose -p sub-store -f "$compose_file" pull sub-store; then
-        pull_cmd_success=true
-    fi
-
-    if ! $pull_cmd_success; then
-        echo -e "${RED}拉取镜像失败，请检查网络连接或镜像名称 (xream/sub-store:latest)。${NC}"
-        # 您可以在这里决定是否退出脚本
-        # exit 1
-    fi
-
-    echo -e "${YELLOW}启动容器 (项目名: sub-store)...${NC}"
-    # 优先使用 docker compose (v2)，如果失败则尝试 docker-compose (v1)
-    local up_cmd_success=false
-    if docker compose -p sub-store up -d; then
-        up_cmd_success=true
-    elif command -v docker-compose &>/dev/null && docker-compose -p sub-store -f "$compose_file" up -d; then
-        up_cmd_success=true
-    fi
-
-    if ! $up_cmd_success; then
-        echo -e "${RED}启动容器失败。请检查 Docker 服务状态及 ${compose_file} 文件配置。${NC}"
-        echo -e "${RED}可以使用 'docker logs sub-store' 查看容器日志。${NC}"
-        # exit 1
-    else
-        # 可以增加一个短暂的延时，给容器一些启动时间
-        echo -e "${YELLOW}等待容器启动 (约5-10秒)...${NC}"
-        sleep 10 # 可以根据实际情况调整这个延时
-
-        # 检查容器是否仍在运行
-        if docker ps -q -f name=sub-store | grep -q .; then
-            echo -e "\n${GREEN}Sub-Store 已启动！${NC}"
-            echo -e "Sub-Store 面板访问地址: ${CYAN}http://${public_ip}:3001${NC}"
-            echo -e "Sub-Store 后端API地址: ${CYAN}http://${public_ip}:3001/${secret_key}${NC}"
-            echo -e "\n${YELLOW}如果服务无法访问，请检查容器日志: ${CYAN}docker logs sub-store${NC}"
-            echo -e "${YELLOW}或通过本地验证服务是否监听端口: ${CYAN}curl -I http://127.0.0.1:3001${NC}"
-
-            # ==========================================================
-            # ==                  【新增的清理功能】                  ==
-            # ==========================================================
-            echo -e "\n${YELLOW}清理旧的悬空镜像...${NC}"
-            docker image prune -f
-
-        else
-            echo -e "\n${RED}Sub-Store 容器未能保持运行状态。${NC}"
-            echo -e "${RED}请手动检查容器日志: ${CYAN}docker logs sub-store${NC}"
-        fi
-    fi
-
-    local compose_cmd_v2="docker compose -p sub-store -f \"$(pwd)/${compose_file}\""
-    local compose_cmd_v1="docker-compose -p sub-store -f \"$(pwd)/${compose_file}\""
-    local compose_cmd_prefix=""
-
-    # 检测使用哪个compose命令
-    if docker compose version &>/dev/null; then
-        compose_cmd_prefix="$compose_cmd_v2"
-        echo -e "${CYAN}将使用 'docker compose' (v2) 命令进行管理。${NC}"
-    elif command -v docker-compose &>/dev/null; then
-        compose_cmd_prefix="$compose_cmd_v1"
-        echo -e "${CYAN}将使用 'docker-compose' (v1) 命令进行管理。${NC}"
-    else
-        echo -e "${RED}未找到 'docker compose' 或 'docker-compose' 命令，管理命令可能无法直接使用。${NC}"
-    fi
-
-
-    echo -e "\n${YELLOW}常用管理命令 (如果 ${compose_file} 不在当前目录，请先 cd 到对应目录):${NC}"
-    if [[ -n "$compose_cmd_prefix" ]]; then
-        echo -e "启动 Sub-Store: ${CYAN}${compose_cmd_prefix} start sub-store${NC} (如果服务已定义在compose文件中)"
-        echo -e "或者: ${CYAN}${compose_cmd_prefix} up -d sub-store${NC}"
-        echo -e "停止 Sub-Store: ${CYAN}${compose_cmd_prefix} stop sub-store${NC}"
-        echo -e "重启 Sub-Store: ${CYAN}${compose_cmd_prefix} restart sub-store${NC}"
-        echo -e "查看 Sub-Store 状态: ${CYAN}${compose_cmd_prefix} ps${NC}"
-        echo -e "更新 Sub-Store (重新执行此安装模块即可，或手动):"
-        echo -e "  1. 拉取新镜像: ${CYAN}${compose_cmd_prefix} pull sub-store${NC}"
-        echo -e "  2. 重启服务:   ${CYAN}${compose_cmd_prefix} up -d --force-recreate sub-store${NC}"
-        echo -e "完全卸载 Sub-Store (包括数据):"
-        echo -e "  1. 停止并删除容器/网络: ${CYAN}${compose_cmd_prefix} down${NC}"
-    else
-        echo -e "请根据您安装的 Docker Compose 版本手动执行相应命令。"
-    fi
-    echo -e "查看 Sub-Store 日志: ${CYAN}docker logs --tail 100 sub-store${NC}"
-    echo -e "删除数据目录: ${CYAN}rm -rf /root/sub-store-data${NC}"
-    echo -e "删除配置文件: ${CYAN}rm -f \"$(pwd)/${compose_file}\"${NC}"
-}
 # ======================= 搭建TG图床 =======================
 install_tg_image_host() {
     clear
@@ -1561,227 +352,6 @@ install_tg_image_host() {
     # 确保函数末尾没有其他 read 暂停
     # # Add a pause before returning to the main menu, if desired, after successful installation
     # # read -n 1 -s -r -p "安装完成，按任意键返回主菜单..." # 此行保持注释或删除
-}
-
-# ======================= TCP性能优化 (BBR+fq) =======================
-optimize_tcp_performance() {
-    clear
-    echo -e "${YELLOW}==================================================${NC}"
-    echo -e "${CYAN}        TCP 性能优化 (BBR + fq) 安装脚本        ${NC}"
-    echo -e "${YELLOW}==================================================${NC}"
-    echo # Add an empty line for spacing
-    echo -e "此脚本将通过以下步骤优化系统的TCP性能："
-    echo -e "1. 自动备份当前的 sysctl.conf 和 sysctl.d 目录。"
-    echo -e "2. 检查并注释掉与BBR及网络性能相关的旧配置。"
-    echo -e "3. 添加最新的BBR、fq及其他网络优化配置。"
-    echo -e "4. 提醒您手动检查 sysctl.d 目录中的潜在冲突。"
-    echo
-
-    # 检查内核版本，BBR需要4.9及以上版本
-    local kernel_version
-    kernel_version=$(uname -r | cut -d- -f1)
-    if ! dpkg --compare-versions "$kernel_version" "ge" "4.9"; then
-        echo -e "${RED}错误: BBR 需要 Linux 内核版本 4.9 或更高。${NC}"
-        echo -e "${RED}您当前的内核版本是: ${kernel_version}${NC}"
-        echo -e "${RED}无法继续，请升级您的系统内核。${NC}"
-        # 主菜单会处理 "按任意键返回" 的暂停，这里直接返回
-        return 1
-    fi
-    echo -e "${GREEN}内核版本 ${kernel_version}，满足要求。${NC}"
-    echo
-
-    # --- 要添加或更新的参数列表 (已更新) ---
-    local params=(
-        "net.ipv4.tcp_fastopen"
-        "net.ipv4.tcp_fastopen_blackhole_timeout_sec"
-        "net.ipv4.tcp_slow_start_after_idle"
-        "net.ipv4.tcp_collapse_max_bytes"
-        "net.ipv4.tcp_notsent_lowat"
-        "net.ipv4.tcp_syn_retries"
-        "net.ipv4.tcp_moderate_rcvbuf"
-        "net.ipv4.tcp_adv_win_scale"
-        "net.ipv4.tcp_rmem"
-        "net.ipv4.tcp_wmem"
-        "net.core.rmem_default"
-        "net.core.wmem_default"
-        "net.core.rmem_max"
-        "net.core.wmem_max"
-        "net.core.default_qdisc"
-        "net.ipv4.tcp_congestion_control"
-    )
-
-    # --- 1. 执行备份 ---
-    echo -e "${CYAN}INFO: 正在备份 /etc/sysctl.conf 和 /etc/sysctl.d/ 目录...${NC}"
-    sudo cp /etc/sysctl.conf "/etc/sysctl.conf.bk_$(date +%Y%m%d_%H%M%S)" &>/dev/null
-    sudo cp -r /etc/sysctl.d/ "/etc/sysctl.d.bk_$(date +%Y%m%d_%H%M%S)" &>/dev/null
-    echo -e "${GREEN}INFO: 备份完成。${NC}"
-    echo
-
-    # --- 2. 自动注释掉 /etc/sysctl.conf 中的旧配置 ---
-    echo -e "${CYAN}INFO: 正在检查并注释掉 /etc/sysctl.conf 中的旧配置...${NC}"
-    for param in "${params[@]}"; do
-        # 使用sed命令查找参数并将其注释掉。-E使用扩展正则, \.转义点.
-        # s/^\s*.../ 表示从行首开始匹配，可以有空格
-        sudo sed -i.bak -E "s/^\s*${param//./\\.}.*/# &/" /etc/sysctl.conf
-    done
-    sudo rm -f /etc/sysctl.conf.bak
-    echo -e "${GREEN}INFO: 旧配置注释完成。${NC}"
-    echo
-
-    # --- 3. 追加新的配置到 /etc/sysctl.conf (已更新) ---
-    echo -e "${CYAN}INFO: 正在将新的网络优化配置追加到文件末尾...${NC}"
-    sudo tee -a /etc/sysctl.conf > /dev/null << EOF
-
-# --- BBR and Network Optimization Settings Added by Toolbox on $(date +%Y-%m-%d) ---
-net.ipv4.tcp_fastopen=3
-net.ipv4.tcp_fastopen_blackhole_timeout_sec=0
-net.ipv4.tcp_slow_start_after_idle=0
-#net.ipv4.tcp_collapse_max_bytes=6291456
-#net.ipv4.tcp_notsent_lowat=16384
-#net.ipv4.tcp_notsent_lowat=4294967295
-net.ipv4.tcp_syn_retries=3
-net.ipv4.tcp_moderate_rcvbuf=1
-net.ipv4.tcp_adv_win_scale=1
-net.ipv4.tcp_rmem=4096 26214400 104857600
-net.ipv4.tcp_wmem=4096 26214400 104857600
-net.core.rmem_default=26214400
-net.core.wmem_default=26214400
-net.core.rmem_max=104857600
-net.core.wmem_max=104857600
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-# --- End of BBR Settings ---
-EOF
-    echo -e "${GREEN}INFO: 新配置追加完成。${NC}"
-    echo
-
-    # --- 4. 提醒检查 /etc/sysctl.d/ 目录 ---
-    echo -e "${YELLOW}!!! 警告: 请手动检查 /etc/sysctl.d/ 目录中的配置文件。${NC}"
-    echo -e "以下是该目录中的文件列表:"
-    ls -l /etc/sysctl.d/
-    echo -e "${YELLOW}请确认其中没有与BBR或网络缓冲区相关的冲突配置（例如 99-bbr.conf 等）。${NC}"
-    echo -e "${YELLOW}如果有，请手动检查、备份并决定是否删除它们。${NC}"
-    read -n 1 -s -r -p "检查完毕后，按任意键继续应用配置..."
-    echo
-    echo
-
-    # --- 5. 应用配置并验证 ---
-    echo -e "${CYAN}INFO: 正在应用新的 sysctl 配置...${NC}"
-    if sudo sysctl -p; then
-        echo -e "${GREEN}INFO: 配置已成功应用。${NC}"
-    else
-        echo -e "${RED}ERROR: 应用 sysctl 配置时出错。请检查 /etc/sysctl.conf 的语法。${NC}"
-        return 1
-    fi
-    echo
-    echo -e "${CYAN}INFO: 正在验证BBR是否成功启用...${NC}"
-
-    local bbr_status
-    bbr_status=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
-    local fq_status
-    fq_status=$(sysctl net.core.default_qdisc | awk '{print $3}')
-
-    echo -e "当前TCP拥塞控制算法: ${GREEN}${bbr_status}${NC}"
-    echo -e "当前默认队列调度算法: ${GREEN}${fq_status}${NC}"
-    echo
-
-    if [[ "$bbr_status" == "bbr" && "$fq_status" == "fq" ]]; then
-        echo -e "${GREEN}SUCCESS: TCP 性能优化（BBR + fq）已成功启用！${NC}"
-    else
-        echo -e "${RED}WARNING: 验证失败。BBR 或 fq 未能成功启用。${NC}"
-        echo -e "${RED}请检查系统日志和以上步骤的输出。${NC}"
-    fi
-    # "按任意键返回主菜单..." 将由主菜单的 case 语句处理
-}
-
-# ======================= 恢复TCP原始配置 =======================
-uninstall_tcp_optimization() {
-    clear
-    echo -e "${YELLOW}==================================================${NC}"
-    echo -e "${CYAN}         恢复原始 TCP 配置 (卸载BBR优化)         ${NC}"
-    echo -e "${YELLOW}==================================================${NC}"
-    echo
-    echo -e "此脚本将帮助您从之前创建的备份中恢复网络配置。"
-    echo -e "它会查找由优化脚本创建的备份文件，并用它们覆盖当前配置。"
-    echo
-
-    # 查找所有 sysctl.conf 的备份文件
-    # 使用 find 命令以处理没有备份文件的情况
-    local backups
-    mapfile -t backups < <(find /etc -maxdepth 1 -type f -name "sysctl.conf.bk_*" | sort -r)
-
-    # 检查是否找到了备份
-    if [ ${#backups[@]} -eq 0 ]; then
-        echo -e "${RED}错误: 未找到任何由优化脚本创建的备份文件 (/etc/sysctl.conf.bk_*)。${NC}"
-        echo -e "${RED}无法自动恢复。${NC}"
-        return 1
-    fi
-
-    echo -e "${GREEN}找到了以下备份，请选择要恢复的版本 (输入数字):${NC}"
-    
-    # 使用 select 命令让用户选择
-    local PS3="请输入选项: "
-    select backup_file in "${backups[@]}"; do
-        if [ -n "$backup_file" ]; then
-            break
-        else
-            echo -e "${RED}无效的选择，请输入列表中的数字。${NC}"
-        fi
-    done
-
-    # 从选择的文件名中提取时间戳
-    local timestamp
-    timestamp=$(echo "$backup_file" | sed 's/.*bk_//')
-    local backup_dir="/etc/sysctl.d.bk_${timestamp}"
-
-    echo
-    echo -e "${YELLOW}您选择了恢复到版本: ${timestamp}${NC}"
-    echo -e "即将执行以下操作:"
-    echo -e "1. 使用 ${CYAN}${backup_file}${NC} 覆盖当前 ${CYAN}/etc/sysctl.conf${NC}"
-    if [ -d "$backup_dir" ]; then
-        echo -e "2. 使用 ${CYAN}${backup_dir}${NC} 覆盖当前 ${CYAN}/etc/sysctl.d/${NC} 目录"
-    else
-        echo -e "2. 未找到对应的 sysctl.d 备份目录，将仅恢复 sysctl.conf"
-    fi
-    echo
-    
-    read -p "确定要继续吗? 这将覆盖您当前的网络配置！ (y/n): " confirm
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        echo -e "${RED}操作已取消。${NC}"
-        return
-    fi
-
-    echo
-    echo -e "${CYAN}INFO: 正在恢复 /etc/sysctl.conf...${NC}"
-    if sudo cp "$backup_file" /etc/sysctl.conf; then
-        echo -e "${GREEN}INFO: /etc/sysctl.conf 恢复成功。${NC}"
-    else
-        echo -e "${RED}ERROR: 恢复 /etc/sysctl.conf 失败！${NC}"
-        return 1
-    fi
-
-    if [ -d "$backup_dir" ]; then
-        echo -e "${CYAN}INFO: 正在恢复 /etc/sysctl.d/ 目录...${NC}"
-        # 先删除现有目录再复制备份，确保干净恢复
-        if sudo rm -rf /etc/sysctl.d && sudo cp -r "$backup_dir" /etc/sysctl.d; then
-            echo -e "${GREEN}INFO: /etc/sysctl.d/ 目录恢复成功。${NC}"
-        else
-            echo -e "${RED}ERROR: 恢复 /etc/sysctl.d/ 目录失败！${NC}"
-            return 1
-        fi
-    fi
-
-    echo
-    echo -e "${CYAN}INFO: 正在应用已恢复的配置...${NC}"
-    if sudo sysctl -p; then
-        echo -e "${GREEN}INFO: 配置已成功应用。${NC}"
-    else
-        echo -e "${RED}ERROR: 应用恢复的 sysctl 配置时出错。${NC}"
-        return 1
-    fi
-
-    echo
-    echo -e "${GREEN}SUCCESS: 网络配置已成功恢复到 ${timestamp} 的状态！${NC}"
 }
 
 # ======================= 安装Fail2Ban =======================
@@ -1932,19 +502,63 @@ main_menu() {
     read -p "请输入选项 : " choice
     case $choice in
       1)
-        display_system_info
+        clear
+        echo -e "${YELLOW}══════════════════${NC}"
+        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+        echo -e "${YELLOW}══════════════════${NC}"
+        local install_script="/tmp/display_system_info.sh"
+        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/display_system_info.sh; then
+            chmod +x "$install_script"
+            "$install_script"
+            rm -f "$install_script"
+        else
+            echo -e "${RED}下载脚本失败！${NC}"
+        fi
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      2) 
-        enable_root_login
+      2)
+        clear
+        echo -e "${YELLOW}══════════════════${NC}"
+        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+        echo -e "${YELLOW}══════════════════${NC}"
+        local install_script="/tmp/enable_root_login.sh"
+        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/enable_root_login.sh; then
+            chmod +x "$install_script"
+            "$install_script"
+            rm -f "$install_script"
+        else
+            echo -e "${RED}下载脚本失败！${NC}"
+        fi
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      3) 
-        install_traffic_monitor
+      3)
+        clear
+        echo -e "${YELLOW}══════════════════${NC}"
+        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+        echo -e "${YELLOW}══════════════════${NC}"
+        local install_script="/tmp/install_traffic_monitor.sh"
+        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_traffic_monitor.sh; then
+            chmod +x "$install_script"
+            "$install_script"
+            rm -f "$install_script"
+        else
+            echo -e "${RED}下载脚本失败！${NC}"
+        fi
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      4) 
-        uninstall_service 
+      4)
+        clear
+        echo -e "${YELLOW}══════════════════${NC}"
+        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+        echo -e "${YELLOW}══════════════════${NC}"
+        local install_script="/tmp/uninstall_traffic_monitor.sh"
+        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/uninstall_traffic_monitor.sh; then
+            chmod +x "$install_script"
+            "$install_script"
+            rm -f "$install_script"
+        else
+            echo -e "${RED}下载脚本失败！${NC}"
+        fi
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       5) 
@@ -1983,12 +597,34 @@ main_menu() {
         install_speedtest 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      14)  
-        open_all_ports 
+      14)
+        clear
+        echo -e "${YELLOW}══════════════════${NC}"
+        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+        echo -e "${YELLOW}══════════════════${NC}"
+        local install_script="/tmp/open_all_ports.sh"
+        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/open_all_ports.sh; then
+            chmod +x "$install_script"
+            "$install_script"
+            rm -f "$install_script"
+        else
+            echo -e "${RED}下载脚本失败！${NC}"
+        fi
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       15)
-        caddy_main
+        clear
+        echo -e "${YELLOW}══════════════════${NC}"
+        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+        echo -e "${YELLOW}══════════════════${NC}"
+        local install_script="/tmp/caddy_manager.sh"
+        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/caddy_manager.sh; then
+            chmod +x "$install_script"
+            "$install_script"
+            rm -f "$install_script"
+        else
+            echo -e "${RED}下载脚本失败！${NC}"
+        fi
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       16)
@@ -1996,23 +632,56 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       17)
-        modify_ip_preference
+        clear
+        echo -e "${YELLOW}══════════════════${NC}"
+        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+        echo -e "${YELLOW}══════════════════${NC}"
+        local install_script="/tmp/modify_ip_preference.sh"
+        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/modify_ip_preference.sh; then
+            chmod +x "$install_script"
+            "$install_script"
+            rm -f "$install_script"
+        else
+            echo -e "${RED}下载脚本失败！${NC}"
+        fi
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       18)
         install_magic_tcp 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      19)  
-        install_shell_beautify 
+      19)
+        clear
+        echo -e "${YELLOW}══════════════════${NC}"
+        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+        echo -e "${YELLOW}══════════════════${NC}"
+        local install_script="/tmp/install_shell_beautify.sh"
+        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_shell_beautify.sh; then
+            chmod +x "$install_script"
+            "$install_script"
+            rm -f "$install_script"
+        else
+            echo -e "${RED}下载脚本失败！${NC}"
+        fi
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       20)  
         install_dns_unlock
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      21)  
-        install_substore 
+      21)
+        clear
+        echo -e "${YELLOW}══════════════════${NC}"
+        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+        echo -e "${YELLOW}══════════════════${NC}"
+        local install_script="/tmp/install_substore.sh"
+        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_substore.sh; then
+            chmod +x "$install_script"
+            "$install_script"
+            rm -f "$install_script"
+        else
+            echo -e "${RED}下载脚本失败！${NC}"
+        fi
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       22)  
@@ -2020,11 +689,33 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       23)
-        optimize_tcp_performance 
+        clear
+        echo -e "${YELLOW}══════════════════${NC}"
+        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+        echo -e "${YELLOW}══════════════════${NC}"
+        local install_script="/tmp/optimize_tcp_bbr.sh"
+        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/optimize_tcp_bbr.sh; then
+            chmod +x "$install_script"
+            "$install_script"
+            rm -f "$install_script"
+        else
+            echo -e "${RED}下载脚本失败！${NC}"
+        fi
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       24)
-        uninstall_tcp_optimization 
+        clear
+        echo -e "${YELLOW}══════════════════${NC}"
+        echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+        echo -e "${YELLOW}══════════════════${NC}"
+        local install_script="/tmp/restore_tcp_config.sh"
+        if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/restore_tcp_config.sh; then
+            chmod +x "$install_script"
+            "$install_script"
+            rm -f "$install_script"
+        else
+            echo -e "${RED}下载脚本失败！${NC}"
+        fi
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       25)
