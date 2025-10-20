@@ -28,8 +28,26 @@ display_system_info() {
 
     # 获取公网IP信息
     get_ip_info() {
-        local ipv4=$(curl -s4 ifconfig.me)
-        local ipv6=$(curl -s6 ifconfig.me)
+        local ipv4=$(curl -s4 ifconfig.me 2>/dev/null)
+        
+        # 尝试通过外部服务获取IPv6
+        local ipv6=$(curl -s6 --connect-timeout 3 ifconfig.me 2>/dev/null)
+        
+        # 如果外部服务失败（可能被防火墙阻断），尝试从本地网卡获取
+        if [ -z "$ipv6" ]; then
+            # 获取全局IPv6地址（排除链路本地地址fe80::和临时地址）
+            ipv6=$(ip -6 addr show scope global 2>/dev/null | \
+                   grep -oP '(?<=inet6\s)[0-9a-f:]+' | \
+                   grep -v '^fe80:' | \
+                   grep -v '^fd' | \
+                   head -1)
+            
+            # 如果有本地IPv6，添加标记
+            if [ -n "$ipv6" ]; then
+                ipv6="$ipv6 (本地)"
+            fi
+        fi
+        
         echo "$ipv4" "$ipv6"
     }
 
