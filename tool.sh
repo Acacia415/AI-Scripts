@@ -410,6 +410,8 @@ install_dns_unlock() {
     
     local install_script="/tmp/dns_unlock.sh"
     if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/dns_unlock.sh; then
+        # 转换行尾符，避免CRLF导致的执行问题
+        sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
         chmod +x "$install_script"
         # DNS解锁脚本需要root权限来安装服务和修改配置（主脚本已确保root权限）
         "$install_script"
