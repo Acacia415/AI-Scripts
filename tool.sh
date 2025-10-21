@@ -411,8 +411,8 @@ install_dns_unlock() {
     local install_script="/tmp/dns_unlock.sh"
     if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/dns_unlock.sh; then
         chmod +x "$install_script"
-        # DNS解锁脚本需要root权限来安装服务和修改配置
-        sudo "$install_script"
+        # DNS解锁脚本需要root权限来安装服务和修改配置（主脚本已确保root权限）
+        "$install_script"
         rm -f "$install_script"
     else
         echo -e "${RED}下载 DNS解锁 脚本失败！${NC}"
