@@ -8,10 +8,64 @@ BLUE='\033[34m'
 CYAN='\033[36m'
 NC='\033[0m'
 
+# ======================= Docker安装检查 =======================
+check_and_install_docker() {
+    if command -v docker &>/dev/null; then
+        echo -e "${GREEN}Docker 已安装，版本: $(docker --version)${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}未检测到 Docker，正在自动安装...${NC}"
+    
+    # 检测系统类型
+    if [ -f /etc/debian_version ]; then
+        # Debian/Ubuntu 系统
+        echo -e "${CYAN}检测到 Debian/Ubuntu 系统，使用官方安装脚本...${NC}"
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
+        rm -f get-docker.sh
+    elif [ -f /etc/redhat-release ]; then
+        # CentOS/RHEL 系统
+        echo -e "${CYAN}检测到 CentOS/RHEL 系统，使用 yum 安装...${NC}"
+        yum install -y yum-utils
+        yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+        yum install -y docker-ce docker-ce-cli containerd.io
+    else
+        echo -e "${RED}无法识别的系统类型，请手动安装 Docker${NC}"
+        echo -e "${YELLOW}安装指南: https://docs.docker.com/engine/install/${NC}"
+        return 1
+    fi
+
+    # 启动 Docker 服务
+    systemctl start docker
+    systemctl enable docker
+
+    if command -v docker &>/dev/null; then
+        echo -e "${GREEN}✅ Docker 安装成功！版本: $(docker --version)${NC}"
+        return 0
+    else
+        echo -e "${RED}❌ Docker 安装失败，请手动安装${NC}"
+        return 1
+    fi
+}
+
 # ======================= Sub-Store安装模块 =======================
 install_substore() {
+    # 检查并安装 Docker
+    if ! check_and_install_docker; then
+        echo -e "${RED}无法继续安装 Sub-Store，请先手动安装 Docker${NC}"
+        read -n 1 -s -r -p "按任意键返回..."
+        return 1
+    fi
+
     local secret_key
     local compose_file="docker-compose.yml" # 定义 docker-compose 文件名
+    local public_ip
+
+    # 获取公网IP地址
+    echo -e "${CYAN}正在获取服务器公网IP...${NC}"
+    public_ip=$(curl -4s ip.sb 2>/dev/null || curl -4s ifconfig.me 2>/dev/null || echo "YOUR_SERVER_IP")
+    echo -e "${GREEN}服务器IP: ${public_ip}${NC}"
 
     # 检查 docker-compose.yml 是否存在，并尝试从中提取 secret_key
     if [ -f "$compose_file" ]; then
