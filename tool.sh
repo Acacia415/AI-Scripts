@@ -690,6 +690,59 @@ update_script() {
   fi
 }
 
+# ======================= 卸载工具箱 =======================
+uninstall_toolbox() {
+  clear
+  echo -e "${RED}════════════════════════════════════${NC}"
+  echo -e "${RED}         卸载 IRIS 工具箱          ${NC}"
+  echo -e "${RED}════════════════════════════════════${NC}"
+  echo
+  echo -e "${YELLOW}警告：此操作将完全卸载工具箱，包括：${NC}"
+  echo -e "  - 删除快捷命令 'p'"
+  echo -e "  - 删除 /usr/local/bin/p"
+  echo -e "  - 删除 $HOME/tool.sh"
+  echo -e "  - 清理所有相关配置"
+  echo
+  read -p "确认要卸载吗？(输入 YES 确认): " confirm
+  
+  if [[ "$confirm" != "YES" ]]; then
+    echo -e "${BLUE}已取消卸载操作${NC}"
+    sleep 2
+    return
+  fi
+  
+  echo -e "${YELLOW}正在卸载工具箱...${NC}"
+  
+  # 删除快捷命令文件
+  if [ -f /usr/local/bin/p ]; then
+    rm -f /usr/local/bin/p
+    echo -e "${GREEN}✓ 已删除 /usr/local/bin/p${NC}"
+  fi
+  
+  # 删除本地备份
+  if [ -f "$HOME/tool.sh" ]; then
+    rm -f "$HOME/tool.sh"
+    echo -e "${GREEN}✓ 已删除 $HOME/tool.sh${NC}"
+  fi
+  
+  # 清理可能存在的 alias（虽然当前版本没用到，但为了兼容性）
+  sed -i '/^alias p=/d' ~/.bashrc 2>/dev/null
+  sed -i '/^alias p=/d' ~/.profile 2>/dev/null
+  sed -i '/^alias p=/d' ~/.bash_profile 2>/dev/null
+  echo -e "${GREEN}✓ 已清理配置文件${NC}"
+  
+  echo
+  echo -e "${GREEN}════════════════════════════════════${NC}"
+  echo -e "${GREEN}   工具箱已完全卸载！感谢使用！   ${NC}"
+  echo -e "${GREEN}════════════════════════════════════${NC}"
+  echo
+  echo -e "${CYAN}如需重新安装，请执行：${NC}"
+  echo -e "${YELLOW}bash <(curl -fsSL https://link.irisu.de/toolbox)${NC}"
+  echo
+  read -n 1 -s -r -p "按任意键退出..."
+  exit 0
+}
+
 # ======================= 主菜单 =======================
 main_menu() {
   while true; do
@@ -753,6 +806,7 @@ main_menu() {
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
+    echo -e "98. 卸载工具箱"
     echo -e "${YELLOW}==================================================${NC}"
     
     read -p "请输入选项 : " choice
@@ -876,6 +930,10 @@ main_menu() {
       99)  
         update_script 
         read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      98)
+        uninstall_toolbox
+        # 卸载函数会自动退出，不需要返回主菜单
         ;;
       0) 
         echo -e "${GREEN}已退出${NC}"
