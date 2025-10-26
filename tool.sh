@@ -689,6 +689,28 @@ reinstall_system() {
     fi
 }
 
+# ======================= 时间同步 =======================
+sync_time() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}时间同步脚本 - 修复 ss-rust 时间戳问题${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/sync-time.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/sync-time.sh; then
+        # 转换行尾符，避免CRLF导致的执行问题
+        sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
+        chmod +x "$install_script"
+        "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载时间同步脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
 # ======================= 脚本更新 =======================
 update_script() {
   echo -e "${YELLOW}开始更新脚本...${NC}"
@@ -825,6 +847,7 @@ main_menu() {
     echo -e "28. 安装 Gost v3"
     echo -e "29. 修改主机名"
     echo -e "30. 重装系统"
+    echo -e "31. 时间同步 (修复ss-rust时间戳问题)"
     echo -e "0. 退出脚本"
     echo -e "${YELLOW}==================================================${NC}"
     echo -e "99. 脚本更新"
@@ -952,6 +975,10 @@ main_menu() {
       30)
         reinstall_system
         # 重装系统后会自动重启，不需要返回主菜单
+        ;;
+      31)
+        sync_time
+        read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       99)  
         update_script 
