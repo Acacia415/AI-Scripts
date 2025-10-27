@@ -160,7 +160,7 @@ init_system() {
 #---------- 流量监控逻辑 ----------#
 start_monitor() {
     declare -A ip_first_seen
-    LIMIT=40  # 流量阈值(MB/s)
+    LIMIT=5  # 流量阈值(MB/s)
     LOG_FILE="/var/log/iptables_ban.log"
 
     while true; do
@@ -203,7 +203,7 @@ start_monitor() {
                 else
                     duration=$(( current_time - ip_first_seen[$BAN_IP] ))
                     
-                    if (( duration >= 60 )); then
+                    if (( duration >= 5 )); then
                         echo -e "${RED}🚫 封禁 $BAN_IP（持续超速 ${duration}秒）${NC}"
                         ipset add banlist "$BAN_IP" timeout 86400
                         echo "$(date '+%Y-%m-%d %H:%M:%S') 封禁 $BAN_IP RX:${RX_RATE}MB/s TX:${TX_RATE}MB/s 持续:${duration}秒" >> $LOG_FILE
