@@ -19,8 +19,7 @@ AI-Scripts/
 ├── install_imghub.sh                # 安装TG图床
 ├── install_shell_beautify.sh        # 命令行美化
 ├── install_substore.sh              # 安装Sub-Store
-├── install_traffic_monitor.sh       # 安装流量监控服务（旧版）
-├── traffic_monitor_manager.sh       # 流量监控管理系统v2.0
+├── traffic_monitor.sh               # 智能流量监控管理系统（单文件版）
 ├── iptables.sh                      # iptables转发
 ├── modify_ip_preference.sh          # IP优先级设置
 ├── nginx-manager.sh                 # Nginx反代管理
@@ -28,8 +27,7 @@ AI-Scripts/
 ├── optimize_tcp_bbr.sh              # TCP性能优化(BBR+fq)
 ├── reinstall_system.sh              # 系统重装工具
 ├── restore_tcp_config.sh            # 恢复TCP原始配置
-├── sync-time.sh                     # 时间同步脚本
-└── uninstall_traffic_monitor.sh     # 完全卸载流量监控
+└── sync-time.sh                     # 时间同步脚本
 ```
 
 ## 🚀 快速开始
@@ -63,12 +61,14 @@ sudo ./tool.sh
 - **时间同步** - 校准系统时间，修复时间戳不匹配问题
 
 ### 流量监控
-- **流量监控管理系统** - 完整的流量监控解决方案，包含：
-  - 实时监控网络流量并自动封禁异常IP
-  - 端口过滤（仅监控指定端口如代理端口）
-  - 白名单/黑名单管理（支持批量操作）
-  - 封禁日志记录与管理
-  - 防BT/PT滥用流量
+- **智能流量监控** - 单文件版完整流量监控解决方案：
+  - 🚀 实时监控网络流量并自动封禁异常IP
+  - 🎯 端口过滤（可指定监控端口，如代理端口）
+  - 📋 白名单/黑名单管理（支持序号/IP删除）
+  - 📊 封禁日志记录与管理
+  - ⚙️ 可配置流量阈值和持续时间
+  - 🛡️ 防BT/PT滥用流量
+  - 📦 单文件集成管理和监控（无额外依赖）
 
 ### 网络优化
 - **IP优先级设置** - 配置IPv4/IPv6优先级
