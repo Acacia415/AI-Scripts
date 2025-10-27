@@ -90,34 +90,15 @@ enable_root_login() {
     fi
 }
 
-# ======================= 安装流量监控服务 =======================
-install_traffic_monitor() {
+# ======================= 智能流量监控 =======================
+traffic_monitor() {
     clear
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/install_traffic_monitor.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_traffic_monitor.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
-}
-
-# ======================= 完全卸载流量监控 =======================
-uninstall_traffic_monitor() {
-    clear
-    echo -e "${YELLOW}════════════════════════════════════${NC}"
-    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
-    echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/uninstall_traffic_monitor.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/uninstall_traffic_monitor.sh; then
+    local install_script="/tmp/traffic_monitor.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/traffic_monitor.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -817,22 +798,21 @@ main_menu() {
 
     # 菜单部分（双列显示）
     echo -e "${YELLOW}==========================================================================${NC}"
-    echo "1. 系统信息查询                        17. Nginx管理"
-    echo "2. 开启root用户登录                    18. IP优先级设置"
-    echo "3. 安装流量监控服务                    19. TCP性能优化"
-    echo "4. 完全卸载流量监控                    20. 命令行美化"
-    echo "5. 安装 Snell 协议服务                 21. DNS解锁服务"
-    echo "6. 安装 Hysteria2 协议服务             22. 安装Sub-Store"
-    echo "7. 安装 SS-Rust 协议服务               23. 搭建TG图床"
-    echo "8. 安装 ShadowTLS                      24. TCP性能优化 (BBR+fq)"
-    echo "9. 一键IPTables转发                    25. 恢复TCP原始配置"
-    echo "10. 一键GOST转发                       26. 安装Fail2Ban"
-    echo "11. 安装 3X-UI 管理面板                27. 安装 acme.sh"
-    echo "12. 流媒体解锁检测                     28. 安装 Gost v3"
-    echo "13. Speedtest网络测速                  29. 修改主机名"
-    echo "14. BestTrace回程测试                  30. 重装系统"
-    echo "15. 开放所有端口                       31. 时间同步"
-    echo "16. Caddy反代管理"
+    echo "1. 系统信息查询                        16. Caddy反代管理"
+    echo "2. 开启root用户登录                    17. Nginx管理"
+    echo "3. 智能流量监控                        18. IP优先级设置"
+    echo "4. 安装 Snell 协议服务                 19. TCP性能优化"
+    echo "5. 安装 Hysteria2 协议服务             20. 命令行美化"
+    echo "6. 安装 SS-Rust 协议服务               21. DNS解锁服务"
+    echo "7. 安装 ShadowTLS                      22. 安装Sub-Store"
+    echo "8. 一键IPTables转发                    23. 搭建TG图床"
+    echo "9. 一键GOST转发                        24. TCP性能优化 (BBR+fq)"
+    echo "10. 安装 3X-UI 管理面板                25. 恢复TCP原始配置"
+    echo "11. 流媒体解锁检测                     26. 安装Fail2Ban"
+    echo "12. Speedtest网络测速                  27. 安装 acme.sh"
+    echo "13. BestTrace回程测试                  28. 安装 Gost v3"
+    echo "14. 开放所有端口                       29. 修改主机名"
+    echo "15. 时间同步                           30. 重装系统"
     echo -e "${YELLOW}==========================================================================${NC}"
     echo "0. 退出脚本"
     echo -e "${YELLOW}-------------------------------------------------------------------------${NC}"
@@ -850,55 +830,55 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       3)
-        install_traffic_monitor
+        traffic_monitor
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      4)
-        uninstall_traffic_monitor
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        ;;
-      5) 
+      4) 
         install_snell 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      6)  
+      5)  
         install_hysteria2 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      7)  
+      6)  
         install_ss_rust 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      8)  
+      7)  
         install_shadowtls 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      9)  
+      8)  
         install_iptables_forward 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      10)  
+      9)  
         install_gost_forward 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      11)  
+      10)  
         install_3x_ui 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      12)  
+      11)  
         install_media_check 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      13)  
+      12)  
         install_speedtest 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      14)  
+      13)  
         install_besttrace 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      15)
+      14)
         open_all_ports
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      15)
+        sync_time
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       16)
@@ -960,10 +940,6 @@ main_menu() {
       30)
         reinstall_system
         # 重装系统后会自动重启，不需要返回主菜单
-        ;;
-      31)
-        sync_time
-        read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       99)  
         update_script 
