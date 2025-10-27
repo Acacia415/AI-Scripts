@@ -19,7 +19,8 @@ AI-Scripts/
 ├── install_imghub.sh                # 安装TG图床
 ├── install_shell_beautify.sh        # 命令行美化
 ├── install_substore.sh              # 安装Sub-Store
-├── install_traffic_monitor.sh       # 安装流量监控服务
+├── install_traffic_monitor.sh       # 安装流量监控服务（旧版）
+├── traffic_monitor_manager.sh       # 流量监控管理系统v2.0
 ├── iptables.sh                      # iptables转发
 ├── modify_ip_preference.sh          # IP优先级设置
 ├── nginx-manager.sh                 # Nginx反代管理
@@ -62,8 +63,12 @@ sudo ./tool.sh
 - **时间同步** - 校准系统时间，修复时间戳不匹配问题
 
 ### 流量监控
-- **安装流量监控服务** - 实时监控网络流量并自动封禁异常IP
-- **完全卸载流量监控** - 清理所有监控组件和配置
+- **流量监控管理系统** - 完整的流量监控解决方案，包含：
+  - 实时监控网络流量并自动封禁异常IP
+  - 端口过滤（仅监控指定端口如代理端口）
+  - 白名单/黑名单管理（支持批量操作）
+  - 封禁日志记录与管理
+  - 防BT/PT滥用流量
 
 ### 网络优化
 - **IP优先级设置** - 配置IPv4/IPv6优先级
