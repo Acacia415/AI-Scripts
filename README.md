@@ -9,9 +9,11 @@ AI-Scripts/
 ├── tool.sh                          # 主菜单脚本
 ├── README.md                        # 项目说明文档
 ├── caddy_manager.sh                 # Caddy反代管理
+├── change_hostname.sh               # 主机名修改工具
 ├── display_system_info.sh           # 系统信息查询
 ├── dns_unlock.sh                    # DNS解锁脚本
 ├── enable_root_login.sh             # 开启root用户登录
+├── fix_hostname.sh                  # 修复主机名解析错误
 ├── gost_v3.sh                       # 使用gostv3转发端口
 ├── install_fail2ban.sh              # 安装fail2ban
 ├── install_imghub.sh                # 安装TG图床
@@ -23,7 +25,9 @@ AI-Scripts/
 ├── nginx-manager.sh                 # Nginx反代管理
 ├── open_all_ports.sh                # 开放所有端口
 ├── optimize_tcp_bbr.sh              # TCP性能优化(BBR+fq)
+├── reinstall_system.sh              # 系统重装工具
 ├── restore_tcp_config.sh            # 恢复TCP原始配置
+├── sync-time.sh                     # 时间同步脚本
 └── uninstall_traffic_monitor.sh     # 完全卸载流量监控
 ```
 
@@ -52,6 +56,10 @@ sudo ./tool.sh
 - **系统信息查询** - 显示系统详细信息（CPU、内存、网络等）
 - **开启root用户登录** - 配置SSH允许root登录
 - **开放所有端口** - 清空防火墙规则并开放所有端口
+- **修改主机名** - 修改系统主机名并更新相关配置
+- **修复主机名解析** - 修复 "sudo: unable to resolve host" 错误
+- **系统重装** - 一键重装多种Linux系统（Debian/Ubuntu/CentOS等）
+- **时间同步** - 校准系统时间，修复时间戳不匹配问题
 
 ### 流量监控
 - **安装流量监控服务** - 实时监控网络流量并自动封禁异常IP
