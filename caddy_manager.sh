@@ -197,13 +197,45 @@ uninstall_caddy() {
     echo -e "${GREEN}✅ Caddy已完全卸载，再见！${NC}"
 }
 
+# ======================= 重启Caddy =======================
+restart_caddy() {
+    if ! command -v caddy &>/dev/null; then
+        echo -e "${RED}错误：Caddy未安装！${NC}"
+        return 1
+    fi
+
+    # 验证配置文件
+    echo -e "${CYAN}验证配置文件...${NC}"
+    if ! sudo caddy validate --config /etc/caddy/Caddyfile; then
+        echo -e "${RED}配置文件验证失败！请检查配置后再重启。${NC}"
+        return 1
+    fi
+
+    echo -e "${CYAN}正在重启Caddy服务...${NC}"
+    if sudo systemctl restart caddy; then
+        sleep 1
+        if systemctl is-active caddy &>/dev/null; then
+            echo -e "${GREEN}✅ Caddy重启成功！${NC}"
+            systemctl status caddy --no-pager -l
+        else
+            echo -e "${RED}重启后服务未正常运行，请检查日志${NC}"
+            sudo journalctl -u caddy -n 20 --no-pager
+            return 1
+        fi
+    else
+        echo -e "${RED}Caddy重启失败！${NC}"
+        return 1
+    fi
+}
+
 # ======================= Caddy子菜单 =======================
 show_caddy_menu() {
     clear
     echo -e "${CYAN}=== Caddy 管理脚本 v1.2 ===${NC}"
     echo "1. 安装/配置反向代理"
     echo "2. 完全卸载Caddy"
-    echo "3. 返回主菜单"
+    echo "3. 重启Caddy"
+    echo "0. 返回主菜单"
     echo -e "${YELLOW}===============================${NC}"
 }
 
@@ -222,6 +254,10 @@ caddy_main() {
                 read -p "按回车键返回菜单..." 
                 ;;
             3) 
+                restart_caddy
+                read -p "按回车键返回菜单..." 
+                ;;
+            0) 
                 break
                 ;;
             *) 
