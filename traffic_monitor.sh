@@ -564,31 +564,37 @@ manage_cloudflare() {
                     
                     # 解析 IPv4
                     echo -e "${YELLOW}添加 IPv4 段...${NC}"
+                    local tmp_ipv4="/tmp/cf_asn_ipv4.txt"
                     if command -v jq >/dev/null 2>&1; then
-                        # 使用 jq 解析
-                        while read -r prefix; do
-                            [ -n "$prefix" ] && ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix" && ((count_added++))
-                        done < <(jq -r '.data.ipv4_prefixes[]?.prefix // empty' "$asn_data" 2>/dev/null)
+                        jq -r '.data.ipv4_prefixes[]?.prefix // empty' "$asn_data" 2>/dev/null > "$tmp_ipv4"
                     else
-                        # 简单的 grep 方式
-                        grep -oE '"prefix":"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+"' "$asn_data" | \
-                        cut -d'"' -f4 | while read -r prefix; do
-                            [ -n "$prefix" ] && ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix" && ((count_added++))
-                        done
+                        grep -oE '"prefix":"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+"' "$asn_data" | cut -d'"' -f4 > "$tmp_ipv4"
                     fi
+                    
+                    if [ -s "$tmp_ipv4" ]; then
+                        while read -r prefix; do
+                            [ -n "$prefix" ] && ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix"
+                        done < "$tmp_ipv4"
+                    fi
+                    rm -f "$tmp_ipv4"
                     
                     # 解析 IPv6
                     echo -e "${YELLOW}添加 IPv6 段...${NC}"
+                    local tmp_ipv6="/tmp/cf_asn_ipv6.txt"
                     if command -v jq >/dev/null 2>&1; then
-                        while read -r prefix; do
-                            [ -n "$prefix" ] && ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix" && ((count_added++))
-                        done < <(jq -r '.data.ipv6_prefixes[]?.prefix // empty' "$asn_data" 2>/dev/null)
+                        jq -r '.data.ipv6_prefixes[]?.prefix // empty' "$asn_data" 2>/dev/null > "$tmp_ipv6"
                     else
-                        grep -oE '"prefix":"[0-9a-fA-F:]+/[0-9]+"' "$asn_data" | \
-                        cut -d'"' -f4 | while read -r prefix; do
-                            [[ "$prefix" =~ : ]] && ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix" && ((count_added++))
-                        done
+                        grep -oE '"prefix":"[0-9a-fA-F:]+/[0-9]+"' "$asn_data" | cut -d'"' -f4 | grep ':' > "$tmp_ipv6"
                     fi
+                    
+                    if [ -s "$tmp_ipv6" ]; then
+                        while read -r prefix; do
+                            [ -n "$prefix" ] && ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix"
+                        done < "$tmp_ipv6"
+                    else
+                        echo -e "${YELLOW}⚠ 未找到 IPv6 段${NC}"
+                    fi
+                    rm -f "$tmp_ipv6"
                     
                     rm -f "$asn_data"
                 else
