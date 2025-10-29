@@ -541,15 +541,26 @@ manage_cloudflare() {
                 
                 if [ $success_v6 -eq 1 ]; then
                     # 文件有效，开始添加
+                    echo "  文件内容预览："
+                    head -n 3 "$tmp_v6" | while read line; do echo "    [$line]"; done
+                    
                     local v6_count=0
                     while IFS= read -r ip; do
                         ip=$(echo "$ip" | tr -d '\r' | xargs)
                         [ -z "$ip" ] && continue
+                        
+                        # 调试：显示处理的行
+                        echo "  处理: [$ip]"
+                        
                         if echo "$ip" | grep -q ':' && echo "$ip" | grep -q '/'; then
                             if ipset add cf_block "$ip" 2>/dev/null; then
                                 echo "  ✓ $ip"
                                 ((v6_count++))
+                            else
+                                echo "  ✗ ipset添加失败: $ip"
                             fi
+                        else
+                            echo "  ✗ 格式不匹配: [$ip]"
                         fi
                     done < "$tmp_v6"
                     
