@@ -526,11 +526,11 @@ manage_cloudflare() {
                         local v6_count=0
                         while IFS= read -r ip; do
                             # 去除首尾空白
-                            ip=$(echo "$ip" | xargs)
+                            ip=$(echo "$ip" | tr -d '\r' | xargs)
                             # 跳过空行
                             [ -z "$ip" ] && continue
-                            # 验证并添加
-                            if [[ "$ip" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
+                            # 简化验证：只要包含冒号和斜杠就认为是IPv6段
+                            if echo "$ip" | grep -q ':' && echo "$ip" | grep -q '/'; then
                                 if ipset add cf_block "$ip" 2>/dev/null; then
                                     echo "  ✓ $ip"
                                     ((v6_count++))
@@ -635,9 +635,12 @@ manage_cloudflare() {
                     if curl -sL -m 10 "https://www.cloudflare.com/ips-v6" -o "$tmp_v6" 2>/dev/null && [ -f "$tmp_v6" ] && [ -s "$tmp_v6" ]; then
                         if ! grep -qi "<!DOCTYPE\|<html" "$tmp_v6" 2>/dev/null; then
                             while IFS= read -r ip; do
-                                ip=$(echo "$ip" | xargs)
+                                ip=$(echo "$ip" | tr -d '\r' | xargs)
                                 [ -z "$ip" ] && continue
-                                [[ "$ip" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                                # 简化验证
+                                if echo "$ip" | grep -q ':' && echo "$ip" | grep -q '/'; then
+                                    ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                                fi
                             done < "$tmp_v6"
                         fi
                         rm -f "$tmp_v6"
@@ -725,9 +728,10 @@ manage_cloudflare() {
                         echo -e "${YELLOW}⚠ 文件为空${NC}"
                     else
                         while IFS= read -r ip; do
-                            ip=$(echo "$ip" | xargs)
+                            ip=$(echo "$ip" | tr -d '\r' | xargs)
                             [ -z "$ip" ] && continue
-                            if [[ "$ip" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
+                            # 简化验证：包含冒号和斜杠
+                            if echo "$ip" | grep -q ':' && echo "$ip" | grep -q '/'; then
                                 ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
                             fi
                         done < "$tmp_v6"
