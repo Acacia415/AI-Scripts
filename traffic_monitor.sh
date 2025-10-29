@@ -482,9 +482,10 @@ manage_cloudflare() {
                 # 下载并添加 CF IPv4 段
                 echo -e "${YELLOW}下载 CF IPv4 段...${NC}"
                 local tmp_v4="/tmp/cf_ipv4.txt"
-                if curl -s https://www.cloudflare.com/ips-v4 -o "$tmp_v4" && [ -s "$tmp_v4" ]; then
+                # 尝试 GitHub 镜像源（主要）
+                if curl -sL https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv4.txt -o "$tmp_v4" && [ -s "$tmp_v4" ] && grep -q '^[0-9]' "$tmp_v4"; then
                     while read ip; do
-                        ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                        [ -n "$ip" ] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
                     done < "$tmp_v4"
                     rm -f "$tmp_v4"
                     echo -e "${GREEN}✓ IPv4 完成${NC}"
@@ -496,9 +497,10 @@ manage_cloudflare() {
                 # 下载并添加 CF IPv6 段
                 echo -e "${YELLOW}下载 CF IPv6 段...${NC}"
                 local tmp_v6="/tmp/cf_ipv6.txt"
-                if curl -s https://www.cloudflare.com/ips-v6 -o "$tmp_v6" && [ -s "$tmp_v6" ]; then
+                # 尝试 GitHub 镜像源（主要）
+                if curl -sL https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv6.txt -o "$tmp_v6" && [ -s "$tmp_v6" ] && grep -q '^[0-9a-f:]' "$tmp_v6"; then
                     while read ip; do
-                        ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                        [ -n "$ip" ] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
                     done < "$tmp_v6"
                     rm -f "$tmp_v6"
                     echo -e "${GREEN}✓ IPv6 完成${NC}"
@@ -563,9 +565,9 @@ manage_cloudflare() {
                 # 重新下载 IPv4
                 echo -e "${YELLOW}下载 IPv4...${NC}"
                 local tmp_v4="/tmp/cf_ipv4.txt"
-                if curl -s https://www.cloudflare.com/ips-v4 -o "$tmp_v4" && [ -s "$tmp_v4" ]; then
+                if curl -sL https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv4.txt -o "$tmp_v4" && [ -s "$tmp_v4" ] && grep -q '^[0-9]' "$tmp_v4"; then
                     while read ip; do
-                        ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                        [ -n "$ip" ] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
                     done < "$tmp_v4"
                     rm -f "$tmp_v4"
                 fi
@@ -573,9 +575,9 @@ manage_cloudflare() {
                 # 重新下载 IPv6
                 echo -e "${YELLOW}下载 IPv6...${NC}"
                 local tmp_v6="/tmp/cf_ipv6.txt"
-                if curl -s https://www.cloudflare.com/ips-v6 -o "$tmp_v6" && [ -s "$tmp_v6" ]; then
+                if curl -sL https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv6.txt -o "$tmp_v6" && [ -s "$tmp_v6" ] && grep -q '^[0-9a-f:]' "$tmp_v6"; then
                     while read ip; do
-                        ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                        [ -n "$ip" ] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
                     done < "$tmp_v6"
                     rm -f "$tmp_v6"
                 fi
