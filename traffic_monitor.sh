@@ -456,10 +456,14 @@ manage_cloudflare() {
         echo -e "${GREEN}    Cloudflare 防护管理${NC}"
         echo -e "${CYAN}════════════════════════════════════${NC}\n"
         
-        # 检查状态
-        if ipset list cf_block &>/dev/null && iptables -C INPUT -m set --match-set cf_block src -j DROP &>/dev/null; then
+        # 检查状态（兼容新旧两种规则）
+        if ipset list cf_block &>/dev/null && \
+           (iptables -C INPUT -m conntrack --ctstate NEW -m set --match-set cf_block src -j DROP &>/dev/null || \
+            iptables -C INPUT -m set --match-set cf_block src -j DROP &>/dev/null); then
             echo -e "${GREEN}● 状态: 已启用${NC}"
-            local cf_count=$(ipset list cf_block | grep -E '^[0-9]' | wc -l)
+            local cf_v4=$(ipset list cf_block 2>/dev/null | grep -E '^[0-9]' | wc -l)
+            local cf_v6=$(ipset list cf_block_v6 2>/dev/null | grep -E '^[0-9a-fA-F:]+/' | wc -l)
+            local cf_count=$((cf_v4 + cf_v6))
             echo -e "${YELLOW}已封禁 $cf_count 个 Cloudflare IP 段${NC}\n"
         else
             echo -e "${YELLOW}○ 状态: 未启用${NC}\n"
