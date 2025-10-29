@@ -481,22 +481,30 @@ manage_cloudflare() {
                 
                 # 下载并添加 CF IPv4 段
                 echo -e "${YELLOW}下载 CF IPv4 段...${NC}"
-                if curl -s https://www.cloudflare.com/ips-v4 | while read ip; do
-                    ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
-                done; then
+                local tmp_v4="/tmp/cf_ipv4.txt"
+                if curl -s https://www.cloudflare.com/ips-v4 -o "$tmp_v4" && [ -s "$tmp_v4" ]; then
+                    while read ip; do
+                        ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                    done < "$tmp_v4"
+                    rm -f "$tmp_v4"
                     echo -e "${GREEN}✓ IPv4 完成${NC}"
                 else
                     echo -e "${RED}✗ IPv4 下载失败${NC}"
+                    rm -f "$tmp_v4"
                 fi
                 
                 # 下载并添加 CF IPv6 段
                 echo -e "${YELLOW}下载 CF IPv6 段...${NC}"
-                if curl -s https://www.cloudflare.com/ips-v6 | while read ip; do
-                    ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
-                done; then
+                local tmp_v6="/tmp/cf_ipv6.txt"
+                if curl -s https://www.cloudflare.com/ips-v6 -o "$tmp_v6" && [ -s "$tmp_v6" ]; then
+                    while read ip; do
+                        ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                    done < "$tmp_v6"
+                    rm -f "$tmp_v6"
                     echo -e "${GREEN}✓ IPv6 完成${NC}"
                 else
                     echo -e "${RED}✗ IPv6 下载失败${NC}"
+                    rm -f "$tmp_v6"
                 fi
                 
                 # 添加 iptables 规则
@@ -552,16 +560,25 @@ manage_cloudflare() {
                 # 清空旧列表
                 ipset flush cf_block
                 
-                # 重新下载
+                # 重新下载 IPv4
                 echo -e "${YELLOW}下载 IPv4...${NC}"
-                curl -s https://www.cloudflare.com/ips-v4 | while read ip; do
-                    ipset add cf_block "$ip" 2>/dev/null
-                done
+                local tmp_v4="/tmp/cf_ipv4.txt"
+                if curl -s https://www.cloudflare.com/ips-v4 -o "$tmp_v4" && [ -s "$tmp_v4" ]; then
+                    while read ip; do
+                        ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                    done < "$tmp_v4"
+                    rm -f "$tmp_v4"
+                fi
                 
+                # 重新下载 IPv6
                 echo -e "${YELLOW}下载 IPv6...${NC}"
-                curl -s https://www.cloudflare.com/ips-v6 | while read ip; do
-                    ipset add cf_block "$ip" 2>/dev/null
-                done
+                local tmp_v6="/tmp/cf_ipv6.txt"
+                if curl -s https://www.cloudflare.com/ips-v6 -o "$tmp_v6" && [ -s "$tmp_v6" ]; then
+                    while read ip; do
+                        ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                    done < "$tmp_v6"
+                    rm -f "$tmp_v6"
+                fi
                 
                 ipset save > /etc/ipset.conf
                 
