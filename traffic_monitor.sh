@@ -575,14 +575,20 @@ manage_cloudflare() {
                 fi
                 rm -f "$tmp_v6"
                 
-                # 添加 iptables 规则
-                if ! iptables -C INPUT -m set --match-set cf_block src -j DROP &>/dev/null; then
-                    iptables -I INPUT -m set --match-set cf_block src -j DROP
+                # 添加 iptables 规则（只阻止新建连接，不影响主动访问的响应包）
+                if ! iptables -C INPUT -m conntrack --ctstate NEW -m set --match-set cf_block src -j DROP &>/dev/null; then
+                    # 删除旧规则
+                    iptables -D INPUT -m set --match-set cf_block src -j DROP 2>/dev/null
+                    # 添加新规则
+                    iptables -I INPUT -m conntrack --ctstate NEW -m set --match-set cf_block src -j DROP
                 fi
                 # 添加 ip6tables 规则
                 if ipset list cf_block_v6 &>/dev/null; then
-                    if ! ip6tables -C INPUT -m set --match-set cf_block_v6 src -j DROP &>/dev/null; then
-                        ip6tables -I INPUT -m set --match-set cf_block_v6 src -j DROP
+                    if ! ip6tables -C INPUT -m conntrack --ctstate NEW -m set --match-set cf_block_v6 src -j DROP &>/dev/null; then
+                        # 删除旧规则
+                        ip6tables -D INPUT -m set --match-set cf_block_v6 src -j DROP 2>/dev/null
+                        # 添加新规则
+                        ip6tables -I INPUT -m conntrack --ctstate NEW -m set --match-set cf_block_v6 src -j DROP
                     fi
                 fi
                 
@@ -605,18 +611,60 @@ manage_cloudflare() {
                 echo -e "${YELLOW}查询 AS13335 (Cloudflare) 的所有 IP 段...${NC}"
                 local asn_data="/tmp/cf_asn.json"
                 local count_added=0
+                local api_success=0
                 
-                # 尝试从 BGPView API 获取
-                if curl -sL -m 15 "https://api.bgpview.io/asn/13335/prefixes" -o "$asn_data" 2>/dev/null && [ -s "$asn_data" ]; then
-                    echo -e "${GREEN}✓ 获取到 ASN 数据${NC}\n"
+                # 尝试多个ASN数据源
+                for asn_api in \
+                    "https://api.bgpview.io/asn/13335/prefixes" \
+                    "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS13335"
+                do
+                    echo "  尝试连接: $asn_api"
+                    local http_code=$(curl -sL -w "%{http_code}" -m 15 -A "Mozilla/5.0" "$asn_api" -o "$asn_data" 2>&1 | tail -n1)
+                    echo "  HTTP状态码: $http_code"
+                    
+                    if [ -f "$asn_data" ] && [ -s "$asn_data" ] && [ "$http_code" = "200" ]; then
+                        api_success=1
+                        break
+                    fi
+                done
+                
+                if [ $api_success -eq 1 ]; then
+                    echo -e "${GREEN}✓ 获取到 ASN 数据${NC}"
+                    echo "  文件大小: $(wc -c < "$asn_data") bytes"
+                    
+                    # 检查jq是否安装，没有则自动安装
+                    if ! command -v jq >/dev/null 2>&1; then
+                        echo -e "${YELLOW}⚠ 未安装 jq 工具，正在自动安装...${NC}"
+                        if command -v apt >/dev/null 2>&1; then
+                            apt update -qq && apt install -y jq >/dev/null 2>&1
+                        elif command -v yum >/dev/null 2>&1; then
+                            yum install -y jq >/dev/null 2>&1
+                        elif command -v dnf >/dev/null 2>&1; then
+                            dnf install -y jq >/dev/null 2>&1
+                        fi
+                        
+                        # 再次检查
+                        if command -v jq >/dev/null 2>&1; then
+                            echo -e "${GREEN}✓ jq 安装成功${NC}"
+                        else
+                            echo -e "${YELLOW}⚠ jq 安装失败，使用备用解析方案${NC}"
+                        fi
+                    fi
+                    echo ""
                     
                     # 解析 IPv4
                     echo -e "${YELLOW}添加 IPv4 段...${NC}"
                     local tmp_ipv4="/tmp/cf_asn_ipv4.txt"
                     if command -v jq >/dev/null 2>&1; then
+                        # 尝试BGPView格式
                         jq -r '.data.ipv4_prefixes[]?.prefix // empty' "$asn_data" 2>/dev/null > "$tmp_ipv4"
+                        # 如果为空，尝试RIPE格式
+                        if [ ! -s "$tmp_ipv4" ]; then
+                            jq -r '.data.prefixes[]?.prefix // empty' "$asn_data" 2>/dev/null | grep -v ':' > "$tmp_ipv4"
+                        fi
                     else
-                        grep -oE '"prefix":"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+"' "$asn_data" | cut -d'"' -f4 > "$tmp_ipv4"
+                        # 没有jq，使用grep+sed提取
+                        grep -oE '"prefix":"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+"' "$asn_data" | cut -d'"' -f4 | sort -u > "$tmp_ipv4"
                     fi
                     
                     if [ -s "$tmp_ipv4" ]; then
@@ -636,9 +684,15 @@ manage_cloudflare() {
                     echo -e "${YELLOW}添加 IPv6 段...${NC}"
                     local tmp_ipv6="/tmp/cf_asn_ipv6.txt"
                     if command -v jq >/dev/null 2>&1; then
+                        # 尝试BGPView格式
                         jq -r '.data.ipv6_prefixes[]?.prefix // empty' "$asn_data" 2>/dev/null > "$tmp_ipv6"
+                        # 如果为空，尝试RIPE格式
+                        if [ ! -s "$tmp_ipv6" ]; then
+                            jq -r '.data.prefixes[]?.prefix // empty' "$asn_data" 2>/dev/null | grep ':' > "$tmp_ipv6"
+                        fi
                     else
-                        grep -oE '"prefix":"[0-9a-fA-F:]+/[0-9]+"' "$asn_data" | cut -d'"' -f4 | grep ':' > "$tmp_ipv6"
+                        # 没有jq，使用grep提取
+                        grep -oE '"prefix":"[0-9a-fA-F:]+/[0-9]+"' "$asn_data" | cut -d'"' -f4 | grep ':' | sort -u > "$tmp_ipv6"
                     fi
                     
                     if [ -s "$tmp_ipv6" ]; then
@@ -656,7 +710,14 @@ manage_cloudflare() {
                     
                     rm -f "$asn_data"
                 else
-                    echo -e "${RED}✗ ASN 数据获取失败，回退到标准列表${NC}\n"
+                    if [ ! -f "$asn_data" ]; then
+                        echo -e "${RED}✗ 文件未创建（网络问题）${NC}"
+                    elif [ ! -s "$asn_data" ]; then
+                        echo -e "${RED}✗ 文件为空（HTTP: $http_code）${NC}"
+                    else
+                        echo -e "${RED}✗ HTTP错误（代码: $http_code）${NC}"
+                    fi
+                    echo -e "${YELLOW}回退到标准列表...${NC}\n"
                     
                     # 回退方案：使用标准列表
                     local tmp_v4="/tmp/cf_ipv4.txt"
@@ -694,14 +755,16 @@ manage_cloudflare() {
                     rm -f "$tmp_v6"
                 fi
                 
-                # 添加 iptables 规则
-                if ! iptables -C INPUT -m set --match-set cf_block src -j DROP &>/dev/null; then
-                    iptables -I INPUT -m set --match-set cf_block src -j DROP
+                # 添加 iptables 规则（只阻止新建连接）
+                if ! iptables -C INPUT -m conntrack --ctstate NEW -m set --match-set cf_block src -j DROP &>/dev/null; then
+                    iptables -D INPUT -m set --match-set cf_block src -j DROP 2>/dev/null
+                    iptables -I INPUT -m conntrack --ctstate NEW -m set --match-set cf_block src -j DROP
                 fi
                 # 添加 ip6tables 规则
                 if ipset list cf_block_v6 &>/dev/null; then
-                    if ! ip6tables -C INPUT -m set --match-set cf_block_v6 src -j DROP &>/dev/null; then
-                        ip6tables -I INPUT -m set --match-set cf_block_v6 src -j DROP
+                    if ! ip6tables -C INPUT -m conntrack --ctstate NEW -m set --match-set cf_block_v6 src -j DROP &>/dev/null; then
+                        ip6tables -D INPUT -m set --match-set cf_block_v6 src -j DROP 2>/dev/null
+                        ip6tables -I INPUT -m conntrack --ctstate NEW -m set --match-set cf_block_v6 src -j DROP
                     fi
                 fi
                 
