@@ -518,12 +518,24 @@ manage_cloudflare() {
                     "https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv6.txt" \
                     "https://www.cloudflare.com/ips-v6"
                 do
-                    if curl -sL -m 10 "$v6_source" -o "$tmp_v6" 2>/dev/null && [ -f "$tmp_v6" ] && [ -s "$tmp_v6" ]; then
-                        # 检查是否被拦截
-                        if ! grep -qi "<!DOCTYPE\|<html" "$tmp_v6" 2>/dev/null; then
-                            success_v6=1
-                            break
+                    echo "  尝试: $v6_source"
+                    if curl -sL -m 10 "$v6_source" -o "$tmp_v6" 2>/dev/null; then
+                        if [ -f "$tmp_v6" ] && [ -s "$tmp_v6" ]; then
+                            # 检查是否被拦截
+                            if grep -qi "<!DOCTYPE\|<html" "$tmp_v6" 2>/dev/null; then
+                                echo "  ✗ 返回HTML（被拦截）"
+                            else
+                                # 检查内容
+                                local line_count=$(wc -l < "$tmp_v6" 2>/dev/null || echo 0)
+                                echo "  ✓ 成功（$line_count 行）"
+                                success_v6=1
+                                break
+                            fi
+                        else
+                            echo "  ✗ 文件为空"
                         fi
+                    else
+                        echo "  ✗ 下载失败"
                     fi
                 done
                 
