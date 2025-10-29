@@ -517,18 +517,29 @@ manage_cloudflare() {
                 for source in \
                     "https://www.cloudflare.com/ips-v6"
                 do
-                    if curl -sL -m 10 "$source" -o "$tmp_v6" 2>/dev/null && [ -s "$tmp_v6" ] && grep -qE '^[0-9a-fA-F:]+/' "$tmp_v6"; then
+                    if curl -sL -m 10 "$source" -o "$tmp_v6" 2>/dev/null && [ -s "$tmp_v6" ]; then
                         success_v6=1
                         break
                     fi
                 done
                 
                 if [ $success_v6 -eq 1 ]; then
-                    while read ip; do
-                        [ -n "$ip" ] && [[ "$ip" =~ ^[0-9a-fA-F:]+/ ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                    local v6_count=0
+                    while read -r ip; do
+                        # 跳过空行和注释
+                        [[ -z "$ip" || "$ip" =~ ^# ]] && continue
+                        # 添加IPv6段
+                        if [[ "$ip" =~ ^[0-9a-fA-F:]+/ ]]; then
+                            ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip" && ((v6_count++))
+                        fi
                     done < "$tmp_v6"
                     rm -f "$tmp_v6"
-                    echo -e "${GREEN}✓ IPv6 完成${NC}"
+                    
+                    if [ $v6_count -gt 0 ]; then
+                        echo -e "${GREEN}✓ IPv6 完成 ($v6_count 条)${NC}"
+                    else
+                        echo -e "${YELLOW}⚠ 未找到有效的 IPv6 段${NC}"
+                    fi
                 else
                     echo -e "${YELLOW}⚠ IPv6 下载失败（已跳过）${NC}"
                     rm -f "$tmp_v6"
@@ -617,8 +628,9 @@ manage_cloudflare() {
                     
                     local tmp_v6="/tmp/cf_ipv6.txt"
                     if curl -sL -m 10 "https://www.cloudflare.com/ips-v6" -o "$tmp_v6" 2>/dev/null && [ -s "$tmp_v6" ]; then
-                        while read ip; do
-                            [ -n "$ip" ] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                        while read -r ip; do
+                            [[ -z "$ip" || "$ip" =~ ^# ]] && continue
+                            [[ "$ip" =~ ^[0-9a-fA-F:]+/ ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
                         done < "$tmp_v6"
                         rm -f "$tmp_v6"
                     fi
@@ -700,9 +712,10 @@ manage_cloudflare() {
                 for source in \
                     "https://www.cloudflare.com/ips-v6"
                 do
-                    if curl -sL -m 10 "$source" -o "$tmp_v6" 2>/dev/null && [ -s "$tmp_v6" ] && grep -qE '^[0-9a-fA-F:]+/' "$tmp_v6"; then
-                        while read ip; do
-                            [ -n "$ip" ] && [[ "$ip" =~ ^[0-9a-fA-F:]+/ ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                    if curl -sL -m 10 "$source" -o "$tmp_v6" 2>/dev/null && [ -s "$tmp_v6" ]; then
+                        while read -r ip; do
+                            [[ -z "$ip" || "$ip" =~ ^# ]] && continue
+                            [[ "$ip" =~ ^[0-9a-fA-F:]+/ ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
                         done < "$tmp_v6"
                         rm -f "$tmp_v6"
                         break
