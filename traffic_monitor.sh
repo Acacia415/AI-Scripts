@@ -478,8 +478,9 @@ manage_cloudflare() {
             1)
                 echo -e "\n${CYAN}正在启用 Cloudflare 防护（标准CDN）...${NC}"
                 
-                # 创建 ipset
-                ipset create cf_block hash:net 2>/dev/null || true
+                # 创建 ipset（分别IPv4和IPv6）
+                ipset create cf_block hash:net family inet 2>/dev/null || true
+                ipset create cf_block_v6 hash:net family inet6 2>/dev/null || true
                 
                 # 下载并添加 CF IPv4 段
                 echo -e "${YELLOW}下载 CF IPv4 段...${NC}"
@@ -553,7 +554,7 @@ manage_cloudflare() {
                         echo "  处理: [$ip]"
                         
                         if echo "$ip" | grep -q ':' && echo "$ip" | grep -q '/'; then
-                            if ipset add cf_block "$ip" 2>/dev/null; then
+                            if ipset add cf_block_v6 "$ip" 2>/dev/null; then
                                 echo "  ✓ $ip"
                                 ((v6_count++))
                             else
@@ -578,6 +579,12 @@ manage_cloudflare() {
                 if ! iptables -C INPUT -m set --match-set cf_block src -j DROP &>/dev/null; then
                     iptables -I INPUT -m set --match-set cf_block src -j DROP
                 fi
+                # 添加 ip6tables 规则
+                if ipset list cf_block_v6 &>/dev/null; then
+                    if ! ip6tables -C INPUT -m set --match-set cf_block_v6 src -j DROP &>/dev/null; then
+                        ip6tables -I INPUT -m set --match-set cf_block_v6 src -j DROP
+                    fi
+                fi
                 
                 # 持久化
                 ipset save > /etc/ipset.conf
@@ -590,8 +597,9 @@ manage_cloudflare() {
                 echo -e "\n${CYAN}正在启用 Cloudflare 防护（完整ASN）...${NC}"
                 echo -e "${YELLOW}包含 WARP、Zero Trust 等所有 CF 服务${NC}\n"
                 
-                # 创建 ipset
-                ipset create cf_block hash:net 2>/dev/null || true
+                # 创建 ipset（分别IPv4和IPv6）
+                ipset create cf_block hash:net family inet 2>/dev/null || true
+                ipset create cf_block_v6 hash:net family inet6 2>/dev/null || true
                 
                 # 从 BGP 数据库获取 AS13335 的所有 IP 段
                 echo -e "${YELLOW}查询 AS13335 (Cloudflare) 的所有 IP 段...${NC}"
@@ -629,7 +637,7 @@ manage_cloudflare() {
                     
                     if [ -s "$tmp_ipv6" ]; then
                         while read -r prefix; do
-                            [ -n "$prefix" ] && ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix"
+                            [ -n "$prefix" ] && ipset add cf_block_v6 "$prefix" 2>/dev/null && echo "  ✓ $prefix"
                         done < "$tmp_ipv6"
                     else
                         echo -e "${YELLOW}⚠ 未找到 IPv6 段${NC}"
@@ -666,7 +674,7 @@ manage_cloudflare() {
                                     ip=$(echo "$ip" | tr -d '\r' | xargs)
                                     [ -z "$ip" ] && continue
                                     if echo "$ip" | grep -q ':' && echo "$ip" | grep -q '/'; then
-                                        ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                                        ipset add cf_block_v6 "$ip" 2>/dev/null && echo "  ✓ $ip"
                                     fi
                                 done < "$tmp_v6"
                                 break
@@ -679,6 +687,12 @@ manage_cloudflare() {
                 # 添加 iptables 规则
                 if ! iptables -C INPUT -m set --match-set cf_block src -j DROP &>/dev/null; then
                     iptables -I INPUT -m set --match-set cf_block src -j DROP
+                fi
+                # 添加 ip6tables 规则
+                if ipset list cf_block_v6 &>/dev/null; then
+                    if ! ip6tables -C INPUT -m set --match-set cf_block_v6 src -j DROP &>/dev/null; then
+                        ip6tables -I INPUT -m set --match-set cf_block_v6 src -j DROP
+                    fi
                 fi
                 
                 # 持久化
@@ -694,12 +708,17 @@ manage_cloudflare() {
                 
                 # 删除 iptables 规则
                 iptables -D INPUT -m set --match-set cf_block src -j DROP 2>/dev/null && \
-                    echo -e "${GREEN}✓ 已移除防火墙规则${NC}" || \
-                    echo -e "${YELLOW}⚠ 规则不存在${NC}"
+                    echo -e "${GREEN}✓ 已移除IPv4防火墙规则${NC}" || \
+                    echo -e "${YELLOW}⚠ IPv4规则不存在${NC}"
+                ip6tables -D INPUT -m set --match-set cf_block_v6 src -j DROP 2>/dev/null && \
+                    echo -e "${GREEN}✓ 已移除IPv6防火墙规则${NC}" || \
+                    echo -e "${YELLOW}⚠ IPv6规则不存在${NC}"
                 
                 # 清空并删除 ipset
-                ipset flush cf_block 2>/dev/null && echo -e "${GREEN}✓ 已清空封禁列表${NC}"
-                ipset destroy cf_block 2>/dev/null && echo -e "${GREEN}✓ 已删除封禁集合${NC}"
+                ipset flush cf_block 2>/dev/null && echo -e "${GREEN}✓ 已清空IPv4封禁列表${NC}"
+                ipset destroy cf_block 2>/dev/null && echo -e "${GREEN}✓ 已删除IPv4封禁集合${NC}"
+                ipset flush cf_block_v6 2>/dev/null && echo -e "${GREEN}✓ 已清空IPv6封禁列表${NC}"
+                ipset destroy cf_block_v6 2>/dev/null && echo -e "${GREEN}✓ 已删除IPv6封禁集合${NC}"
                 
                 # 更新持久化配置
                 ipset save > /etc/ipset.conf
@@ -708,14 +727,26 @@ manage_cloudflare() {
                 pause
                 ;;
             4)
+                echo -e "\n${YELLOW}Cloudflare IP 封禁列表:${NC}"
+                local has_data=0
+                
                 if ipset list cf_block &>/dev/null; then
-                    echo -e "\n${YELLOW}Cloudflare IP 封禁列表:${NC}"
+                    echo -e "\n${CYAN}IPv4:${NC}"
                     ipset list cf_block | grep -E '^[0-9]' | nl | head -20
-                    local total=$(ipset list cf_block | grep -E '^[0-9]' | wc -l)
-                    [ $total -gt 20 ] && echo -e "${CYAN}... 共 $total 条记录（仅显示前20条）${NC}"
-                else
-                    echo -e "\n${YELLOW}CF 封禁列表为空${NC}"
+                    local total_v4=$(ipset list cf_block | grep -E '^[0-9]' | wc -l)
+                    [ $total_v4 -gt 20 ] && echo -e "${YELLOW}... 共 $total_v4 条记录（仅显示前20条）${NC}"
+                    has_data=1
                 fi
+                
+                if ipset list cf_block_v6 &>/dev/null; then
+                    echo -e "\n${CYAN}IPv6:${NC}"
+                    ipset list cf_block_v6 | grep -E '^[0-9a-fA-F:]+/' | nl | head -20
+                    local total_v6=$(ipset list cf_block_v6 | grep -E '^[0-9a-fA-F:]+/' | wc -l)
+                    [ $total_v6 -gt 20 ] && echo -e "${YELLOW}... 共 $total_v6 条记录（仅显示前20条）${NC}"
+                    has_data=1
+                fi
+                
+                [ $has_data -eq 0 ] && echo -e "\n${YELLOW}CF 封禁列表为空${NC}"
                 pause
                 ;;
             5)
@@ -727,8 +758,12 @@ manage_cloudflare() {
                 
                 echo -e "\n${CYAN}正在更新 Cloudflare IP 列表...${NC}"
                 
+                # 确俜IPv6 ipset存在
+                ipset create cf_block_v6 hash:net family inet6 2>/dev/null || true
+                
                 # 清空旧列表
                 ipset flush cf_block
+                ipset flush cf_block_v6 2>/dev/null
                 
                 # 重新下载 IPv4
                 echo -e "${YELLOW}下载 IPv4...${NC}"
@@ -755,22 +790,40 @@ manage_cloudflare() {
                     "https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv6.txt" \
                     "https://www.cloudflare.com/ips-v6"
                 do
-                    if curl -sL -m 10 "$v6_source" -o "$tmp_v6" 2>/dev/null && [ -f "$tmp_v6" ] && [ -s "$tmp_v6" ]; then
-                        if ! grep -qi "<!DOCTYPE\|<html" "$tmp_v6" 2>/dev/null; then
-                            success_v6=1
-                            break
+                    echo "  尝试: $v6_source"
+                    if curl -sL -m 10 "$v6_source" -o "$tmp_v6" 2>/dev/null; then
+                        if [ -f "$tmp_v6" ] && [ -s "$tmp_v6" ]; then
+                            if grep -qi "<!DOCTYPE\|<html" "$tmp_v6" 2>/dev/null; then
+                                echo "  ✗ 返回HTML（被拦截）"
+                            else
+                                local line_count=$(wc -l < "$tmp_v6" 2>/dev/null || echo 0)
+                                echo "  ✓ 成功（$line_count 行）"
+                                success_v6=1
+                                break
+                            fi
+                        else
+                            echo "  ✗ 文件为空"
                         fi
+                    else
+                        echo "  ✗ 下载失败"
                     fi
                 done
                 
                 if [ $success_v6 -eq 1 ]; then
+                    local v6_count=0
                     while IFS= read -r ip; do
                         ip=$(echo "$ip" | tr -d '\r' | xargs)
                         [ -z "$ip" ] && continue
                         if echo "$ip" | grep -q ':' && echo "$ip" | grep -q '/'; then
-                            ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                            if ipset add cf_block_v6 "$ip" 2>/dev/null; then
+                                echo "  ✓ $ip"
+                                ((v6_count++))
+                            fi
                         fi
                     done < "$tmp_v6"
+                    [ $v6_count -gt 0 ] && echo -e "${GREEN}✓ IPv6 更新完成 ($v6_count 条)${NC}"
+                else
+                    echo -e "${YELLOW}⚠ IPv6 下载失败${NC}"
                 fi
                 rm -f "$tmp_v6"
                 
