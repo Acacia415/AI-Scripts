@@ -446,6 +446,135 @@ manage_blacklist() {
 }
 
 # ============================================
+# Cloudflare 防护管理
+# ============================================
+
+manage_cloudflare() {
+    while true; do
+        clear
+        echo -e "${CYAN}════════════════════════════════════${NC}"
+        echo -e "${GREEN}    Cloudflare 防护管理${NC}"
+        echo -e "${CYAN}════════════════════════════════════${NC}\n"
+        
+        # 检查状态
+        if ipset list cf_block &>/dev/null && iptables -C INPUT -m set --match-set cf_block src -j DROP &>/dev/null; then
+            echo -e "${GREEN}● 状态: 已启用${NC}"
+            local cf_count=$(ipset list cf_block | grep -E '^[0-9]' | wc -l)
+            echo -e "${YELLOW}已封禁 $cf_count 个 Cloudflare IP 段${NC}\n"
+        else
+            echo -e "${YELLOW}○ 状态: 未启用${NC}\n"
+        fi
+        
+        echo -e "${CYAN}1.${NC} 启用 CF 封禁"
+        echo -e "${CYAN}2.${NC} 禁用 CF 封禁"
+        echo -e "${CYAN}3.${NC} 查看封禁列表"
+        echo -e "${CYAN}4.${NC} 更新 CF IP 列表"
+        echo -e "${CYAN}0.${NC} 返回\n"
+        read -p "选择: " c
+        
+        case $c in
+            1)
+                echo -e "\n${CYAN}正在启用 Cloudflare 防护...${NC}"
+                
+                # 创建 ipset
+                ipset create cf_block hash:net 2>/dev/null || true
+                
+                # 下载并添加 CF IPv4 段
+                echo -e "${YELLOW}下载 CF IPv4 段...${NC}"
+                if curl -s https://www.cloudflare.com/ips-v4 | while read ip; do
+                    ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                done; then
+                    echo -e "${GREEN}✓ IPv4 完成${NC}"
+                else
+                    echo -e "${RED}✗ IPv4 下载失败${NC}"
+                fi
+                
+                # 下载并添加 CF IPv6 段
+                echo -e "${YELLOW}下载 CF IPv6 段...${NC}"
+                if curl -s https://www.cloudflare.com/ips-v6 | while read ip; do
+                    ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                done; then
+                    echo -e "${GREEN}✓ IPv6 完成${NC}"
+                else
+                    echo -e "${RED}✗ IPv6 下载失败${NC}"
+                fi
+                
+                # 添加 iptables 规则
+                if ! iptables -C INPUT -m set --match-set cf_block src -j DROP &>/dev/null; then
+                    iptables -I INPUT -m set --match-set cf_block src -j DROP
+                fi
+                
+                # 持久化
+                ipset save > /etc/ipset.conf
+                
+                echo -e "\n${GREEN}✅ Cloudflare 防护已启用${NC}"
+                echo -e "${YELLOW}用户套 CF 后将无法连接${NC}"
+                pause
+                ;;
+            2)
+                echo -e "\n${YELLOW}正在禁用 Cloudflare 防护...${NC}"
+                
+                # 删除 iptables 规则
+                iptables -D INPUT -m set --match-set cf_block src -j DROP 2>/dev/null && \
+                    echo -e "${GREEN}✓ 已移除防火墙规则${NC}" || \
+                    echo -e "${YELLOW}⚠ 规则不存在${NC}"
+                
+                # 清空并删除 ipset
+                ipset flush cf_block 2>/dev/null && echo -e "${GREEN}✓ 已清空封禁列表${NC}"
+                ipset destroy cf_block 2>/dev/null && echo -e "${GREEN}✓ 已删除封禁集合${NC}"
+                
+                # 更新持久化配置
+                ipset save > /etc/ipset.conf
+                
+                echo -e "\n${GREEN}✅ Cloudflare 防护已禁用${NC}"
+                pause
+                ;;
+            3)
+                if ipset list cf_block &>/dev/null; then
+                    echo -e "\n${YELLOW}Cloudflare IP 封禁列表:${NC}"
+                    ipset list cf_block | grep -E '^[0-9]' | nl | head -20
+                    local total=$(ipset list cf_block | grep -E '^[0-9]' | wc -l)
+                    [ $total -gt 20 ] && echo -e "${CYAN}... 共 $total 条记录（仅显示前20条）${NC}"
+                else
+                    echo -e "\n${YELLOW}CF 封禁列表为空${NC}"
+                fi
+                pause
+                ;;
+            4)
+                if ! ipset list cf_block &>/dev/null; then
+                    echo -e "\n${RED}请先启用 CF 防护${NC}"
+                    pause
+                    continue
+                fi
+                
+                echo -e "\n${CYAN}正在更新 Cloudflare IP 列表...${NC}"
+                
+                # 清空旧列表
+                ipset flush cf_block
+                
+                # 重新下载
+                echo -e "${YELLOW}下载 IPv4...${NC}"
+                curl -s https://www.cloudflare.com/ips-v4 | while read ip; do
+                    ipset add cf_block "$ip" 2>/dev/null
+                done
+                
+                echo -e "${YELLOW}下载 IPv6...${NC}"
+                curl -s https://www.cloudflare.com/ips-v6 | while read ip; do
+                    ipset add cf_block "$ip" 2>/dev/null
+                done
+                
+                ipset save > /etc/ipset.conf
+                
+                local count=$(ipset list cf_block | grep -E '^[0-9]' | wc -l)
+                echo -e "\n${GREEN}✅ 更新完成，共 $count 条记录${NC}"
+                pause
+                ;;
+            0) return ;;
+        esac
+    done
+}
+
+# ============================================
 # 日志管理
 # ============================================
 
@@ -488,11 +617,12 @@ main_menu() {
         echo -e "${CYAN}3.${NC} 端口过滤管理"
         echo -e "${CYAN}4.${NC} 白名单管理"
         echo -e "${CYAN}5.${NC} 黑名单管理"
-        echo -e "${CYAN}6.${NC} 封禁日志管理"
-        echo -e "${CYAN}7.${NC} 查看服务状态"
+        echo -e "${CYAN}6.${NC} Cloudflare 防护"
+        echo -e "${CYAN}7.${NC} 封禁日志管理"
+        echo -e "${CYAN}8.${NC} 查看服务状态"
         echo -e "${CYAN}0.${NC} 退出\n"
         
-        read -p "请选择 [0-7]: " choice
+        read -p "请选择 [0-8]: " choice
         
         case $choice in
             1) install_monitor ;;
@@ -500,8 +630,9 @@ main_menu() {
             3) manage_ports ;;
             4) manage_whitelist ;;
             5) manage_blacklist ;;
-            6) manage_logs ;;
-            7)
+            6) manage_cloudflare ;;
+            7) manage_logs ;;
+            8)
                 clear
                 systemctl status ip_blacklist.service
                 echo -e "\n${CYAN}实时日志:${NC}"
