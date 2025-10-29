@@ -511,37 +511,42 @@ manage_cloudflare() {
                 # 下载并添加 CF IPv6 段
                 echo -e "${YELLOW}下载 CF IPv6 段...${NC}"
                 local tmp_v6="/tmp/cf_ipv6.txt"
-                local success_v6=0
                 
-                # 尝试多个数据源
-                for source in \
-                    "https://www.cloudflare.com/ips-v6"
-                do
-                    if curl -sL -m 10 "$source" -o "$tmp_v6" 2>/dev/null && [ -s "$tmp_v6" ]; then
-                        success_v6=1
-                        break
-                    fi
-                done
-                
-                if [ $success_v6 -eq 1 ]; then
-                    local v6_count=0
-                    while read -r ip; do
-                        # 跳过空行和注释
-                        [[ -z "$ip" || "$ip" =~ ^# ]] && continue
-                        # 添加IPv6段
-                        if [[ "$ip" =~ ^[0-9a-fA-F:]+/ ]]; then
-                            ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip" && ((v6_count++))
-                        fi
-                    done < "$tmp_v6"
-                    rm -f "$tmp_v6"
-                    
-                    if [ $v6_count -gt 0 ]; then
-                        echo -e "${GREEN}✓ IPv6 完成 ($v6_count 条)${NC}"
+                # 下载IPv6列表（不验证内容，先下载再说）
+                if curl -sL -m 10 "https://www.cloudflare.com/ips-v6" -o "$tmp_v6" 2>/dev/null && [ -f "$tmp_v6" ]; then
+                    # 检查文件是否为HTML（被拦截）
+                    if grep -qi "<!DOCTYPE\|<html" "$tmp_v6" 2>/dev/null; then
+                        echo -e "${RED}✗ 下载失败（被反爬拦截）${NC}"
+                        rm -f "$tmp_v6"
+                    elif [ ! -s "$tmp_v6" ]; then
+                        echo -e "${YELLOW}⚠ 文件为空${NC}"
+                        rm -f "$tmp_v6"
                     else
-                        echo -e "${YELLOW}⚠ 未找到有效的 IPv6 段${NC}"
+                        # 文件有效，开始添加
+                        local v6_count=0
+                        while IFS= read -r ip; do
+                            # 去除首尾空白
+                            ip=$(echo "$ip" | xargs)
+                            # 跳过空行
+                            [ -z "$ip" ] && continue
+                            # 验证并添加
+                            if [[ "$ip" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
+                                if ipset add cf_block "$ip" 2>/dev/null; then
+                                    echo "  ✓ $ip"
+                                    ((v6_count++))
+                                fi
+                            fi
+                        done < "$tmp_v6"
+                        rm -f "$tmp_v6"
+                        
+                        if [ $v6_count -gt 0 ]; then
+                            echo -e "${GREEN}✓ IPv6 完成 ($v6_count 条)${NC}"
+                        else
+                            echo -e "${YELLOW}⚠ 未找到有效的 IPv6 段${NC}"
+                        fi
                     fi
                 else
-                    echo -e "${YELLOW}⚠ IPv6 下载失败（已跳过）${NC}"
+                    echo -e "${RED}✗ IPv6 下载失败${NC}"
                     rm -f "$tmp_v6"
                 fi
                 
@@ -627,11 +632,14 @@ manage_cloudflare() {
                     done
                     
                     local tmp_v6="/tmp/cf_ipv6.txt"
-                    if curl -sL -m 10 "https://www.cloudflare.com/ips-v6" -o "$tmp_v6" 2>/dev/null && [ -s "$tmp_v6" ]; then
-                        while read -r ip; do
-                            [[ -z "$ip" || "$ip" =~ ^# ]] && continue
-                            [[ "$ip" =~ ^[0-9a-fA-F:]+/ ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
-                        done < "$tmp_v6"
+                    if curl -sL -m 10 "https://www.cloudflare.com/ips-v6" -o "$tmp_v6" 2>/dev/null && [ -f "$tmp_v6" ] && [ -s "$tmp_v6" ]; then
+                        if ! grep -qi "<!DOCTYPE\|<html" "$tmp_v6" 2>/dev/null; then
+                            while IFS= read -r ip; do
+                                ip=$(echo "$ip" | xargs)
+                                [ -z "$ip" ] && continue
+                                [[ "$ip" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                            done < "$tmp_v6"
+                        fi
                         rm -f "$tmp_v6"
                     fi
                 fi
@@ -709,18 +717,23 @@ manage_cloudflare() {
                 # 重新下载 IPv6
                 echo -e "${YELLOW}下载 IPv6...${NC}"
                 local tmp_v6="/tmp/cf_ipv6.txt"
-                for source in \
-                    "https://www.cloudflare.com/ips-v6"
-                do
-                    if curl -sL -m 10 "$source" -o "$tmp_v6" 2>/dev/null && [ -s "$tmp_v6" ]; then
-                        while read -r ip; do
-                            [[ -z "$ip" || "$ip" =~ ^# ]] && continue
-                            [[ "$ip" =~ ^[0-9a-fA-F:]+/ ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                
+                if curl -sL -m 10 "https://www.cloudflare.com/ips-v6" -o "$tmp_v6" 2>/dev/null && [ -f "$tmp_v6" ]; then
+                    if grep -qi "<!DOCTYPE\|<html" "$tmp_v6" 2>/dev/null; then
+                        echo -e "${RED}✗ 被拦截${NC}"
+                    elif [ ! -s "$tmp_v6" ]; then
+                        echo -e "${YELLOW}⚠ 文件为空${NC}"
+                    else
+                        while IFS= read -r ip; do
+                            ip=$(echo "$ip" | xargs)
+                            [ -z "$ip" ] && continue
+                            if [[ "$ip" =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
+                                ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                            fi
                         done < "$tmp_v6"
-                        rm -f "$tmp_v6"
-                        break
                     fi
-                done
+                fi
+                rm -f "$tmp_v6"
                 
                 ipset save > /etc/ipset.conf
                 
