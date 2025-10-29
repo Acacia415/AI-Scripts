@@ -620,9 +620,15 @@ manage_cloudflare() {
                     fi
                     
                     if [ -s "$tmp_ipv4" ]; then
+                        local v4_count=0
                         while read -r prefix; do
-                            [ -n "$prefix" ] && ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix"
+                            if [ -n "$prefix" ]; then
+                                ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix" && ((v4_count++))
+                            fi
                         done < "$tmp_ipv4"
+                        echo -e "${GREEN}✓ IPv4 完成 ($v4_count 条)${NC}"
+                    else
+                        echo -e "${YELLOW}⚠ 未找到 IPv4 段${NC}"
                     fi
                     rm -f "$tmp_ipv4"
                     
@@ -636,9 +642,13 @@ manage_cloudflare() {
                     fi
                     
                     if [ -s "$tmp_ipv6" ]; then
+                        local v6_count=0
                         while read -r prefix; do
-                            [ -n "$prefix" ] && ipset add cf_block_v6 "$prefix" 2>/dev/null && echo "  ✓ $prefix"
+                            if [ -n "$prefix" ]; then
+                                ipset add cf_block_v6 "$prefix" 2>/dev/null && echo "  ✓ $prefix" && ((v6_count++))
+                            fi
                         done < "$tmp_ipv6"
+                        echo -e "${GREEN}✓ IPv6 完成 ($v6_count 条)${NC}"
                     else
                         echo -e "${YELLOW}⚠ 未找到 IPv6 段${NC}"
                     fi
@@ -698,9 +708,11 @@ manage_cloudflare() {
                 # 持久化
                 ipset save > /etc/ipset.conf
                 
-                local total=$(ipset list cf_block | grep -E '^[0-9]' | wc -l)
+                local total_v4=$(ipset list cf_block 2>/dev/null | grep -E '^[0-9]' | wc -l)
+                local total_v6=$(ipset list cf_block_v6 2>/dev/null | grep -E '^[0-9a-fA-F:]+/' | wc -l)
+                local total=$((total_v4 + total_v6))
                 echo -e "\n${GREEN}✅ Cloudflare ASN 防护已启用${NC}"
-                echo -e "${YELLOW}共封禁 $total 个 IP 段（包含所有 CF 服务）${NC}"
+                echo -e "${YELLOW}共封禁 $total 个 IP 段（IPv4: $total_v4, IPv6: $total_v6）${NC}"
                 pause
                 ;;
             3)
