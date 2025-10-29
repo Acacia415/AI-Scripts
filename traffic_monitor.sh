@@ -465,16 +465,18 @@ manage_cloudflare() {
             echo -e "${YELLOW}○ 状态: 未启用${NC}\n"
         fi
         
-        echo -e "${CYAN}1.${NC} 启用 CF 封禁"
-        echo -e "${CYAN}2.${NC} 禁用 CF 封禁"
-        echo -e "${CYAN}3.${NC} 查看封禁列表"
-        echo -e "${CYAN}4.${NC} 更新 CF IP 列表"
+        echo -e "${CYAN}1.${NC} 启用 CF 封禁（标准CDN）"
+        echo -e "${CYAN}2.${NC} 启用 CF 封禁（完整ASN）"
+        echo -e "${CYAN}3.${NC} 禁用 CF 封禁"
+        echo -e "${CYAN}4.${NC} 查看封禁列表"
+        echo -e "${CYAN}5.${NC} 更新 CF IP 列表"
+        echo -e "${CYAN}6.${NC} 手动添加IP段"
         echo -e "${CYAN}0.${NC} 返回\n"
         read -p "选择: " c
         
         case $c in
             1)
-                echo -e "\n${CYAN}正在启用 Cloudflare 防护...${NC}"
+                echo -e "\n${CYAN}正在启用 Cloudflare 防护（标准CDN）...${NC}"
                 
                 # 创建 ipset
                 ipset create cf_block hash:net 2>/dev/null || true
@@ -482,30 +484,53 @@ manage_cloudflare() {
                 # 下载并添加 CF IPv4 段
                 echo -e "${YELLOW}下载 CF IPv4 段...${NC}"
                 local tmp_v4="/tmp/cf_ipv4.txt"
-                # 尝试 GitHub 镜像源（主要）
-                if curl -sL https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv4.txt -o "$tmp_v4" && [ -s "$tmp_v4" ] && grep -q '^[0-9]' "$tmp_v4"; then
+                local success_v4=0
+                
+                # 尝试多个数据源
+                for source in \
+                    "https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv4.txt" \
+                    "https://www.cloudflare.com/ips-v4"
+                do
+                    if curl -sL -m 10 "$source" -o "$tmp_v4" 2>/dev/null && [ -s "$tmp_v4" ] && grep -qE '^[0-9]+\.' "$tmp_v4"; then
+                        success_v4=1
+                        break
+                    fi
+                done
+                
+                if [ $success_v4 -eq 1 ]; then
                     while read ip; do
-                        [ -n "$ip" ] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                        [ -n "$ip" ] && [[ "$ip" =~ ^[0-9]+\. ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
                     done < "$tmp_v4"
                     rm -f "$tmp_v4"
                     echo -e "${GREEN}✓ IPv4 完成${NC}"
                 else
-                    echo -e "${RED}✗ IPv4 下载失败${NC}"
+                    echo -e "${RED}✗ IPv4 下载失败（尝试了多个数据源）${NC}"
                     rm -f "$tmp_v4"
                 fi
                 
                 # 下载并添加 CF IPv6 段
                 echo -e "${YELLOW}下载 CF IPv6 段...${NC}"
                 local tmp_v6="/tmp/cf_ipv6.txt"
-                # 尝试 GitHub 镜像源（主要）
-                if curl -sL https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv6.txt -o "$tmp_v6" && [ -s "$tmp_v6" ] && grep -q '^[0-9a-f:]' "$tmp_v6"; then
+                local success_v6=0
+                
+                # 尝试多个数据源
+                for source in \
+                    "https://www.cloudflare.com/ips-v6"
+                do
+                    if curl -sL -m 10 "$source" -o "$tmp_v6" 2>/dev/null && [ -s "$tmp_v6" ] && grep -qE '^[0-9a-fA-F:]+/' "$tmp_v6"; then
+                        success_v6=1
+                        break
+                    fi
+                done
+                
+                if [ $success_v6 -eq 1 ]; then
                     while read ip; do
-                        [ -n "$ip" ] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                        [ -n "$ip" ] && [[ "$ip" =~ ^[0-9a-fA-F:]+/ ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
                     done < "$tmp_v6"
                     rm -f "$tmp_v6"
                     echo -e "${GREEN}✓ IPv6 完成${NC}"
                 else
-                    echo -e "${RED}✗ IPv6 下载失败${NC}"
+                    echo -e "${YELLOW}⚠ IPv6 下载失败（已跳过）${NC}"
                     rm -f "$tmp_v6"
                 fi
                 
@@ -522,6 +547,91 @@ manage_cloudflare() {
                 pause
                 ;;
             2)
+                echo -e "\n${CYAN}正在启用 Cloudflare 防护（完整ASN）...${NC}"
+                echo -e "${YELLOW}包含 WARP、Zero Trust 等所有 CF 服务${NC}\n"
+                
+                # 创建 ipset
+                ipset create cf_block hash:net 2>/dev/null || true
+                
+                # 从 BGP 数据库获取 AS13335 的所有 IP 段
+                echo -e "${YELLOW}查询 AS13335 (Cloudflare) 的所有 IP 段...${NC}"
+                local asn_data="/tmp/cf_asn.json"
+                local count_added=0
+                
+                # 尝试从 BGPView API 获取
+                if curl -sL -m 15 "https://api.bgpview.io/asn/13335/prefixes" -o "$asn_data" 2>/dev/null && [ -s "$asn_data" ]; then
+                    echo -e "${GREEN}✓ 获取到 ASN 数据${NC}\n"
+                    
+                    # 解析 IPv4
+                    echo -e "${YELLOW}添加 IPv4 段...${NC}"
+                    if command -v jq >/dev/null 2>&1; then
+                        # 使用 jq 解析
+                        while read -r prefix; do
+                            [ -n "$prefix" ] && ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix" && ((count_added++))
+                        done < <(jq -r '.data.ipv4_prefixes[]?.prefix // empty' "$asn_data" 2>/dev/null)
+                    else
+                        # 简单的 grep 方式
+                        grep -oE '"prefix":"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+"' "$asn_data" | \
+                        cut -d'"' -f4 | while read -r prefix; do
+                            [ -n "$prefix" ] && ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix" && ((count_added++))
+                        done
+                    fi
+                    
+                    # 解析 IPv6
+                    echo -e "${YELLOW}添加 IPv6 段...${NC}"
+                    if command -v jq >/dev/null 2>&1; then
+                        while read -r prefix; do
+                            [ -n "$prefix" ] && ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix" && ((count_added++))
+                        done < <(jq -r '.data.ipv6_prefixes[]?.prefix // empty' "$asn_data" 2>/dev/null)
+                    else
+                        grep -oE '"prefix":"[0-9a-fA-F:]+/[0-9]+"' "$asn_data" | \
+                        cut -d'"' -f4 | while read -r prefix; do
+                            [[ "$prefix" =~ : ]] && ipset add cf_block "$prefix" 2>/dev/null && echo "  ✓ $prefix" && ((count_added++))
+                        done
+                    fi
+                    
+                    rm -f "$asn_data"
+                else
+                    echo -e "${RED}✗ ASN 数据获取失败，回退到标准列表${NC}\n"
+                    
+                    # 回退方案：使用标准列表
+                    local tmp_v4="/tmp/cf_ipv4.txt"
+                    for source in \
+                        "https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv4.txt" \
+                        "https://www.cloudflare.com/ips-v4"
+                    do
+                        if curl -sL -m 10 "$source" -o "$tmp_v4" 2>/dev/null && [ -s "$tmp_v4" ]; then
+                            while read ip; do
+                                [ -n "$ip" ] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                            done < "$tmp_v4"
+                            rm -f "$tmp_v4"
+                            break
+                        fi
+                    done
+                    
+                    local tmp_v6="/tmp/cf_ipv6.txt"
+                    if curl -sL -m 10 "https://www.cloudflare.com/ips-v6" -o "$tmp_v6" 2>/dev/null && [ -s "$tmp_v6" ]; then
+                        while read ip; do
+                            [ -n "$ip" ] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                        done < "$tmp_v6"
+                        rm -f "$tmp_v6"
+                    fi
+                fi
+                
+                # 添加 iptables 规则
+                if ! iptables -C INPUT -m set --match-set cf_block src -j DROP &>/dev/null; then
+                    iptables -I INPUT -m set --match-set cf_block src -j DROP
+                fi
+                
+                # 持久化
+                ipset save > /etc/ipset.conf
+                
+                local total=$(ipset list cf_block | grep -E '^[0-9]' | wc -l)
+                echo -e "\n${GREEN}✅ Cloudflare ASN 防护已启用${NC}"
+                echo -e "${YELLOW}共封禁 $total 个 IP 段（包含所有 CF 服务）${NC}"
+                pause
+                ;;
+            3)
                 echo -e "\n${YELLOW}正在禁用 Cloudflare 防护...${NC}"
                 
                 # 删除 iptables 规则
@@ -539,7 +649,7 @@ manage_cloudflare() {
                 echo -e "\n${GREEN}✅ Cloudflare 防护已禁用${NC}"
                 pause
                 ;;
-            3)
+            4)
                 if ipset list cf_block &>/dev/null; then
                     echo -e "\n${YELLOW}Cloudflare IP 封禁列表:${NC}"
                     ipset list cf_block | grep -E '^[0-9]' | nl | head -20
@@ -550,7 +660,7 @@ manage_cloudflare() {
                 fi
                 pause
                 ;;
-            4)
+            5)
                 if ! ipset list cf_block &>/dev/null; then
                     echo -e "\n${RED}请先启用 CF 防护${NC}"
                     pause
@@ -565,27 +675,59 @@ manage_cloudflare() {
                 # 重新下载 IPv4
                 echo -e "${YELLOW}下载 IPv4...${NC}"
                 local tmp_v4="/tmp/cf_ipv4.txt"
-                if curl -sL https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv4.txt -o "$tmp_v4" && [ -s "$tmp_v4" ] && grep -q '^[0-9]' "$tmp_v4"; then
-                    while read ip; do
-                        [ -n "$ip" ] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
-                    done < "$tmp_v4"
-                    rm -f "$tmp_v4"
-                fi
+                for source in \
+                    "https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv4.txt" \
+                    "https://www.cloudflare.com/ips-v4"
+                do
+                    if curl -sL -m 10 "$source" -o "$tmp_v4" 2>/dev/null && [ -s "$tmp_v4" ] && grep -qE '^[0-9]+\.' "$tmp_v4"; then
+                        while read ip; do
+                            [ -n "$ip" ] && [[ "$ip" =~ ^[0-9]+\. ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                        done < "$tmp_v4"
+                        rm -f "$tmp_v4"
+                        break
+                    fi
+                done
                 
                 # 重新下载 IPv6
                 echo -e "${YELLOW}下载 IPv6...${NC}"
                 local tmp_v6="/tmp/cf_ipv6.txt"
-                if curl -sL https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv6.txt -o "$tmp_v6" && [ -s "$tmp_v6" ] && grep -q '^[0-9a-f:]' "$tmp_v6"; then
-                    while read ip; do
-                        [ -n "$ip" ] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
-                    done < "$tmp_v6"
-                    rm -f "$tmp_v6"
-                fi
+                for source in \
+                    "https://www.cloudflare.com/ips-v6"
+                do
+                    if curl -sL -m 10 "$source" -o "$tmp_v6" 2>/dev/null && [ -s "$tmp_v6" ] && grep -qE '^[0-9a-fA-F:]+/' "$tmp_v6"; then
+                        while read ip; do
+                            [ -n "$ip" ] && [[ "$ip" =~ ^[0-9a-fA-F:]+/ ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
+                        done < "$tmp_v6"
+                        rm -f "$tmp_v6"
+                        break
+                    fi
+                done
                 
                 ipset save > /etc/ipset.conf
                 
                 local count=$(ipset list cf_block | grep -E '^[0-9]' | wc -l)
                 echo -e "\n${GREEN}✅ 更新完成，共 $count 条记录${NC}"
+                pause
+                ;;
+            6)
+                if ! ipset list cf_block &>/dev/null; then
+                    echo -e "\n${RED}请先启用 CF 防护${NC}"
+                    pause
+                    continue
+                fi
+                
+                echo -e "\n${CYAN}手动添加 IP 段${NC}"
+                echo -e "${YELLOW}提示：输入 IP 段格式如 64.176.0.0/16 或单个IP${NC}"
+                read -p "输入IP/IP段: " manual_ip
+                
+                if [ -n "$manual_ip" ]; then
+                    if ipset add cf_block "$manual_ip" 2>/dev/null; then
+                        ipset save > /etc/ipset.conf
+                        echo -e "${GREEN}✓ 已添加: $manual_ip${NC}"
+                    else
+                        echo -e "${RED}✗ 添加失败，请检查格式${NC}"
+                    fi
+                fi
                 pause
                 ;;
             0) return ;;
