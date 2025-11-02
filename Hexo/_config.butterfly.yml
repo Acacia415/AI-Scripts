@@ -7,7 +7,6 @@
 menu:
   首页: / || fas fa-home
   时光轴: /timeline-simple/ || fas fa-clock
-  音乐盒: /music/ || fas fa-music
   归档: /archives/ || fas fa-archive
   分类: /categories/ || fas fa-folder-open
   标签: /tags/ || fas fa-tags
