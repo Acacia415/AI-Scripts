@@ -209,6 +209,54 @@ EOF
     print_success "创建 标签 页面"
 fi
 
+# 创建音乐盒页面
+if [ ! -d "source/music" ]; then
+    npx hexo new page music
+    cat > source/music/index.md << 'EOFMUSIC'
+---
+title: 音乐盒 🎵
+date: 2024-01-01 00:00:00
+type: "music"
+comments: false
+---
+
+<div style="max-width: 800px; margin: 40px auto; padding: 20px;">
+  <div style="text-align: center; margin-bottom: 30px;">
+    <h2 style="color: #FF69B4;">💕 宝贝的音乐盒 💕</h2>
+    <p style="color: #999;">听着温柔的音乐，回忆美好的成长时光</p>
+  </div>
+  
+  <div id="aplayer"></div>
+</div>
+
+{% raw %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  const ap = new APlayer({
+    container: document.getElementById('aplayer'),
+    fixed: false,
+    autoplay: false,
+    theme: '#FFB5C5',
+    loop: 'all',
+    order: 'list',
+    preload: 'auto',
+    volume: 0.7,
+    mutex: true,
+    listFolded: false,
+    listMaxHeight: 500,
+    audio: [
+      {name:'宝贝',artist:'张悬',url:'https://music.163.com/song/media/outer/url?id=254597.mp3',cover:'https://p1.music.126.net/8KFcF4NxfGhtOy6z3K-MrA==/109951163067842896.jpg'},
+      {name:'童年',artist:'罗大佑',url:'https://music.163.com/song/media/outer/url?id=5264843.mp3',cover:'https://p1.music.126.net/g-xHd7P9P8vmBrid2W_e9g==/109951163635259885.jpg'},
+      {name:'小幸运',artist:'田馥甄',url:'https://music.163.com/song/media/outer/url?id=34341360.mp3',cover:'https://p1.music.126.net/3Pl_z1ca39xF5sH7pYrG1Q==/109951163558401904.jpg'}
+    ]
+  });
+});
+</script>
+{% endraw %}
+EOFMUSIC
+    print_success "创建 音乐盒 页面"
+fi
+
 # 步骤6：配置主题为 Butterfly
 print_info "步骤 6/10: 配置主题..."
 if grep -q "^theme: butterfly" _config.yml; then
@@ -238,6 +286,7 @@ cat > _config.butterfly.yml << 'EOFBUTTERFLY'
 menu:
   首页: / || fas fa-home
   时光轴: /timeline-simple/ || fas fa-clock
+  音乐盒: /music/ || fas fa-music
   归档: /archives/ || fas fa-archive
   分类: /categories/ || fas fa-folder-open
   标签: /tags/ || fas fa-tags
@@ -497,7 +546,14 @@ CDN:
 # 自定义CSS
 inject:
   head:
+    - <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/aplayer@latest/dist/APlayer.min.css">
   bottom:
+    - <script src="https://cdn.jsdelivr.net/npm/aplayer@latest/dist/APlayer.min.js"></script>
+    - <script src="https://cdn.jsdelivr.net/npm/meting@2/dist/Meting.min.js"></script>
+    # 全局吸底播放器 - 请在网易云音乐创建歌单，然后将下面的 id 替换为你的歌单ID
+    # 单首歌曲: server="netease" type="song" id="254597"
+    # 播放列表: server="netease" type="playlist" id="你的歌单ID"
+    - <meting-js server="netease" type="song" id="254597" fixed="true" autoplay="false" theme="#FFB5C5" loop="all" volume="0.7" list-folded="false" list-max-height="250px"></meting-js>
 
 # PWA
 pwa:
@@ -509,39 +565,11 @@ Open_Graph_meta:
   option:
 
 # ==========================================
-# 全局音乐播放器 (需要先在VPS安装插件)
+# APlayer 音乐播放器（使用主题内置支持）
 # ==========================================
-aplayer:
-  meting: true
-  asset_inject: true
-
-# 全局吸底播放器配置
-aplayer_global:
+aplayerInject:
   enable: true
-  fixed: true
-  autoplay: true
-  theme: '#FFB5C5'
-  loop: 'all'
-  order: 'list'
-  preload: 'auto'
-  volume: 0.5
-  mutex: true
-  lrcType: 3
-  listFolded: false
-  listMaxHeight: 250
-  audio:
-    - name: '宝贝'
-      artist: '张悬'
-      url: 'https://music.163.com/song/media/outer/url?id=254597.mp3'
-      cover: 'https://p1.music.126.net/8KFcF4NxfGhtOy6z3K-MrA==/109951163067842896.jpg'
-    - name: '童年'
-      artist: '罗大佑'
-      url: 'https://music.163.com/song/media/outer/url?id=5264843.mp3'
-      cover: 'https://p1.music.126.net/g-xHd7P9P8vmBrid2W_e9g==/109951163635259885.jpg'
-    - name: '小幸运'
-      artist: '田馥甄'
-      url: 'https://music.163.com/song/media/outer/url?id=34341360.mp3'
-      cover: 'https://p1.music.126.net/3Pl_z1ca39xF5sH7pYrG1Q==/109951163558401904.jpg'
+  per_page: false
 EOFBUTTERFLY
 
 print_success "粉色主题配置文件已生成"
@@ -613,8 +641,9 @@ echo ""
 print_info "✨ 配置完成项："
 echo "  ✅ Butterfly 主题 + 粉色配色"
 echo "  ✅ 时光轴页面 (垂直布局)"
+echo "  ✅ 音乐盒页面 + APlayer 播放器"
 echo "  ✅ 关于、相册、分类、标签页面"
-echo "  ✅ 必要插件（搜索、订阅、字数统计等）"
+echo "  ✅ 必要插件（搜索、订阅、字数统计、音乐播放器等）"
 echo ""
 print_info "📝 下一步操作："
 echo "1. 上传宝贝的照片到 $BLOG_DIR/source/img/"
