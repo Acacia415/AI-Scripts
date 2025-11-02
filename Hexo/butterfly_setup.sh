@@ -507,6 +507,41 @@ pwa:
 Open_Graph_meta:
   enable: true
   option:
+
+# ==========================================
+# 全局音乐播放器 (需要先在VPS安装插件)
+# ==========================================
+aplayer:
+  meting: true
+  asset_inject: true
+
+# 全局吸底播放器配置
+aplayer_global:
+  enable: true
+  fixed: true
+  autoplay: true
+  theme: '#FFB5C5'
+  loop: 'all'
+  order: 'list'
+  preload: 'auto'
+  volume: 0.5
+  mutex: true
+  lrcType: 3
+  listFolded: false
+  listMaxHeight: 250
+  audio:
+    - name: '宝贝'
+      artist: '张悬'
+      url: 'https://music.163.com/song/media/outer/url?id=254597.mp3'
+      cover: 'https://p1.music.126.net/8KFcF4NxfGhtOy6z3K-MrA==/109951163067842896.jpg'
+    - name: '童年'
+      artist: '罗大佑'
+      url: 'https://music.163.com/song/media/outer/url?id=5264843.mp3'
+      cover: 'https://p1.music.126.net/g-xHd7P9P8vmBrid2W_e9g==/109951163635259885.jpg'
+    - name: '小幸运'
+      artist: '田馥甄'
+      url: 'https://music.163.com/song/media/outer/url?id=34341360.mp3'
+      cover: 'https://p1.music.126.net/3Pl_z1ca39xF5sH7pYrG1Q==/109951163558401904.jpg'
 EOFBUTTERFLY
 
 print_success "粉色主题配置文件已生成"
