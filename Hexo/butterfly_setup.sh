@@ -550,10 +550,22 @@ inject:
   bottom:
     - <script src="https://cdn.jsdelivr.net/npm/aplayer@latest/dist/APlayer.min.js"></script>
     - <script src="https://cdn.jsdelivr.net/npm/meting@2/dist/Meting.min.js"></script>
-    # 全局吸底播放器 - 请在网易云音乐创建歌单，然后将下面的 id 替换为你的歌单ID
-    # 单首歌曲: server="netease" type="song" id="254597"
-    # 播放列表: server="netease" type="playlist" id="你的歌单ID"
-    - <meting-js server="netease" type="song" id="254597" fixed="true" autoplay="false" theme="#FFB5C5" loop="all" volume="0.7" list-folded="false" list-max-height="250px"></meting-js>
+    # ========== 全局吸底播放器配置 ==========
+    
+    # 方案1: 使用 QQ 音乐歌单（当前启用）
+    # 你的歌单链接: https://y.qq.com/n/ryqq/playlist/1878671155
+    # 修改歌单ID: 替换下面的 id="1878671155" 为你的新歌单ID
+    - <meting-js server="tencent" type="playlist" id="1878671155" fixed="true" autoplay="false" theme="#FFB5C5" loop="all" volume="0.7" list-folded="false" list-max-height="250px"></meting-js>
+    
+    # 方案2: 使用网易云音乐歌单（备选）
+    # 获取歌单ID: 打开网易云音乐 -> 我的歌单 -> 复制歌单链接，从 URL 中提取 ID
+    # 例如: https://music.163.com/#/playlist?id=8539325585 -> ID 就是 8539325585
+    # - <meting-js server="netease" type="playlist" id="8539325585" fixed="true" autoplay="false" theme="#FFB5C5" loop="all" volume="0.7" list-folded="false" list-max-height="250px"></meting-js>
+    
+    # 方案3: 使用本地音乐文件（不受外链限制）
+    # 将音乐文件上传到 source/music/ 目录，然后使用以下配置：
+    # - <div id="aplayer-global"></div>
+    # - <script>var ap=new APlayer({container:document.getElementById('aplayer-global'),fixed:true,autoplay:false,theme:'#FFB5C5',loop:'all',order:'list',preload:'auto',volume:0.7,mutex:true,listFolded:false,listMaxHeight:'250px',audio:[{name:'宝贝',artist:'张悬',url:'/music/baobei.mp3',cover:'/img/cover1.jpg'},{name:'童年',artist:'罗大佑',url:'/music/tongnian.mp3',cover:'/img/cover2.jpg'},{name:'小幸运',artist:'田馥甄',url:'/music/xiaoxingyun.mp3',cover:'/img/cover3.jpg'}]});</script>
 
 # PWA
 pwa:
