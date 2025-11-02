@@ -531,22 +531,41 @@ backup_hexo() {
     echo "1) 快速备份（仅源文件和配置，适合日常备份）"
     echo "2) 完整备份（包含所有配置、主题、脚本，推荐）"
     echo "3) 迁移备份（包含Git仓库和Web配置，用于完整迁移）"
+    echo ""
+    echo -e "${YELLOW}轻量化备份（推荐）：${NC}"
+    echo "4) 纯内容备份（排除照片和视频，轻量快速）"
+    echo "5) 仅媒体备份（仅备份照片和视频文件）"
     echo "0) 返回"
     echo ""
-    read -p "请选择 [0-3]: " backup_mode
+    read -p "请选择 [0-5]: " backup_mode
+    
+    EXCLUDE_MEDIA=false
+    MEDIA_ONLY=false
     
     case $backup_mode in
         1)
             BACKUP_TYPE="quick"
-            print_info "已选择：快速备份"
+            print_info "已选择：快速备份（包含所有文件）"
             ;;
         2)
             BACKUP_TYPE="full"
-            print_info "已选择：完整备份"
+            print_info "已选择：完整备份（包含所有文件）"
             ;;
         3)
             BACKUP_TYPE="migrate"
-            print_info "已选择：迁移备份"
+            print_info "已选择：迁移备份（包含所有文件）"
+            ;;
+        4)
+            BACKUP_TYPE="content_only"
+            EXCLUDE_MEDIA=true
+            print_info "已选择：纯内容备份（排除照片和视频）"
+            print_info "  → 适合日常文章备份，文件小速度快"
+            ;;
+        5)
+            BACKUP_TYPE="media_only"
+            MEDIA_ONLY=true
+            print_info "已选择：仅媒体备份（仅备份照片和视频）"
+            print_info "  → 适合添加照片后的增量备份"
             ;;
         0)
             return
@@ -573,8 +592,85 @@ backup_hexo() {
     cd "$BLOG_DIR"
     
     # === 所有模式都备份的基础文件 ===
-    print_info "[①] 备份文章源文件 (source/)..."
-    [ -d "source" ] && cp -r source "$BACKUP_PATH/"
+    print_info "[①] 备份源文件..."
+    
+    if [ "$MEDIA_ONLY" = true ]; then
+        # 仅备份媒体文件
+        print_info "  → 仅备份媒体文件（照片和视频）"
+        mkdir -p "$BACKUP_PATH/source"
+        
+        if [ -d "source/img" ]; then
+            print_info "  → 复制照片目录..."
+            cp -r source/img "$BACKUP_PATH/source/"
+            IMG_COUNT=$(find source/img -type f 2>/dev/null | wc -l)
+            IMG_SIZE=$(du -sh source/img 2>/dev/null | cut -f1)
+            print_success "  ✓ 照片: $IMG_COUNT 个文件，大小: $IMG_SIZE"
+        else
+            print_warning "  ⚠ 未找到照片目录 (source/img)"
+        fi
+        
+        if [ -d "source/videos" ]; then
+            print_info "  → 复制视频目录..."
+            cp -r source/videos "$BACKUP_PATH/source/"
+            VIDEO_COUNT=$(find source/videos -type f 2>/dev/null | wc -l)
+            VIDEO_SIZE=$(du -sh source/videos 2>/dev/null | cut -f1)
+            print_success "  ✓ 视频: $VIDEO_COUNT 个文件，大小: $VIDEO_SIZE"
+        else
+            print_warning "  ⚠ 未找到视频目录 (source/videos)"
+        fi
+        
+    elif [ "$EXCLUDE_MEDIA" = true ]; then
+        # 排除媒体文件的备份
+        print_info "  → 备份源文件（排除照片和视频）"
+        
+        if command -v rsync >/dev/null 2>&1; then
+            # 使用rsync排除媒体目录
+            rsync -av --exclude='img/' --exclude='videos/' source/ "$BACKUP_PATH/source/" >/dev/null 2>&1
+            print_success "  ✓ 已使用rsync排除媒体文件"
+        else
+            # 手动排除：复制除img和videos外的所有内容
+            mkdir -p "$BACKUP_PATH/source"
+            cd source
+            for item in *; do
+                if [ "$item" != "img" ] && [ "$item" != "videos" ]; then
+                    cp -r "$item" "$BACKUP_PATH/source/" 2>/dev/null || true
+                fi
+            done
+            cd ..
+            print_success "  ✓ 已手动排除媒体文件"
+        fi
+        
+        # 显示排除的媒体文件统计
+        if [ -d "source/img" ]; then
+            IMG_COUNT=$(find source/img -type f 2>/dev/null | wc -l)
+            IMG_SIZE=$(du -sh source/img 2>/dev/null | cut -f1)
+            print_info "  → 已排除照片: $IMG_COUNT 个，$IMG_SIZE"
+        fi
+        
+        if [ -d "source/videos" ]; then
+            VIDEO_COUNT=$(find source/videos -type f 2>/dev/null | wc -l)
+            VIDEO_SIZE=$(du -sh source/videos 2>/dev/null | cut -f1)
+            print_info "  → 已排除视频: $VIDEO_COUNT 个，$VIDEO_SIZE"
+        fi
+        
+    else
+        # 完整备份（包含所有文件）
+        print_info "  → 完整备份（包含所有文件）"
+        [ -d "source" ] && cp -r source "$BACKUP_PATH/"
+        
+        # 显示媒体文件统计
+        if [ -d "source/img" ]; then
+            IMG_COUNT=$(find source/img -type f 2>/dev/null | wc -l)
+            IMG_SIZE=$(du -sh source/img 2>/dev/null | cut -f1)
+            print_info "  ✓ 包含照片: $IMG_COUNT 个，$IMG_SIZE"
+        fi
+        
+        if [ -d "source/videos" ]; then
+            VIDEO_COUNT=$(find source/videos -type f 2>/dev/null | wc -l)
+            VIDEO_SIZE=$(du -sh source/videos 2>/dev/null | cut -f1)
+            print_info "  ✓ 包含视频: $VIDEO_COUNT 个，$VIDEO_SIZE"
+        fi
+    fi
     
     print_info "[②] 备份主配置文件 (_config.yml)..."
     [ -f "_config.yml" ] && cp _config.yml "$BACKUP_PATH/"
@@ -584,7 +680,8 @@ backup_hexo() {
     [ -f "package-lock.json" ] && cp package-lock.json "$BACKUP_PATH/" 2>/dev/null || true
     
     # === 完整备份和迁移备份需要的额外文件 ===
-    if [ "$BACKUP_TYPE" = "full" ] || [ "$BACKUP_TYPE" = "migrate" ]; then
+    # 仅媒体备份不需要这些文件
+    if [ "$MEDIA_ONLY" != true ] && ([ "$BACKUP_TYPE" = "full" ] || [ "$BACKUP_TYPE" = "migrate" ] || [ "$BACKUP_TYPE" = "content_only" ]); then
         print_info "[④] 备份主题文件 (themes/)..."
         [ -d "themes" ] && cp -r themes "$BACKUP_PATH/"
         
@@ -672,9 +769,29 @@ Hexo版本: $(npx hexo -v 2>/dev/null | head -1 || echo "未安装")
 备份内容：
 EOF
 
-    if [ "$BACKUP_TYPE" = "quick" ]; then
+    if [ "$BACKUP_TYPE" = "media_only" ]; then
         cat >> "$BACKUP_PATH/backup_info.txt" << EOF
-- source/ (文章源文件)
+- source/img/ (照片文件)
+- source/videos/ (视频文件)
+
+说明：仅包含媒体文件，不包含文章和配置
+EOF
+    elif [ "$BACKUP_TYPE" = "content_only" ]; then
+        cat >> "$BACKUP_PATH/backup_info.txt" << EOF
+- source/ (文章源文件，不含img/和videos/)
+- themes/ (主题文件)
+- _config.yml 和 _config.*.yml (所有配置文件)
+- package.json (依赖清单)
+- scaffolds/ (文章模板)
+- scripts/ (自定义脚本)
+- *.sh (管理脚本)
+- db.json (数据库)
+
+说明：不包含照片和视频，备份文件小速度快
+EOF
+    elif [ "$BACKUP_TYPE" = "quick" ]; then
+        cat >> "$BACKUP_PATH/backup_info.txt" << EOF
+- source/ (文章源文件，含照片和视频)
 - _config.yml (主配置)
 - package.json (依赖清单)
 EOF
