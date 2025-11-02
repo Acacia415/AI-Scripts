@@ -584,11 +584,16 @@ cover: /img/cover1.jpg
 EOF
 print_success "示例文章已创建"
 
-# 步骤9：创建图片目录
+# 步骤9：创建资源目录
 print_info "步骤 9/10: 创建资源目录..."
 mkdir -p source/img
-print_info "提示：请上传宝贝的照片到 source/img/ 目录"
-print_info "需要的图片：cover1.jpg ~ cover5.jpg, 2024-01.jpg 等"
+mkdir -p source/videos
+mkdir -p source/music
+print_info "已创建以下目录："
+echo "  ✓ source/img/    - 图片资源（时光轴、相册、文章图片等）"
+echo "  ✓ source/videos/ - 视频资源（使用 dplayer 插件播放）"
+echo "  ✓ source/music/  - 音乐资源（本地音乐播放器方案）"
+print_info "提示：上传文件后，需在 Markdown 中引用才会显示"
 print_success "资源目录已创建"
 
 # 步骤10：清理并生成
