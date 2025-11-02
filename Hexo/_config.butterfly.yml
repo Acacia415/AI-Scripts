@@ -1,0 +1,457 @@
+# Butterfly 主题配置 - 女儿成长记录网站
+# 文档: https://butterfly.js.org/
+
+# ==========================================
+# 导航菜单
+# ==========================================
+menu:
+  首页: / || fas fa-home
+  时光轴: /timeline-simple/ || fas fa-clock
+  归档: /archives/ || fas fa-archive
+  分类: /categories/ || fas fa-folder-open
+  标签: /tags/ || fas fa-tags
+  相册: /gallery/ || fas fa-images
+  关于: /about/ || fas fa-heart
+
+# ==========================================
+# 代码块配置（暂时禁用以避免CSS错误）
+# ==========================================
+code_blocks:
+  theme: false
+  macStyle: false
+  height_limit: false
+  word_wrap: false
+  copy: false
+  language: false
+  shrink: false
+  fullpage: false
+
+# ==========================================
+# 社交链接
+# ==========================================
+social:
+  # fab fa-github: https://github.com/xxxxx || Github || '#24292e'
+  # fas fa-envelope: mailto:xxxxxx@gmail.com || Email || '#4a7dbe'
+
+# ==========================================
+# 头像设置
+# ==========================================
+avatar:
+  img: /img/avatar.jpg  # 建议上传宝贝的可爱照片
+  effect: true  # 头像会旋转
+
+# ==========================================
+# 网站图标
+# ==========================================
+favicon: /img/favicon.png
+
+# ==========================================
+# 顶部图片设置（每个页面的头图）
+# ==========================================
+# 首页顶部图（颜颜宝贝的照片）
+index_img: /img/sy.jpg
+
+# 归档页顶部图（时间轴感觉）
+archive_img: /img/cover2.jpg
+
+# 标签页顶部图
+tag_img: /img/cover3.jpg
+
+# 分类页顶部图
+category_img: /img/cover4.jpg
+
+# 相册页顶部图
+gallery_img: /img/cover5.jpg
+
+# ==========================================
+# 首页设置
+# ==========================================
+# 首页顶部标语
+index_top_img: true
+
+# 副标题
+subtitle:
+  enable: true
+  effect: true
+  loop: true
+  source: false
+  sub:
+    - 记录宝贝成长的每一天 ❤️
+    - 愿你笑容常在，快乐成长 🌟
+    - 时光荏苒，珍惜当下 🌈
+    - 每一个瞬间都值得珍藏 📸
+    - 陪你慢慢长大 🌱
+
+# ==========================================
+# 文章设置
+# ==========================================
+post:
+  meta:
+    date_type: both  # 显示创建和更新日期
+    date_format: YYYY-MM-DD
+    categories: true
+    tags: true
+  
+  # 文章封面（重要！让每篇文章都有漂亮的封面图）
+  cover:
+    index_enable: true  # 首页显示封面
+    aside_enable: true  # 侧边栏显示封面
+    archives_enable: true  # 归档页显示封面
+    position: both  # 封面位置：both(两侧都有) left(左侧) right(右侧)
+    default_cover:  # 默认封面图（本地图片）
+      - /img/cover1.jpg
+      - /img/cover2.jpg
+      - /img/cover3.jpg
+      - /img/cover4.jpg
+      - /img/cover5.jpg
+  
+  # 文章版权
+  copyright:
+    enable: true
+    decode: false
+    author_href:
+    license: CC BY-NC-SA 4.0
+    license_url: https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+  # 打赏
+  reward:
+    enable: false
+
+  # 目录
+  toc:
+    post: true
+    page: true
+    number: true
+    expand: true
+    style_simple: false
+    scroll_percent: true
+
+  # 相关文章推荐
+  related_post:
+    enable: true
+    limit: 6
+    date_type: created
+
+  # 文章过期提醒
+  noticeOutdate:
+    enable: false
+
+  # 文章编辑按钮
+  post_edit:
+    enable: false
+
+  # 文章分页
+  post_pagination:
+    enable: true
+
+# ==========================================
+# 首页文章布局
+# ==========================================
+# card: 卡片式（横向排列，适合成长记录）
+# page: 瀑布流（适合纯图片展示）
+index_layout: card
+
+# 首页每行显示的文章数（相册式：3列更美观）
+index_post_count: 3
+
+# ==========================================
+# 归档页设置
+# ==========================================
+archive:
+  type: year  # year month
+  format: YYYY年MM月
+  order: -1
+  limit: false
+
+# ==========================================
+# 标签和分类页
+# ==========================================
+tag_per_img: /img/tag-default.jpg
+category_per_img: /img/category-default.jpg
+
+# ==========================================
+# 侧边栏设置
+# ==========================================
+aside:
+  enable: true
+  hide: false
+  button: true
+  mobile: true
+  position: right
+  display:
+    archive: true
+    tag: true
+    category: true
+  card_author:
+    enable: true
+    description: 记录宝贝成长的温馨小站 💕
+    button:
+      enable: false
+  card_announcement:
+    enable: true
+    content: 欢迎来到宝贝的成长空间！这里记录着每一个珍贵的瞬间 ❤️
+  card_recent_post:
+    enable: true
+    limit: 5
+    sort: date
+    sort_order: -1
+  card_categories:
+    enable: true
+    limit: 8
+    expand: all
+    sort_order:
+  card_tags:
+    enable: true
+    limit: 40
+    color: true
+    sort_order:
+  card_archives:
+    enable: true
+    type: monthly
+    format: YYYY年MM月
+    order: -1
+    limit: 8
+    sort_order:
+  card_webinfo:
+    enable: true
+    post_count: true
+    last_push_date: true
+    sort_order:
+
+# ==========================================
+# 底部设置
+# ==========================================
+footer:
+  owner:
+    enable: true
+    since: 2024
+  custom_text: 💕 用爱记录成长 💕
+  copyright: true
+
+# ==========================================
+# 背景效果
+# ==========================================
+# 鼠标点击效果
+fireworks:
+  enable: false
+
+# 彩带背景
+canvas_ribbon:
+  enable: false
+
+# 静止彩带
+canvas_ribbon_piao:
+  enable: false
+
+# 星空背景
+canvas_nest:
+  enable: false
+
+# 气泡效果
+bubble:
+  enable: true
+
+# ==========================================
+# 本地搜索
+# ==========================================
+local_search:
+  enable: true
+  preload: false
+  CDN:
+
+# ==========================================
+# 数学公式
+# ==========================================
+mathjax:
+  enable: false
+
+katex:
+  enable: false
+
+# ==========================================
+# 图片查看器
+# ==========================================
+# fancybox | medium_zoom
+medium_zoom: true
+fancybox: false
+
+# ==========================================
+# 图片懒加载
+# ==========================================
+lazyload:
+  enable: true
+  field: site
+  placeholder:
+  blur: false
+
+# ==========================================
+# instantpage 预加载
+# ==========================================
+instantpage: false
+
+# ==========================================
+# Pjax 无刷新加载
+# ==========================================
+pjax:
+  enable: false
+
+# ==========================================
+# 深色模式
+# ==========================================
+darkmode:
+  enable: true
+  button: true
+  autoChangeMode: false
+
+# ==========================================
+# 阅读模式
+# ==========================================
+readmode: true
+
+# ==========================================
+# 字数统计
+# ==========================================
+wordcount:
+  enable: true
+  post_wordcount: true
+  min2read: true
+  total_wordcount: true
+
+# ==========================================
+# 网站验证
+# ==========================================
+site_verification:
+
+# ==========================================
+# 美化配置
+# ==========================================
+# 美化页面元素
+beautify:
+  enable: true
+  field: post
+  title-prefix-icon: '\f0c1'
+  title-prefix-icon-color: '#F47466'
+
+# 全局字体
+font:
+  global-font-size:
+  code-font-size:
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Lato, Roboto, "PingFang SC", "Microsoft YaHei", sans-serif
+  code-font-family: consolas, Menlo, "PingFang SC", "Microsoft YaHei", sans-serif
+
+# 网站背景（全局背景图 - 淡粉色渐变更温馨）
+# 建议：上传颜颜的可爱照片做背景，或使用纯色
+background: 'linear-gradient(to bottom right, #FFF0F5, #FFE4E1, #FFF5EE)'  # 粉色渐变
+
+# footer背景
+footer_bg: true
+
+# ==========================================
+# 网站加载动画
+# ==========================================
+preloader:
+  enable: false
+
+# ==========================================
+# 侧边栏按钮
+# ==========================================
+rightside:
+  enable: true
+  hide: false
+  show_percent: true
+  layout:
+    - readmode
+    - darkmode
+    - translate
+    - hideAside
+    - toc
+
+# ==========================================
+# 评论系统 (可选)
+# ==========================================
+comments:
+  use:  # 留空表示不启用评论
+  text: true
+  lazyload: false
+  count: false
+
+# ==========================================
+# 访问统计
+# ==========================================
+busuanzi:
+  site_uv: true
+  site_pv: true
+  page_pv: true
+
+# ==========================================
+# 运行时间
+# ==========================================
+runtimeshow:
+  enable: true
+  publish_date: 2024/01/01 00:00:00
+
+# ==========================================
+# 最新评论
+# ==========================================
+newest_comments:
+  enable: false
+
+# ==========================================
+# 公告
+# ==========================================
+announcement:
+  content: 🎈 欢迎来到宝贝的成长空间！这里记录着每一个美好瞬间 ❤️
+
+# ==========================================
+# 404页面
+# ==========================================
+error_404:
+  enable: true
+  subtitle: '页面没有找到'
+  background: /img/404.jpg
+
+# ==========================================
+# CDN 配置
+# ==========================================
+CDN:
+  internal_provider: jsdelivr
+  third_party_provider: jsdelivr
+
+# ==========================================
+# 主题色配置（柔和粉色系 - 适合宝宝成长记录）
+# ==========================================
+theme_color:
+  enable: true
+  main: "#FFB5C5"  # 温柔粉色
+  paginator: "#FFC0CB"  # 淡粉色
+  button_hover: "#FFD1DC"  # 浅粉色悬停
+  text_selection: "#FFE4E1"  # 雪纱粉选中
+  link_color: "#FF69B4"  # 热情粉链接
+  meta_color: "#B0B0B0"  # 柔和灰色
+  hr_color: "#FFD1DC"  # 粉色分割线
+  code_foreground: "#FF91A4"  # 粉色代码
+  code_background: "rgba(255, 228, 225, 0.3)"  # 淡粉背景
+  toc_color: "#FFB5C5"  # 粉色目录
+  blockquote_color: "#FFB5C5"  # 粉色引用
+  blockquote_padding_color: "#FFD1DC"
+  blockquote_background_color: "rgba(255, 192, 203, 0.1)"
+
+# ==========================================
+# 自定义CSS
+# ==========================================
+inject:
+  head:
+  bottom:
+
+# ==========================================
+# PWA (可选)
+# ==========================================
+pwa:
+  enable: false
+
+# ==========================================
+# Open Graph
+# ==========================================
+Open_Graph_meta:
+  enable: true
+  option:

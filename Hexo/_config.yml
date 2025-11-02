@@ -1,0 +1,192 @@
+# Hexo Configuration - 女儿成长记录网站
+## Docs: https://hexo.io/docs/configuration.html
+
+# ==========================================
+# 网站信息
+# ==========================================
+title: 颜颜宝贝的成长小站
+subtitle: '记录颜颜成长的每一天'
+description: '这是记录颜颜宝贝成长的温馨小站，每一个瞬间都值得珍藏'
+keywords: 成长记录, 颜颜, 宝贝, 成长日记, 亲子
+author: 颜颜的爸爸妈妈
+language: zh-CN
+timezone: 'Asia/Shanghai'
+
+# ==========================================
+# URL 配置
+# ==========================================
+## 修改为你的实际域名，例如: https://baby.example.com
+url: https://clawjp7.166666.best
+permalink: :year/:month/:day/:title/
+permalink_defaults:
+pretty_urls:
+  trailing_index: true
+  trailing_html: true
+
+# ==========================================
+# 目录配置
+# ==========================================
+source_dir: source
+public_dir: public
+tag_dir: tags
+archive_dir: archives
+category_dir: categories
+code_dir: downloads/code
+i18n_dir: :lang
+
+# ==========================================
+# 文章配置
+# ==========================================
+new_post_name: :year-:month-:day-:title.md
+default_layout: post
+titlecase: false
+external_link:
+  enable: true
+  field: site
+  exclude: ''
+filename_case: 0
+render_drafts: false
+post_asset_folder: true  # 启用文章资源文件夹（图片等）
+marked:
+  prependRoot: true
+  postAsset: true
+relative_link: false
+future: true
+syntax_highlighter: highlight.js
+highlight:
+  line_number: true
+  auto_detect: false
+  tab_replace: '    '
+  wrap: true
+  hljs: false
+prismjs:
+  preprocess: true
+  line_number: true
+  tab_replace: ''
+
+# ==========================================
+# 首页设置
+# ==========================================
+index_generator:
+  path: ''
+  per_page: 12  # 每页显示12篇文章
+  order_by: -date
+
+# ==========================================
+# 分类 & 标签
+# ==========================================
+default_category: 日常记录
+category_map:
+  日常记录: daily
+  重要时刻: milestone
+  节日庆祝: festival
+  学习成长: learning
+  旅行游玩: travel
+  健康成长: health
+tag_map:
+  生日: birthday
+  节日: festival
+  第一次: first-time
+  可爱瞬间: cute
+  说话: talking
+  走路: walking
+  吃饭: eating
+  睡觉: sleeping
+  玩耍: playing
+  学习: learning
+  生病: health
+
+# ==========================================
+# 日期格式
+# ==========================================
+date_format: YYYY年MM月DD日
+time_format: HH:mm:ss
+updated_option: 'mtime'
+
+# ==========================================
+# 分页
+# ==========================================
+per_page: 12
+pagination_dir: page
+
+# ==========================================
+# 主题配置
+# ==========================================
+theme: butterfly
+
+# ==========================================
+# 部署配置
+# ==========================================
+deploy:
+  type: ''
+
+# ==========================================
+# 插件配置
+# ==========================================
+
+# RSS订阅
+feed:
+  enable: true
+  type: atom
+  path: atom.xml
+  limit: 20
+  hub:
+  content: true
+  content_limit: 140
+  content_limit_delim: ' '
+  order_by: -date
+  icon: icon.png
+  autodiscovery: true
+
+# 本地搜索
+search:
+  path: search.xml
+  field: post
+  content: true
+
+# 字数统计
+symbols_count_time:
+  symbols: true
+  time: true
+  total_symbols: true
+  total_time: true
+  exclude_codeblock: false
+  awl: 4
+  wpm: 275
+  suffix: "mins."
+
+# ==========================================
+# 媒体文件配置
+# ==========================================
+
+# 图片懒加载
+lazyload:
+  enable: true
+  onlypost: false
+  loadingImg: /img/loading.gif
+
+# 视频播放器
+aplayer:
+  cdn: https://cdn.jsdelivr.net/npm/aplayer@latest/dist/APlayer.min.js
+  style_cdn: https://cdn.jsdelivr.net/npm/aplayer@latest/dist/APlayer.min.css
+
+dplayer:
+  cdn: https://cdn.jsdelivr.net/npm/dplayer@latest/dist/DPlayer.min.js
+  style_cdn: https://cdn.jsdelivr.net/npm/dplayer@latest/dist/DPlayer.min.css
+
+# ==========================================
+# SEO优化
+# ==========================================
+# 自动生成sitemap
+sitemap:
+  path: sitemap.xml
+  rel: false
+
+# ==========================================
+# 安全配置
+# ==========================================
+# 跳过渲染某些文件
+skip_render:
+  - '*.json'
+  - 'CNAME'
+  - 'README.md'
