@@ -20,9 +20,12 @@ enable_root_login() {
   if [[ -n $mima ]]; then
     # 修改密码和SSH配置
     echo root:$mima | chpasswd root
-    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config
-    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config
-    sed -i 's/^#\?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/g' /etc/ssh/sshd_config
+    sed -i 's/^\s*#\?\s*PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config
+    sed -i 's/^\s*#\?\s*PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+    sed -i 's/^\s*#\?\s*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/g' /etc/ssh/sshd_config
+    
+    # 清理甲骨文云的额外SSH配置文件（这些文件会覆盖主配置）
+    rm -rf /etc/ssh/sshd_config.d/* /etc/ssh/ssh_config.d/*
     
     # 重启SSH服务
     systemctl restart sshd
