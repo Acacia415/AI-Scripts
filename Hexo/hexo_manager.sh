@@ -2444,8 +2444,8 @@ EOF
         print_info "日志目录所有者: root"
     fi
     
-    # 设置目录权限
-    sudo chmod 755 /var/log/caddy
+    # 设置目录权限（递归设置确保所有文件都有正确权限）
+    sudo chmod -R 755 /var/log/caddy
     
     # 验证配置
     print_info "验证 Caddy 配置..."
