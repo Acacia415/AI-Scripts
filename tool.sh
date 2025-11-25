@@ -250,7 +250,7 @@ install_media_check() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
     local install_script="/tmp/media_check.sh"
-    if curl -L -s -o "$install_script" ip.check.place; then
+    if curl -L -s -o "$install_script" https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
