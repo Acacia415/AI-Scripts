@@ -2301,14 +2301,16 @@ install_and_configure_caddy() {
 
 # 配置 Caddy
 configure_caddy() {
+    # 1. 检查 Hexo 博客目录是否存在
     if [ ! -d "$BLOG_DIR" ]; then
         print_error "博客目录不存在: $BLOG_DIR"
         print_info "请先运行选项1部署 Hexo 博客"
         return 1
     fi
-    
+
+    # 2. 检查静态文件目录
     if [ ! -d "$BLOG_DIR/public" ]; then
-        print_warning "静态文件目录不存在"
+        print_warning "静态文件目录不存在: $BLOG_DIR/public"
         read -p "是否立即生成静态文件？(Y/n): " gen_static
         if [[ ! "$gen_static" =~ ^[Nn]$ ]]; then
             generate_static
@@ -2316,36 +2318,80 @@ configure_caddy() {
             return 1
         fi
     fi
-    
-    print_info "配置 Caddy..."
+
     echo ""
-    
-    # 获取域名
-    read -p "输入域名（例如 blog.example.com，留空使用 localhost）: " domain_name
-    domain_name=${domain_name:-localhost}
-    
-    # 备份现有配置
+    print_info "================ Caddy 配置向导 ================"
+
+    # 3. 输入域名
+    read -p "请输入博客访问域名（例如 blog.example.com，留空则使用 localhost）: " domain_name
+    domain_name="${domain_name:-localhost}"
+
+    print_info "将为域名: $domain_name 配置 Caddy"
+
+    # 4. 备份现有 Caddyfile
     if [ -f "/etc/caddy/Caddyfile" ]; then
         print_info "备份现有 Caddyfile..."
         sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.backup.$(date +%Y%m%d_%H%M%S)
     fi
-    
-    # 检查是否已有配置
+
+    # 5. 检查是否已有 Hexo 配置
     HEXO_CONF_EXISTS=false
     if [ -f "/etc/caddy/Caddyfile" ] && grep -q "hexo-blog" /etc/caddy/Caddyfile 2>/dev/null; then
         HEXO_CONF_EXISTS=true
-        print_warning "检测到已有 Hexo 博客配置"
+        print_warning "检测到已有 Hexo 博客相关配置（包含 hexo-blog 字样）"
         read -p "是否覆盖现有配置？(y/N): " overwrite
         if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
             print_info "取消配置"
-            return
+            return 0
         fi
     fi
-    
-    # 创建独立配置文件
+
+    # 6. 日志目录与文件
+    LOG_DIR="/var/log/caddy"
+    LOG_FILE="$LOG_DIR/hexo-blog-access.log"
+
+    print_info "创建日志目录并设置权限..."
+    sudo mkdir -p "$LOG_DIR"
+
+    # 检测 Caddy 运行用户，并设置 owner
+    if id caddy >/dev/null 2>&1; then
+        sudo chown -R caddy:caddy "$LOG_DIR"
+        print_info "日志目录所有者: caddy"
+    elif id www-data >/dev/null 2>&1; then
+        sudo chown -R www-data:www-data "$LOG_DIR"
+        print_info "日志目录所有者: www-data"
+    else
+        sudo chown -R root:root "$LOG_DIR"
+        print_info "日志目录所有者: root（注意：如 Caddy 使用 caddy 用户运行，建议手动调整）"
+    fi
+
+    # 目录权限
+    sudo chmod -R 755 "$LOG_DIR"
+
+    # 预创建日志文件（如果存在会保持 owner，不存在则创建）
+    if [ -f "$LOG_FILE" ]; then
+        print_info "检测到已存在日志文件: $LOG_FILE"
+    else
+        if id caddy >/dev/null 2>&1; then
+            sudo -u caddy touch "$LOG_FILE" || sudo touch "$LOG_FILE"
+        else
+            sudo touch "$LOG_FILE"
+        fi
+        print_success "已创建日志文件: $LOG_FILE"
+    fi
+
+    # 再次确保日志文件可写（跟随目录 owner）
+    if id caddy >/dev/null 2>&1; then
+        sudo chown caddy:caddy "$LOG_FILE"
+    elif id www-data >/dev/null 2>&1; then
+        sudo chown www-data:www-data "$LOG_FILE"
+    fi
+    sudo chmod 644 "$LOG_FILE"
+
+    # 7. 创建独立 Hexo 配置文件
     HEXO_CADDY_CONF="/etc/caddy/hexo-blog.caddy"
-    
-    print_info "创建 Hexo 博客配置文件..."
+
+    print_info "创建 Hexo 博客配置文件: $HEXO_CADDY_CONF ..."
     sudo tee "$HEXO_CADDY_CONF" > /dev/null << EOF
 # Hexo Blog Configuration
 # 由 hexo_manager.sh 自动生成
@@ -2354,13 +2400,13 @@ configure_caddy() {
 $domain_name {
     # 静态文件根目录
     root * $BLOG_DIR/public
-    
+
     # 启用文件服务器
     file_server
-    
+
     # 启用压缩
     encode gzip zstd
-    
+
     # 404 错误处理
     handle_errors {
         @404 {
@@ -2369,153 +2415,58 @@ $domain_name {
         rewrite @404 /404.html
         file_server
     }
-    
+
     # 静态资源缓存策略
     @static {
         path *.css *.js *.jpg *.jpeg *.png *.gif *.ico *.svg *.woff *.woff2 *.ttf *.eot *.webp
     }
     header @static Cache-Control "public, max-age=31536000, immutable"
-    
+
     # HTML 文件短缓存
     @html {
         path *.html
     }
     header @html Cache-Control "public, max-age=3600"
-    
+
     # 日志配置
     log {
-        output file /var/log/caddy/hexo-blog-access.log
+        output file $LOG_FILE
         format json
     }
-    
+
     # 安全头部
     header {
         # HSTS
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        # XSS 保护
+        # 防止 MIME 类型嗅探
         X-Content-Type-Options "nosniff"
+        # 点击劫持防护
         X-Frame-Options "SAMEORIGIN"
+        # XSS 保护（旧浏览器）
         X-XSS-Protection "1; mode=block"
         # 引用策略
         Referrer-Policy "strict-origin-when-cross-origin"
     }
 }
 EOF
-    
+
     print_success "配置文件已创建: $HEXO_CADDY_CONF"
-    
-    # 更新主 Caddyfile
-    print_info "更新主 Caddyfile..."
-    
-    # 检查主配置文件是否存在
+
+    # 8. 更新主 Caddyfile，引入 hexo-blog.caddy
+    print_info "更新 /etc/caddy/Caddyfile..."
+
     if [ ! -f "/etc/caddy/Caddyfile" ]; then
-        # 创建新的 Caddyfile
+        # 创建新的主配置文件
         sudo tee /etc/caddy/Caddyfile > /dev/null << EOF
 # Caddy 主配置文件
 # 导入 Hexo 博客配置
 import hexo-blog.caddy
 EOF
+        print_success "已创建新的 /etc/caddy/Caddyfile 并导入 Hexo 配置"
     else
-        # 检查是否已有 import 语句
-        if ! grep -q "import hexo-blog.caddy" /etc/caddy/Caddyfile; then
-            # 追加 import 语句
-            echo "" | sudo tee -a /etc/caddy/Caddyfile > /dev/null
-            echo "# Hexo Blog" | sudo tee -a /etc/caddy/Caddyfile > /dev/null
-            echo "import hexo-blog.caddy" | sudo tee -a /etc/caddy/Caddyfile > /dev/null
-            print_success "已添加 Hexo 配置导入语句"
-        else
-            print_info "配置导入语句已存在"
-        fi
-    fi
-    
-    # 创建日志目录并设置权限
-    print_info "创建日志目录..."
-    sudo mkdir -p /var/log/caddy
-    
-    # 检测 Caddy 运行用户
-    if id caddy >/dev/null 2>&1; then
-        sudo chown -R caddy:caddy /var/log/caddy
-        print_info "日志目录所有者: caddy"
-    elif id www-data >/dev/null 2>&1; then
-        sudo chown -R www-data:www-data /var/log/caddy
-        print_info "日志目录所有者: www-data"
-    else
-        sudo chown -R root:root /var/log/caddy
-        print_info "日志目录所有者: root"
-    fi
-    
-    # 设置目录权限（递归设置确保所有文件都有正确权限）
-    sudo chmod -R 755 /var/log/caddy
-    
-    # 验证配置
-    print_info "验证 Caddy 配置..."
-    if sudo caddy validate --config /etc/caddy/Caddyfile; then
-        print_success "配置验证成功！"
-        
-        # 重启 Caddy
-        read -p "是否立即重启 Caddy 应用配置？(Y/n): " restart_caddy
-        if [[ ! "$restart_caddy" =~ ^[Nn]$ ]]; then
-            print_info "停止 Caddy 服务..."
-            sudo systemctl stop caddy
-            sleep 1
-            
-            print_info "启动 Caddy 服务..."
-            if sudo systemctl start caddy; then
-                sleep 2
-                
-                if sudo systemctl is-active --quiet caddy; then
-                    # 修复 public 目录权限
-                    print_info "设置静态文件权限..."
-                    if [ -d "$BLOG_DIR/public" ]; then
-                        # 让 caddy 用户可以读取所有文件
-                        sudo chmod -R 755 "$BLOG_DIR/public"
-                        # 确保文件对所有人可读
-                        sudo find "$BLOG_DIR/public" -type f -exec chmod 644 {} \;
-                        sudo find "$BLOG_DIR/public" -type d -exec chmod 755 {} \;
-                        print_success "文件权限已修复"
-                    fi
-                    
-                    print_success "=========================================="
-                    print_success "Caddy 配置完成！"
-                    print_success "=========================================="
-                    print_info "访问地址: http://$domain_name"
-                    if [ "$domain_name" != "localhost" ]; then
-                        print_info "HTTPS 地址: https://$domain_name"
-                        print_info "提示: Caddy 会自动申请 Let's Encrypt SSL 证书"
-                    fi
-                    print_info "配置文件: $HEXO_CADDY_CONF"
-                    print_info "日志文件: /var/log/caddy/hexo-blog-access.log"
-                    echo ""
-                    print_info "更新博客内容后，执行："
-                    echo "  选项9 - 生成静态文件"
-                    echo "  Caddy 会自动读取更新，无需重启"
-                else
-                    print_error "Caddy 服务未能正常启动"
-                    print_info "查看详细错误："
-                    sudo journalctl -u caddy -n 30 --no-pager
-                fi
-            else
-                print_error "Caddy 启动失败！"
-                print_info "错误详情："
-                sudo journalctl -u caddy -n 30 --no-pager
-                echo ""
-                print_info "常见问题排查："
-                echo "1. 检查配置文件语法: sudo caddy validate --config /etc/caddy/Caddyfile"
-                echo "2. 检查端口占用: sudo ss -tulpn | grep ':80\|:443'"
-                echo "3. 查看完整日志: sudo journalctl -u caddy -f"
-            fi
-        fi
-    else
-        print_error "配置验证失败！"
-        print_info "正在恢复备份..."
-        LATEST_BACKUP=$(ls -t /etc/caddy/Caddyfile.backup.* 2>/dev/null | head -1)
-        if [ -n "$LATEST_BACKUP" ]; then
-            sudo cp "$LATEST_BACKUP" /etc/caddy/Caddyfile
-            print_success "已恢复备份配置"
-        fi
-        return 1
-    fi
-}
+        # 如果没有导入语句，则追加
+        if ! grep -q "import hexo-blog.caddy" /etc/caddy/Caddyfile;
+
 
 # 安装并配置 Nginx
 install_and_configure_nginx() {
