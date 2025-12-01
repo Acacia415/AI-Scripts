@@ -699,10 +699,12 @@ deploy_hexo_blog() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════${NC}"
     
-    local install_script="/usr/local/bin/hexo_manager.sh"
+    local install_script="/tmp/hexo_manager.sh"
+    local target_script="/usr/local/bin/hexo_manager.sh"
     if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/Hexo/hexo_manager.sh; then
         chmod +x "$install_script"
-        "$install_script"
+        install -m 755 "$install_script" "$target_script"
+        "$target_script"
         rm -f "$install_script"
     else
         echo -e "${RED}下载Hexo管理脚本失败！${NC}"
