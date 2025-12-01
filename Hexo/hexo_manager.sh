@@ -24,6 +24,14 @@ if [[ "$SCRIPT_PATH" != /* ]]; then
     SCRIPT_PATH="$(cd "$(dirname "$SCRIPT_PATH")" 2>/dev/null && pwd)/$(basename "$SCRIPT_PATH")"
 fi
 
+# ================= ⬇️ 新增这段强制修正逻辑 ⬇️ =================
+# 如果检测到当前脚本在 /tmp 运行，但 /usr/local/bin 下存在正式脚本
+# 则强制将定时任务的路径指向 /usr/local/bin
+if [[ "$SCRIPT_PATH" == /tmp/* ]] && [ -f "/usr/local/bin/hexo_manager.sh" ]; then
+    SCRIPT_PATH="/usr/local/bin/hexo_manager.sh"
+fi
+# ============================================================
+
 # 全局变量（将从配置文件加载）
 BLOG_DIR=""
 BACKUP_DIR=""
