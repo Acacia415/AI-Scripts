@@ -1354,19 +1354,91 @@ restore_hexo() {
         
         # 恢复 Caddy 配置
         if [ -f "web_configs/hexo-blog.caddy" ]; then
-            sudo cp -f web_configs/hexo-blog.caddy /etc/caddy/ 2>/dev/null || true
-            print_info "    ✓ Caddy 配置已恢复"
+            print_info "    检测到 Caddy 配置文件"
             
-            # 检查主配置文件是否已包含 import 语句
-            if [ -f "/etc/caddy/Caddyfile" ]; then
-                if ! grep -q "import hexo-blog.caddy" /etc/caddy/Caddyfile 2>/dev/null; then
-                    print_info "    → 添加 import 到 Caddyfile"
-                    echo "" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
-                    echo "# Hexo Blog" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
-                    echo "import hexo-blog.caddy" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
+            # 1. 提取备份中的域名列表（匹配形如 "domain.com {" 的行）
+            BACKUP_DOMAINS=$(grep -E '^[a-zA-Z0-9][a-zA-Z0-9._-]*[[:space:]]*\{' web_configs/hexo-blog.caddy 2>/dev/null | sed 's/[[:space:]]*{.*//' | tr -d ' ')
+            
+            # 2. 检查现有 Caddyfile 是否有冲突的域名配置块
+            CONFLICT_DOMAINS=""
+            if [ -f "/etc/caddy/Caddyfile" ] && [ -n "$BACKUP_DOMAINS" ]; then
+                for domain in $BACKUP_DOMAINS; do
+                    # 检查是否在主 Caddyfile 中直接定义了该域名（不是通过 import）
+                    if grep -qE "^${domain}[[:space:]]*\{" /etc/caddy/Caddyfile 2>/dev/null; then
+                        CONFLICT_DOMAINS="$CONFLICT_DOMAINS $domain"
+                        print_warning "    ⚠ 发现冲突域名: $domain"
+                    fi
+                done
+            fi
+            
+            # 3. 如果有冲突，询问用户是否清理旧配置
+            if [ -n "$CONFLICT_DOMAINS" ]; then
+                echo ""
+                print_warning "    现有 Caddyfile 中已有相同域名配置块"
+                print_info "    冲突域名:$CONFLICT_DOMAINS"
+                print_info "    如果不清理，Caddy 会因域名重复定义而无法启动"
+                echo ""
+                read -p "    是否删除 Caddyfile 中的旧配置并使用备份配置？(Y/n): " clean_old
+                
+                if [[ ! "$clean_old" =~ ^[Nn]$ ]]; then
+                    print_info "    → 清理 Caddyfile 中的冲突配置..."
+                    
+                    # 备份当前 Caddyfile
+                    sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.pre_restore.$(date +%Y%m%d_%H%M%S)
+                    
+                    # 对每个冲突域名，删除其配置块
+                    for domain in $CONFLICT_DOMAINS; do
+                        print_info "      删除域名块: $domain"
+                        # 使用 sed 删除从 "domain {" 到对应 "}" 的整个块
+                        # 创建临时文件处理
+                        sudo awk -v domain="$domain" '
+                        BEGIN { skip = 0; brace_count = 0 }
+                        {
+                            if ($0 ~ "^" domain "[[:space:]]*\\{") {
+                                skip = 1
+                                brace_count = 1
+                                next
+                            }
+                            if (skip) {
+                                gsub(/[^{}]/, "")
+                                brace_count += gsub(/{/, "{")
+                                brace_count -= gsub(/}/, "}")
+                                if (brace_count <= 0) {
+                                    skip = 0
+                                }
+                                next
+                            }
+                            print
+                        }' /etc/caddy/Caddyfile | sudo tee /etc/caddy/Caddyfile.tmp >/dev/null
+                        sudo mv /etc/caddy/Caddyfile.tmp /etc/caddy/Caddyfile
+                    done
+                    
+                    print_success "    ✓ 冲突配置已清理"
+                else
+                    print_warning "    跳过恢复 Caddy 配置（保留现有配置）"
+                    print_warning "    注意：Caddy 可能因域名冲突无法启动！"
+                    # 不设置 CADDY_RESTORED，跳过后续的 import 添加
                 fi
             fi
-            CADDY_RESTORED=true
+            
+            # 4. 恢复 Caddy 配置文件
+            if [[ ! "$clean_old" =~ ^[Nn]$ ]] || [ -z "$CONFLICT_DOMAINS" ]; then
+                sudo cp -f web_configs/hexo-blog.caddy /etc/caddy/ 2>/dev/null || true
+                print_info "    ✓ Caddy 配置文件已恢复"
+                
+                # 5. 检查主配置文件是否已包含 import 语句
+                if [ -f "/etc/caddy/Caddyfile" ]; then
+                    if ! grep -q "import hexo-blog.caddy" /etc/caddy/Caddyfile 2>/dev/null; then
+                        print_info "    → 添加 import 到 Caddyfile"
+                        echo "" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
+                        echo "# Hexo Blog" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
+                        echo "import hexo-blog.caddy" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
+                    else
+                        print_info "    → Caddyfile 中已有 import 语句"
+                    fi
+                fi
+                CADDY_RESTORED=true
+            fi
         fi
         
         # 恢复 Nginx 配置
