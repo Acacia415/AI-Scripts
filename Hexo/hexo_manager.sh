@@ -1426,16 +1426,21 @@ restore_hexo() {
                 sudo cp -f web_configs/hexo-blog.caddy /etc/caddy/ 2>/dev/null || true
                 print_info "    ✓ Caddy 配置文件已恢复"
                 
-                # 5. 检查主配置文件是否已包含 import 语句
+                # 5. 清理并添加 import 语句（防止重复）
                 if [ -f "/etc/caddy/Caddyfile" ]; then
-                    if ! grep -q "import hexo-blog.caddy" /etc/caddy/Caddyfile 2>/dev/null; then
-                        print_info "    → 添加 import 到 Caddyfile"
-                        echo "" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
-                        echo "# Hexo Blog" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
-                        echo "import hexo-blog.caddy" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
-                    else
-                        print_info "    → Caddyfile 中已有 import 语句"
-                    fi
+                    # 先清理所有已存在的 hexo-blog.caddy 相关 import 语句和注释
+                    print_info "    → 清理 Caddyfile 中已有的 hexo-blog 相关配置..."
+                    sudo sed -i '/import.*hexo-blog\.caddy/d' /etc/caddy/Caddyfile 2>/dev/null || true
+                    sudo sed -i '/# Hexo Blog/d' /etc/caddy/Caddyfile 2>/dev/null || true
+                    # 清理空行（连续多个空行合并为一个）
+                    sudo sed -i '/^$/N;/^\n$/d' /etc/caddy/Caddyfile 2>/dev/null || true
+                    
+                    # 添加统一的 import 语句
+                    print_info "    → 添加 import 到 Caddyfile"
+                    echo "" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
+                    echo "# Hexo Blog" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
+                    echo "import /etc/caddy/hexo-blog.caddy" | sudo tee -a /etc/caddy/Caddyfile >/dev/null
+                    print_success "    ✓ import 语句已添加"
                 fi
                 CADDY_RESTORED=true
             fi
