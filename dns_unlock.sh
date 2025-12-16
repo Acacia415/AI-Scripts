@@ -222,19 +222,18 @@ unblock_ipv6_ports() {
 
 enforce_dns_only_to_server() {
     local server_ip="$1"
-    echo -e "${BLUE}信息: 正在应用防火墙规则，强制 DNS 仅发往 ${server_ip}...${NC}"
+    echo -e "${BLUE}信息: 正在应用防火墙规则，优先 DNS 发往 ${server_ip}...${NC}"
     # 自动检测并安装iptables
     if ! check_and_install_iptables; then
-        echo -e "${RED}错误: iptables 不可用，无法应用 DNS 强制规则。${NC}"
+        echo -e "${RED}错误: iptables 不可用，无法应用 DNS 优先规则。${NC}"
         return 1
     fi
     for proto in udp tcp; do
         if ! iptables -C OUTPUT -p "${proto}" --dport 53 -d "${server_ip}" -m comment --comment "dns-unlock-enforce-dns" -j ACCEPT &>/dev/null; then
             iptables -I OUTPUT -p "${proto}" --dport 53 -d "${server_ip}" -m comment --comment "dns-unlock-enforce-dns" -j ACCEPT
         fi
-        if ! iptables -C OUTPUT -p "${proto}" --dport 53 -m comment --comment "dns-unlock-enforce-dns" -j REJECT &>/dev/null; then
-            iptables -A OUTPUT -p "${proto}" --dport 53 -m comment --comment "dns-unlock-enforce-dns" -j REJECT
-        fi
+        # 注意：不再添加REJECT规则，避免干扰代理服务器的UDP转发功能
+        # 依靠 /etc/resolv.conf 锁定配置来确保DNS使用指定服务器
     done
     if command -v netfilter-persistent &>/dev/null; then
         netfilter-persistent save >/dev/null 2>&1 && echo -e "${GREEN}成功: 防火墙规则已持久化。${NC}"
@@ -242,7 +241,7 @@ enforce_dns_only_to_server() {
 }
 
 revert_dns_enforcement_rules() {
-    echo -e "${BLUE}信息: 正在移除由脚本添加的 DNS 强制规则...${NC}"
+    echo -e "${BLUE}信息: 正在移除由脚本添加的 DNS 优先规则...${NC}"
     # 检查iptables是否可用
     if ! command -v iptables &>/dev/null; then
         echo -e "${YELLOW}警告: iptables 未安装，跳过规则移除。${NC}"
@@ -256,6 +255,7 @@ revert_dns_enforcement_rules() {
         if [[ -n "$server_ip" ]] && iptables -C OUTPUT -p "${proto}" --dport 53 -d "${server_ip}" -m comment --comment "dns-unlock-enforce-dns" -j ACCEPT &>/dev/null; then
             iptables -D OUTPUT -p "${proto}" --dport 53 -d "${server_ip}" -m comment --comment "dns-unlock-enforce-dns" -j ACCEPT
         fi
+        # 清理可能残留的旧版本REJECT规则
         while iptables -C OUTPUT -p "${proto}" --dport 53 -m comment --comment "dns-unlock-enforce-dns" -j REJECT &>/dev/null; do
             iptables -D OUTPUT -p "${proto}" --dport 53 -m comment --comment "dns-unlock-enforce-dns" -j REJECT || break
         done
@@ -710,12 +710,12 @@ setup_dns_client() {
             ;;
     esac
 
-    # 4) （可选）强制 DNS 仅发往 A，防止程序私自换 DNS
-    read -p "是否添加防火墙规则，强制所有 DNS 仅发往 ${server_ip} ? (y/N): " enforce_dns
+    # 4) （可选）添加防火墙优先规则，优化 DNS 路由
+    read -p "是否添加防火墙规则，优先将 DNS 发往 ${server_ip} ? (y/N): " enforce_dns
     if [[ "$enforce_dns" =~ ^[yY]$ ]]; then
         enforce_dns_only_to_server "$server_ip"
     else
-        echo -e "${YELLOW}提示: 未启用 DNS 强制规则，若有程序绕过 /etc/resolv.conf，可能仍出现异常。${NC}"
+        echo -e "${YELLOW}提示: 未启用 DNS 优先规则，依靠 /etc/resolv.conf 配置即可正常工作。${NC}"
     fi
 
     echo -e "${GREEN}成功: 客户端 DNS 已完成设置。${NC}"
