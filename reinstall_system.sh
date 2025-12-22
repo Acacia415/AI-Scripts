@@ -168,13 +168,14 @@ detect_and_backup_cloudinit() {
         echo -e "${RED}重装后系统会暂时失联（缺少 cloud-init）${NC}"
         echo -e "${CYAN}原因：reinstall.sh 默认不安装 cloud-init${NC}"
         echo
-        echo -e "${GREEN}✓ 已生成恢复脚本:${NC} ${YELLOW}/root/dmit_post_install.sh${NC}"
-        echo
         echo -e "${CYAN}恢复步骤（简单）：${NC}"
         echo -e "  ${GREEN}1.${NC} 重装完成后，通过 ${YELLOW}DMIT 控制面板${NC} 打开 ${YELLOW}VNC${NC}"
         echo -e "  ${GREEN}2.${NC} 使用 root 登录新系统"
-        echo -e "  ${GREEN}3.${NC} 运行: ${YELLOW}bash /root/dmit_post_install.sh${NC}"
-        echo -e "  ${GREEN}4.${NC} 等待脚本自动恢复网络"
+        echo -e "  ${GREEN}3.${NC} 运行以下命令一键恢复网络："
+        echo
+        echo -e "     ${YELLOW}curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/dmit_post_install.sh | bash${NC}"
+        echo
+        echo -e "  ${GREEN}4.${NC} 等待脚本自动恢复网络（约 2-5 分钟）"
         echo
         echo -e "${YELLOW}════════════════════════════════════════${NC}"
     else
