@@ -8,6 +8,67 @@ BLUE='\033[34m'
 CYAN='\033[36m'
 NC='\033[0m'
 
+# ======================= DMIT Cloud-Init 检测 =======================
+# 检测并备份 DMIT VPS 的 Cloud-Init customdata
+# 防止重装后网络失联问题
+detect_and_backup_cloudinit() {
+    echo -e "${CYAN}[DMIT 检测] 正在检查 Cloud-Init customdata...${NC}"
+    
+    local backup_dir="/tmp/dmit_cloudinit_backup"
+    local found_cloudinit=false
+    
+    mkdir -p "$backup_dir"
+    
+    # 查找 ISO9660 格式的 CD-ROM 设备
+    local cd_devices
+    cd_devices=$(blkid -t TYPE=iso9660 -o device 2>/dev/null || true)
+    
+    if [ -z "$cd_devices" ]; then
+        echo -e "${YELLOW}[DMIT 检测] 未发现 Cloud-Init CD-ROM（非 DMIT VPS 或使用不同配置方式）${NC}"
+        return 0
+    fi
+    
+    # 遍历所有 CD 设备查找 Cloud-Init 配置
+    for cd_dev in $cd_devices; do
+        echo -e "${CYAN}[DMIT 检测] 检查设备: $cd_dev${NC}"
+        
+        local mount_point="/mnt/cloudinit_detect_$$"
+        mkdir -p "$mount_point"
+        
+        if mount "$cd_dev" "$mount_point" 2>/dev/null; then
+            # 查找 Cloud-Init 配置文件（meta-data, user-data 等）
+            if find "$mount_point" -type f \( -name "meta-data*" -o -name "user-data*" -o -name "meta_data*" -o -name "user_data*" \) 2>/dev/null | grep -q .; then
+                echo -e "${GREEN}[DMIT 检测] ✓ 发现 DMIT Cloud-Init 配置！${NC}"
+                
+                # 备份所有配置文件
+                cp -r "$mount_point"/* "$backup_dir/" 2>/dev/null || true
+                
+                echo -e "${GREEN}[DMIT 检测] ✓ Cloud-Init 配置已备份到: $backup_dir${NC}"
+                echo -e "${CYAN}[DMIT 检测] 备份文件列表:${NC}"
+                ls -lh "$backup_dir" 2>/dev/null | grep -v "^total" | awk '{print "  - " $9}'
+                
+                found_cloudinit=true
+                umount "$mount_point" 2>/dev/null || true
+                rmdir "$mount_point" 2>/dev/null || true
+                break
+            fi
+            
+            umount "$mount_point" 2>/dev/null || true
+            rmdir "$mount_point" 2>/dev/null || true
+        fi
+    done
+    
+    if [ "$found_cloudinit" = true ]; then
+        echo -e "${GREEN}[DMIT 检测] ✓ 这是 DMIT VPS，Cloud-Init 配置已保护${NC}"
+        echo -e "${YELLOW}[DMIT 检测] 重装后系统将自动从 customdata 获取网络配置${NC}"
+    else
+        echo -e "${YELLOW}[DMIT 检测] 未找到 Cloud-Init 配置文件（可能不是 DMIT VPS）${NC}"
+    fi
+    
+    echo
+    return 0
+}
+
 # ======================= 系统重装 =======================
 reinstall_system() {
     clear
@@ -95,16 +156,31 @@ reinstall_system() {
     fi
     
     echo
-    echo -e "${CYAN}正在下载重装脚本...${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════${NC}"
+    echo -e "${YELLOW}步骤 1/3: DMIT VPS 兼容性检测${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════${NC}"
+    echo
+    
+    # DMIT Cloud-Init 检测（防止网络失联）
+    detect_and_backup_cloudinit
+    
+    echo -e "${CYAN}═══════════════════════════════════════${NC}"
+    echo -e "${YELLOW}步骤 2/3: 下载重装脚本${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════${NC}"
+    echo
     if ! curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh; then
         echo -e "${RED}下载脚本失败！请检查网络连接。${NC}"
         read -n 1 -s -r -p "按任意键返回..."
         return 1
     fi
     
-    echo -e "${GREEN}脚本下载成功！${NC}"
-    echo -e "${YELLOW}开始执行重装命令...${NC}"
-    echo -e "${CYAN}$reinstall_cmd${NC}"
+    echo -e "${GREEN}✓ 脚本下载成功！${NC}"
+    echo
+    echo -e "${CYAN}═══════════════════════════════════════${NC}"
+    echo -e "${YELLOW}步骤 3/3: 执行系统重装${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════${NC}"
+    echo
+    echo -e "${YELLOW}重装命令: ${NC}${CYAN}$reinstall_cmd${NC}"
     echo
     sleep 2
     
