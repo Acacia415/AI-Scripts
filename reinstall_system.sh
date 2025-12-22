@@ -10,7 +10,7 @@ NC='\033[0m'
 
 # ======================= DMIT 恢复脚本生成器 =======================
 # 生成重装后的自动网络恢复脚本
-create_dimit_post_install_script() {
+create_dmit_post_install_script() {
     local script_path="/root/dmit_post_install.sh"
     
     cat > "$script_path" <<'DM_RECOVERY'
