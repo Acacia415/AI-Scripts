@@ -8,33 +8,6 @@ BLUE='\033[34m'
 CYAN='\033[36m'
 NC='\033[0m'
 
-# ======================= DMIT VPS 检测 =======================
-detect_dmit_vps() {
-    local cd_devices
-    cd_devices=$(blkid -t TYPE=iso9660 -o device 2>/dev/null || true)
-    
-    if [ -z "$cd_devices" ]; then
-        return 1
-    fi
-    
-    for cd_dev in $cd_devices; do
-        local mount_point="/mnt/dmit_detect_$$"
-        mkdir -p "$mount_point" 2>/dev/null
-        
-        if mount "$cd_dev" "$mount_point" 2>/dev/null; then
-            if find "$mount_point" -type f \( -name "meta-data*" -o -name "user-data*" \) 2>/dev/null | grep -q .; then
-                umount "$mount_point" 2>/dev/null
-                rmdir "$mount_point" 2>/dev/null
-                return 0
-            fi
-            umount "$mount_point" 2>/dev/null
-            rmdir "$mount_point" 2>/dev/null
-        fi
-    done
-    
-    return 1
-}
-
 # ======================= 系统重装 =======================
 reinstall_system() {
     clear
@@ -122,44 +95,16 @@ reinstall_system() {
     fi
     
     echo
-    echo -e "${CYAN}═══════════════════════════════════════${NC}"
-    echo -e "${YELLOW}步骤 1/3: DMIT VPS兼容性检测${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════${NC}"
-    echo
-    
-    if detect_dmit_vps; then
-        echo -e "${GREEN}✓ 检测到 DMIT VPS${NC}"
-        echo -e "${CYAN}将使用 cloud image 模式（自带 cloud-init）${NC}"
-        echo
-        echo -e "${YELLOW}说明：${NC}"
-        echo -e "  • 使用 ${CYAN}--ci${NC} 参数安装 cloud image"
-        echo -e "  • cloud image 自带 cloud-init"
-        echo -e "  • 可自动配置网络，无需手动干预"
-        echo
-        reinstall_cmd="$reinstall_cmd --ci"
-    else
-        echo -e "${YELLOW}未检测到 DMIT VPS（或非 cloud-init 配置）${NC}"
-        echo -e "${CYAN}将使用标准安装模式${NC}"
-        echo
-    fi
-    
-    echo -e "${CYAN}═══════════════════════════════════════${NC}"
-    echo -e "${YELLOW}步骤 2/3: 下载重装脚本${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════${NC}"
-    echo
+    echo -e "${CYAN}正在下载重装脚本...${NC}"
     if ! curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh; then
         echo -e "${RED}下载脚本失败！请检查网络连接。${NC}"
         read -n 1 -s -r -p "按任意键返回..."
         return 1
     fi
     
-    echo -e "${GREEN}✓ 下载成功${NC}"
-    echo
-    echo -e "${CYAN}═══════════════════════════════════════${NC}"
-    echo -e "${YELLOW}步骤 3/3: 执行系统重装${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════${NC}"
-    echo
-    echo -e "${YELLOW}执行命令: ${NC}${CYAN}$reinstall_cmd${NC}"
+    echo -e "${GREEN}脚本下载成功！${NC}"
+    echo -e "${YELLOW}开始执行重装命令...${NC}"
+    echo -e "${CYAN}$reinstall_cmd${NC}"
     echo
     sleep 2
     
