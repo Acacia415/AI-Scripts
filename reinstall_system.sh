@@ -8,9 +8,108 @@ BLUE='\033[34m'
 CYAN='\033[36m'
 NC='\033[0m'
 
+# ======================= DMIT 恢复脚本生成器 =======================
+# 生成重装后的自动网络恢复脚本
+create_dimit_post_install_script() {
+    local script_path="/root/dmit_post_install.sh"
+    
+    cat > "$script_path" <<'DM_RECOVERY'
+#!/bin/bash
+# DMIT VPS 网络自动恢复脚本
+
+set -e
+RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
+
+echo "=========================================="
+echo -e "${CYAN}  DMIT VPS 网络自动恢复${NC}"
+echo "=========================================="
+echo
+
+# 检测网卡
+echo -e "${CYAN}[步骤 1/6] 检测网卡...${NC}"
+ETH=$(ip link show | grep -E '^[0-9]+: (eth|ens|enp)' | head -1 | cut -d: -f2 | tr -d ' ')
+[ -z "$ETH" ] && { echo -e "${RED}错误: 未检测到网卡${NC}"; exit 1; }
+echo -e "${GREEN}✓ 网卡: $ETH${NC}"
+echo
+
+# 配置 DNS
+echo -e "${CYAN}[步骤 2/6] 配置 DNS...${NC}"
+cat > /etc/resolv.conf <<EOF
+nameserver 2001:4860:4860::8888
+nameserver 8.8.8.8
+EOF
+echo -e "${GREEN}✓ DNS 配置完成${NC}"
+echo
+
+# 测试 IPv6
+echo -e "${CYAN}[步骤 3/6] 测试 IPv6 连接...${NC}"
+if ! ping6 -c 3 -W 2 google.com >/dev/null 2>&1; then
+    echo -e "${RED}✗ IPv6 连接失败，无法自动安装 cloud-init${NC}"
+    echo -e "${YELLOW}请手动配置网络或联系 DMIT 客服${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ IPv6 正常${NC}"
+echo
+
+# 更新软件源
+echo -e "${CYAN}[步骤 4/6] 更新软件源...${NC}"
+apt update || { echo -e "${RED}✗ 更新失败${NC}"; exit 1; }
+echo -e "${GREEN}✓ 更新完成${NC}"
+echo
+
+# 安装 cloud-init
+echo -e "${CYAN}[步骤 5/6] 安装 cloud-init...${NC}"
+echo -e "${YELLOW}安装中，请耐心等待...${NC}"
+apt install -y cloud-init cloud-initramfs-growroot || { echo -e "${RED}✗ 安装失败${NC}"; exit 1; }
+echo -e "${GREEN}✓ 安装完成${NC}"
+echo
+
+# 配置 cloud-init
+echo -e "${CYAN}[步骤 6/6] 配置 cloud-init...${NC}"
+mkdir -p /etc/cloud/cloud.cfg.d/
+cat > /etc/cloud/cloud.cfg.d/90_dmit.cfg <<EOF
+datasource_list: [ ConfigDrive, NoCloud, None ]
+datasource:
+  ConfigDrive:
+    dsmode: local
+EOF
+
+cloud-init clean --logs
+cloud-init init --local && cloud-init init
+cloud-init modules --mode=config
+cloud-init modules --mode=final
+
+echo -e "${GREEN}✓ 配置完成${NC}"
+echo
+
+# 重启网络
+systemctl restart networking 2>/dev/null || systemctl restart systemd-networkd 2>/dev/null || true
+sleep 3
+
+# 显示结果
+echo "=========================================="
+echo -e "${CYAN}网络配置：${NC}"
+ip addr show $ETH | grep -E 'inet|link/ether'
+echo
+ip route show
+echo "=========================================="
+echo
+
+# 测试连接
+if ping -c 3 -W 2 8.8.8.8 >/dev/null 2>&1; then
+    echo -e "${GREEN}✓✓✓  网络恢复成功！  ✓✓✓${NC}"
+    echo
+    echo -e "${YELLOW}建议重启系统: ${CYAN}reboot${NC}"
+else
+    echo -e "${YELLOW}⚠  IPv4 未完全恢复，请重启系统${NC}"
+fi
+DM_RECOVERY
+
+    chmod +x "$script_path"
+    echo -e "${GREEN}[DMIT] ✓ 恢复脚本已生成: $script_path${NC}"
+}
+
 # ======================= DMIT Cloud-Init 检测 =======================
-# 检测并备份 DMIT VPS 的 Cloud-Init customdata
-# 防止重装后网络失联问题
 detect_and_backup_cloudinit() {
     echo -e "${CYAN}[DMIT 检测] 正在检查 Cloud-Init customdata...${NC}"
     
@@ -19,16 +118,14 @@ detect_and_backup_cloudinit() {
     
     mkdir -p "$backup_dir"
     
-    # 查找 ISO9660 格式的 CD-ROM 设备
     local cd_devices
     cd_devices=$(blkid -t TYPE=iso9660 -o device 2>/dev/null || true)
     
     if [ -z "$cd_devices" ]; then
-        echo -e "${YELLOW}[DMIT 检测] 未发现 Cloud-Init CD-ROM（非 DMIT VPS 或使用不同配置方式）${NC}"
+        echo -e "${YELLOW}[DMIT 检测] 未发现 Cloud-Init CD-ROM（非 DMIT VPS）${NC}"
         return 0
     fi
     
-    # 遍历所有 CD 设备查找 Cloud-Init 配置
     for cd_dev in $cd_devices; do
         echo -e "${CYAN}[DMIT 检测] 检查设备: $cd_dev${NC}"
         
@@ -36,15 +133,12 @@ detect_and_backup_cloudinit() {
         mkdir -p "$mount_point"
         
         if mount "$cd_dev" "$mount_point" 2>/dev/null; then
-            # 查找 Cloud-Init 配置文件（meta-data, user-data 等）
             if find "$mount_point" -type f \( -name "meta-data*" -o -name "user-data*" -o -name "meta_data*" -o -name "user_data*" \) 2>/dev/null | grep -q .; then
-                echo -e "${GREEN}[DMIT 检测] ✓ 发现 DMIT Cloud-Init 配置！${NC}"
+                echo -e "${GREEN}[DMIT 检测] ✓ 发现 DMIT Cloud-Init 配置${NC}"
                 
-                # 备份所有配置文件
                 cp -r "$mount_point"/* "$backup_dir/" 2>/dev/null || true
                 
-                echo -e "${GREEN}[DMIT 检测] ✓ Cloud-Init 配置已备份到: $backup_dir${NC}"
-                echo -e "${CYAN}[DMIT 检测] 备份文件列表:${NC}"
+                echo -e "${GREEN}[DMIT 检测] ✓ 已备份到: $backup_dir${NC}"
                 ls -lh "$backup_dir" 2>/dev/null | grep -v "^total" | awk '{print "  - " $9}'
                 
                 found_cloudinit=true
@@ -59,10 +153,32 @@ detect_and_backup_cloudinit() {
     done
     
     if [ "$found_cloudinit" = true ]; then
-        echo -e "${GREEN}[DMIT 检测] ✓ 这是 DMIT VPS，Cloud-Init 配置已保护${NC}"
-        echo -e "${YELLOW}[DMIT 检测] 重装后系统将自动从 customdata 获取网络配置${NC}"
+        # 设置全局标记
+        export IS_DMIT_VPS=1
+        
+        echo -e "${GREEN}[DMIT 检测] ✓ 这是 DMIT VPS${NC}"
+        echo -e "${YELLOW}[DMIT 检测] 正在生成恢复脚本...${NC}"
+        
+        create_dmit_post_install_script
+        
+        echo
+        echo -e "${YELLOW}════════════════════════════════════════${NC}"
+        echo -e "${RED}⚠️  DMIT VPS 重装特别提醒${NC}"
+        echo -e "${YELLOW}════════════════════════════════════════${NC}"
+        echo -e "${RED}重装后系统会暂时失联（缺少 cloud-init）${NC}"
+        echo -e "${CYAN}原因：reinstall.sh 默认不安装 cloud-init${NC}"
+        echo
+        echo -e "${GREEN}✓ 已生成恢复脚本:${NC} ${YELLOW}/root/dmit_post_install.sh${NC}"
+        echo
+        echo -e "${CYAN}恢复步骤（简单）：${NC}"
+        echo -e "  ${GREEN}1.${NC} 重装完成后，通过 ${YELLOW}DMIT 控制面板${NC} 打开 ${YELLOW}VNC${NC}"
+        echo -e "  ${GREEN}2.${NC} 使用 root 登录新系统"
+        echo -e "  ${GREEN}3.${NC} 运行: ${YELLOW}bash /root/dmit_post_install.sh${NC}"
+        echo -e "  ${GREEN}4.${NC} 等待脚本自动恢复网络"
+        echo
+        echo -e "${YELLOW}════════════════════════════════════════${NC}"
     else
-        echo -e "${YELLOW}[DMIT 检测] 未找到 Cloud-Init 配置文件（可能不是 DMIT VPS）${NC}"
+        echo -e "${YELLOW}[DMIT 检测] 未找到配置文件（可能不是 DMIT）${NC}"
     fi
     
     echo
@@ -80,7 +196,7 @@ reinstall_system() {
     echo -e "${YELLOW}⚠️  警告：重装系统将清空所有数据，请务必备份重要文件！${NC}"
     echo
     
-    # 定义系统列表（系统名称|版本|显示名称）
+    # 定义系统列表
     local systems=(
         "debian|11|Debian 11"
         "debian|12|Debian 12"
@@ -107,7 +223,7 @@ reinstall_system() {
     local index=1
     for system in "${systems[@]}"; do
         local display_name=$(echo "$system" | cut -d'|' -f3)
-        printf "  ${GREEN}%-3s${NC} %s\n" "$index." "$display_name"
+        printf "  ${GREEN}%-3s${NC} %s\\n" "$index." "$display_name"
         ((index++))
     done
     
@@ -117,7 +233,6 @@ reinstall_system() {
     
     read -p "请输入选项 [0-${#systems[@]}]: " choice
     
-    # 验证输入
     if [[ "$choice" == "0" ]]; then
         return
     fi
@@ -128,13 +243,11 @@ reinstall_system() {
         return
     fi
     
-    # 获取选中的系统信息
     local selected_system="${systems[$((choice-1))]}"
     local os_name=$(echo "$selected_system" | cut -d'|' -f1)
     local os_version=$(echo "$selected_system" | cut -d'|' -f2)
     local display_name=$(echo "$selected_system" | cut -d'|' -f3)
     
-    # 构建命令
     local reinstall_cmd="bash reinstall.sh $os_name"
     if [[ -n "$os_version" ]]; then
         reinstall_cmd="$reinstall_cmd $os_version"
@@ -144,13 +257,13 @@ reinstall_system() {
     echo -e "${YELLOW}您选择了：${NC}${GREEN}$display_name${NC}"
     echo -e "${YELLOW}将执行命令：${NC}${CYAN}$reinstall_cmd${NC}"
     echo
-    echo -e "${RED}⚠️  最后警告：此操作不可逆，将清空所有数据！${NC}"
+    echo -e "${RED}⚠️  最后警告：此操作不可逆！${NC}"
     echo -e "${YELLOW}请确认您已经备份了所有重要文件。${NC}"
     echo
     read -p "确认要继续吗？(输入 YES 确认): " confirm
     
     if [[ "$confirm" != "YES" ]]; then
-        echo -e "${BLUE}已取消重装操作${NC}"
+        echo -e "${BLUE}已取消重装${NC}"
         sleep 2
         return
     fi
@@ -161,7 +274,6 @@ reinstall_system() {
     echo -e "${CYAN}═══════════════════════════════════════${NC}"
     echo
     
-    # DMIT Cloud-Init 检测（防止网络失联）
     detect_and_backup_cloudinit
     
     echo -e "${CYAN}═══════════════════════════════════════${NC}"
@@ -169,33 +281,30 @@ reinstall_system() {
     echo -e "${CYAN}═══════════════════════════════════════${NC}"
     echo
     if ! curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh; then
-        echo -e "${RED}下载脚本失败！请检查网络连接。${NC}"
+        echo -e "${RED}下载失败！请检查网络。${NC}"
         read -n 1 -s -r -p "按任意键返回..."
         return 1
     fi
     
-    echo -e "${GREEN}✓ 脚本下载成功！${NC}"
+    echo -e "${GREEN}✓ 下载成功${NC}"
     echo
     echo -e "${CYAN}═══════════════════════════════════════${NC}"
     echo -e "${YELLOW}步骤 3/3: 执行系统重装${NC}"
     echo -e "${CYAN}═══════════════════════════════════════${NC}"
     echo
-    echo -e "${YELLOW}重装命令: ${NC}${CYAN}$reinstall_cmd${NC}"
+    echo -e "${YELLOW}命令: ${NC}${CYAN}$reinstall_cmd${NC}"
     echo
     sleep 2
     
-    # 执行重装命令
     echo -e "${YELLOW}正在执行重装脚本...${NC}"
     $reinstall_cmd
     
-    # 检查命令执行结果
     if [ $? -eq 0 ]; then
         echo
         echo -e "${GREEN}重装脚本执行完成！${NC}"
-        echo -e "${YELLOW}系统将在 5 秒后自动重启以完成重装...${NC}"
-        echo -e "${RED}请注意：重启后系统将开始重装过程！${NC}"
+        echo -e "${YELLOW}系统将在 5 秒后自动重启...${NC}"
+        echo -e "${RED}请注意：重启后系统将开始重装！${NC}"
         
-        # 倒计时
         for i in {5..1}; do
             echo -e "${CYAN}$i 秒后重启...${NC}"
             sleep 1
@@ -205,7 +314,7 @@ reinstall_system() {
         reboot
     else
         echo
-        echo -e "${RED}重装脚本执行失败！请检查错误信息。${NC}"
+        echo -e "${RED}重装失败！请检查错误信息。${NC}"
         read -n 1 -s -r -p "按任意键返回..."
         return 1
     fi
