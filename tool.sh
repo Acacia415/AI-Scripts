@@ -13,6 +13,92 @@ BLUE='\033[34m'
 CYAN='\033[36m'
 NC='\033[0m'
 
+# ======================= 通用下载执行助手 =======================
+download_and_run_temp_script() {
+    local script_url="$1"
+    local temp_script="$2"
+    local fail_message="${3:-下载脚本失败！}"
+    local use_bash="${4:-yes}"   # yes / no
+    local ret=0
+
+    # 先清理旧文件，避免上次异常退出后残留
+    rm -f "$temp_script"
+
+    # 下载脚本
+    if ! curl -fsSL -o "$temp_script" "$script_url"; then
+        rm -f "$temp_script"
+        echo -e "${RED}${fail_message}${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+
+    # 去除 UTF-8 BOM，避免 shebang 前有隐藏字符
+    sed -i '1s/^\xEF\xBB\xBF//' "$temp_script" 2>/dev/null
+
+    # 去除 Windows CRLF 行尾
+    sed -i 's/\r$//' "$temp_script" 2>/dev/null || dos2unix "$temp_script" 2>/dev/null
+
+    chmod +x "$temp_script"
+
+    # 强制使用 bash 执行更稳，避免 shebang / sh 兼容问题
+    if [[ "$use_bash" == "yes" ]]; then
+        bash "$temp_script"
+    else
+        "$temp_script"
+    fi
+    ret=$?
+
+    rm -f "$temp_script"
+
+    if [[ $ret -ne 0 ]]; then
+        echo -e "${RED}脚本执行失败，退出码: $ret${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+    fi
+
+    return $ret
+}
+
+download_install_and_run_script() {
+    local script_url="$1"
+    local temp_script="$2"
+    local target_script="$3"
+    local fail_message="${4:-下载脚本失败！}"
+    local ret=0
+
+    rm -f "$temp_script"
+
+    if ! curl -fsSL -o "$temp_script" "$script_url"; then
+        rm -f "$temp_script"
+        echo -e "${RED}${fail_message}${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+
+    sed -i '1s/^\xEF\xBB\xBF//' "$temp_script" 2>/dev/null
+    sed -i 's/\r$//' "$temp_script" 2>/dev/null || dos2unix "$temp_script" 2>/dev/null
+
+    chmod +x "$temp_script"
+
+    if ! install -m 755 "$temp_script" "$target_script"; then
+        rm -f "$temp_script"
+        echo -e "${RED}安装脚本到目标路径失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+
+    bash "$target_script"
+    ret=$?
+
+    rm -f "$temp_script"
+
+    if [[ $ret -ne 0 ]]; then
+        echo -e "${RED}脚本执行失败，退出码: $ret${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+    fi
+
+    return $ret
+}
+
 # ===================== IRIS 工具箱快捷键自动安装 =====================
 
 # 确保以 root 权限运行
@@ -33,6 +119,8 @@ LOCAL_SCRIPT="$HOME/tool.sh"
 if [[ "$0" == "/dev/fd/"* || "$0" == "/proc/self/fd/"* ]]; then
     # 通过 bash <(curl …) 执行
     curl -fsSL https://link.irisu.de/toolbox -o "$LOCAL_SCRIPT"
+    sed -i '1s/^\xEF\xBB\xBF//' "$LOCAL_SCRIPT" 2>/dev/null
+    sed -i 's/\r$//' "$LOCAL_SCRIPT" 2>/dev/null || dos2unix "$LOCAL_SCRIPT" 2>/dev/null
 else
     # 本地文件执行
     cp -f "$(realpath "$0")" "$LOCAL_SCRIPT"
@@ -58,17 +146,11 @@ display_system_info() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/display_system_info.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/display_system_info.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/display_system_info.sh" \
+        "/tmp/display_system_info.sh" \
+        "下载脚本失败！"
 }
 
 # ======================= 开启root用户登录 =======================
@@ -77,17 +159,11 @@ enable_root_login() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/enable_root_login.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/enable_root_login.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/enable_root_login.sh" \
+        "/tmp/enable_root_login.sh" \
+        "下载脚本失败！"
 }
 
 # ======================= 智能流量监控 =======================
@@ -96,17 +172,11 @@ traffic_monitor() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/traffic_monitor.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/traffic_monitor.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/traffic_monitor.sh" \
+        "/tmp/traffic_monitor.sh" \
+        "下载脚本失败！"
 }
 
 # ======================= 安装snell协议 =======================
@@ -190,17 +260,11 @@ install_iptables_forward() {
     echo -e "${CYAN}一键IPTables转发管理工具${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/iptables_forward.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/iptables.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载 IPTables转发 脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/iptables.sh" \
+        "/tmp/iptables_forward.sh" \
+        "下载 IPTables转发 脚本失败！"
 }
 
 # ======================= 一键GOST转发 =======================
@@ -210,17 +274,11 @@ install_gost_forward() {
     echo -e "${CYAN}一键GOST转发管理工具${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/Multi-EasyGost${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/gost_forward.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/Multi-EasyGost/refs/heads/test/gost.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载 GOST转发 脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/Multi-EasyGost/refs/heads/test/gost.sh" \
+        "/tmp/gost_forward.sh" \
+        "下载 GOST转发 脚本失败！"
 }
 
 # ======================= 安装3X-UI面板 =======================
@@ -229,17 +287,11 @@ install_3x_ui() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/mhsanaei/3x-ui${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/3x-ui_install.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载 3X-UI 安装脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh" \
+        "/tmp/3x-ui_install.sh" \
+        "下载 3X-UI 安装脚本失败！"
 }
 
 # ======================= 流媒体检测 =======================
@@ -248,17 +300,11 @@ install_media_check() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：ip.check.place${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/media_check.sh"
-    if curl -L -s -o "$install_script" https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载流媒体检测脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh" \
+        "/tmp/media_check.sh" \
+        "下载流媒体检测脚本失败！"
 }
 
 
@@ -268,16 +314,23 @@ install_speedtest() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}Speedtest测速组件安装${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
+
     # 下载packagecloud安装脚本
     local install_script="/tmp/speedtest_install.sh"
     echo -e "${CYAN}下载Speedtest安装脚本...${NC}"
-    if ! curl -s --ssl https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh -o "$install_script"; then
+
+    rm -f "$install_script"
+    if ! curl -fsSL --ssl https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh -o "$install_script"; then
+        rm -f "$install_script"
         echo -e "${RED}下载Speedtest安装脚本失败！${NC}"
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
     fi
-    
+
+    sed -i '1s/^\xEF\xBB\xBF//' "$install_script" 2>/dev/null
+    sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
+    chmod +x "$install_script"
+
     # 执行安装脚本
     echo -e "${CYAN}添加Speedtest仓库...${NC}"
     if ! sudo bash "$install_script"; then
@@ -287,7 +340,7 @@ install_speedtest() {
         return 1
     fi
     rm -f "$install_script"
-    
+
     # 更新软件源并安装
     echo -e "${CYAN}安装Speedtest...${NC}"
     if ! sudo apt-get update || ! sudo apt-get install -y speedtest; then
@@ -295,7 +348,7 @@ install_speedtest() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
     fi
-    
+
     # 自动执行测速
     echo -e "${CYAN}开始网络测速...${NC}"
     speedtest --accept-license --accept-gdpr
@@ -332,18 +385,11 @@ nginx_main() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local nginx_script="/tmp/nginx-manager.sh"
-    
-    if wget -O "$nginx_script" --no-check-certificate \
-        https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/nginx-manager.sh; then
-        chmod +x "$nginx_script"
-        "$nginx_script"
-        rm -f "$nginx_script"
-    else
-        echo -e "${RED}错误：Nginx 管理脚本下载失败！${NC}"
-    fi
-    
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/nginx-manager.sh" \
+        "/tmp/nginx-manager.sh" \
+        "错误：Nginx 管理脚本下载失败！"
 }
 
 
@@ -388,20 +434,11 @@ install_dns_unlock() {
     echo -e "${CYAN}DNS解锁服务管理工具${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/dns_unlock.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/dns_unlock.sh; then
-        # 转换行尾符，避免CRLF导致的执行问题
-        sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
-        chmod +x "$install_script"
-        # DNS解锁脚本需要root权限来安装服务和修改配置（主脚本已确保root权限）
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载 DNS解锁 脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/dns_unlock.sh" \
+        "/tmp/dns_unlock.sh" \
+        "下载 DNS解锁 脚本失败！"
 }
 
 # ======================= 搭建TG图床 =======================
@@ -410,30 +447,18 @@ install_tg_image_host() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    echo # Add an empty line for spacing
-
-    local install_script_url="https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/install_imghub.sh"
-    local temp_install_script="/tmp/tg_imghub_install.sh"
+    echo
 
     echo -e "${CYAN}正在下载 TG图床 安装脚本...${NC}"
-    if curl -sSL -o "$temp_install_script" "$install_script_url"; then
-        chmod +x "$temp_install_script"
-        echo -e "${GREEN}下载完成，开始执行安装脚本...${NC}"
-        # Execute the script
-        "$temp_install_script"
-        # Optionally, remove the script after execution
-        rm -f "$temp_install_script"
+    if download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/install_imghub.sh" \
+        "/tmp/tg_imghub_install.sh" \
+        "下载 TG图床 安装脚本失败！"
+    then
         echo -e "${GREEN}TG图床 安装脚本执行完毕。${NC}"
-        # 成功时，不再有模块内部的 read 暂停
     else
-        echo -e "${RED}下载 TG图床 安装脚本失败！${NC}"
-        # 失败时，移除了这里的 read 暂停
-        # read -n 1 -s -r -p "按任意键返回主菜单..." # 已移除
-        return 1 # 仍然返回错误码，主菜单可以根据需要处理或忽略
+        return 1
     fi
-    # 确保函数末尾没有其他 read 暂停
-    # # Add a pause before returning to the main menu, if desired, after successful installation
-    # # read -n 1 -s -r -p "安装完成，按任意键返回主菜单..." # 此行保持注释或删除
 }
 
 # ======================= 安装Fail2Ban =======================
@@ -522,17 +547,11 @@ open_all_ports() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/open_all_ports.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/open_all_ports.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/open_all_ports.sh" \
+        "/tmp/open_all_ports.sh" \
+        "下载脚本失败！"
 }
 
 # ======================= Caddy反代管理 =======================
@@ -541,17 +560,11 @@ caddy_manager() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/caddy_manager.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/caddy_manager.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/caddy_manager.sh" \
+        "/tmp/caddy_manager.sh" \
+        "下载脚本失败！"
 }
 
 # ======================= IP优先级设置 =======================
@@ -560,17 +573,11 @@ modify_ip_preference() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/modify_ip_preference.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/modify_ip_preference.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/modify_ip_preference.sh" \
+        "/tmp/modify_ip_preference.sh" \
+        "下载脚本失败！"
 }
 
 # ======================= 命令行美化 =======================
@@ -579,17 +586,11 @@ install_shell_beautify() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/install_shell_beautify.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_shell_beautify.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_shell_beautify.sh" \
+        "/tmp/install_shell_beautify.sh" \
+        "下载脚本失败！"
 }
 
 # ======================= 安装Sub-Store =======================
@@ -598,17 +599,11 @@ install_substore() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/install_substore.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_substore.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_substore.sh" \
+        "/tmp/install_substore.sh" \
+        "下载脚本失败！"
 }
 
 # ======================= TCP性能优化(BBR+fq) =======================
@@ -617,17 +612,11 @@ optimize_tcp_bbr() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/optimize_tcp_bbr.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/optimize_tcp_bbr.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/optimize_tcp_bbr.sh" \
+        "/tmp/optimize_tcp_bbr.sh" \
+        "下载脚本失败！"
 }
 
 # ======================= 恢复TCP原始配置 =======================
@@ -636,17 +625,11 @@ restore_tcp_config() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/restore_tcp_config.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/restore_tcp_config.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/restore_tcp_config.sh" \
+        "/tmp/restore_tcp_config.sh" \
+        "下载脚本失败！"
 }
 
 # ======================= 系统重装 =======================
@@ -655,19 +638,11 @@ reinstall_system() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/bin456789/reinstall${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/reinstall_system.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/reinstall_system.sh; then
-        # 转换行尾符，避免CRLF导致的执行问题
-        sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/reinstall_system.sh" \
+        "/tmp/reinstall_system.sh" \
+        "下载脚本失败！"
 }
 
 # ======================= 时间同步 =======================
@@ -677,19 +652,11 @@ sync_time() {
     echo -e "${CYAN}时间同步脚本${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/sync-time.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/sync-time.sh; then
-        # 转换行尾符，避免CRLF导致的执行问题
-        sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载时间同步脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/sync-time.sh" \
+        "/tmp/sync-time.sh" \
+        "下载时间同步脚本失败！"
 }
 
 # ======================= 部署Hexo博客 =======================
@@ -698,19 +665,12 @@ deploy_hexo_blog() {
     echo -e "${YELLOW}═══════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/hexo_manager.sh"
-    local target_script="/usr/local/bin/hexo_manager.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/Hexo/hexo_manager.sh; then
-        chmod +x "$install_script"
-        install -m 755 "$install_script" "$target_script"
-        "$target_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载Hexo管理脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_install_and_run_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/Hexo/hexo_manager.sh" \
+        "/tmp/hexo_manager.sh" \
+        "/usr/local/bin/hexo_manager.sh" \
+        "下载Hexo管理脚本失败！"
 }
 
 # ======================= 安装Hexo_butterfly主题 =======================
@@ -719,36 +679,33 @@ install_hexo_butterfly() {
     echo -e "${YELLOW}═══════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════${NC}"
-    
-    local install_script="/tmp/butterfly_setup.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/Hexo/butterfly_setup.sh; then
-        chmod +x "$install_script"
-        "$install_script"
-        rm -f "$install_script"
-    else
-        echo -e "${RED}下载Butterfly主题安装脚本失败！${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return 1
-    fi
+
+    download_and_run_temp_script \
+        "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/Hexo/butterfly_setup.sh" \
+        "/tmp/butterfly_setup.sh" \
+        "下载Butterfly主题安装脚本失败！"
 }
 
 # ======================= 脚本更新 =======================
 update_script() {
   echo -e "${YELLOW}开始更新脚本...${NC}"
-  
+
   # 删除旧脚本
   rm -f /root/tool.sh
-  
-  # 下载并执行新脚本
-  if curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o /root/tool.sh && 
-     chmod +x /root/tool.sh
-  then
+
+  # 下载并处理新脚本
+  if curl -fsSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o /root/tool.sh; then
+    sed -i '1s/^\xEF\xBB\xBF//' /root/tool.sh 2>/dev/null
+    sed -i 's/\r$//' /root/tool.sh 2>/dev/null || dos2unix /root/tool.sh 2>/dev/null
+    chmod +x /root/tool.sh
     echo -e "${GREEN}更新成功，即将启动新脚本...${NC}"
     sleep 2
     exec /root/tool.sh  # 用新脚本替换当前进程
   else
     echo -e "${RED}更新失败！请手动执行："
-    echo -e "curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o tool.sh"
+    echo -e "curl -fsSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o tool.sh"
+    echo -e "sed -i '1s/^\xEF\xBB\xBF//' tool.sh"
+    echo -e "sed -i 's/\r$//' tool.sh"
     echo -e "chmod +x tool.sh && ./tool.sh${NC}"
     exit 1
   fi
