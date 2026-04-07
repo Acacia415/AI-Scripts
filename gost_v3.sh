@@ -220,7 +220,7 @@ function Restart_ct() { regenerate_yaml_config && restart_gost_safely; }
 function eachconf_retrieve() {
   d_server=${trans_conf#*#}
   d_port=${d_server#*#}
-  d_ip=${d_server%#*}
+  d_ip=${d_server%%#*}
   flag_s_port=${trans_conf%%#*}
   s_port=${flag_s_port#*/}
   is_encrypt=${flag_s_port%/*}
