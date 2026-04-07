@@ -438,7 +438,7 @@ EOF
                 encrypttls)
                     local tls_dialer_opts=""
                     if [[ ${is_cert} == [Yy] ]]; then
-                        tls_dialer_opts=$(printf '\n      tls:\n        secure: true\n        serverName: "%s"' "${d_ip}")
+                        tls_dialer_opts=$(printf '\n        tls:\n          secure: true\n          serverName: "%s"' "${d_ip}")
                     fi
                     [[ -n "$chain_definitions" ]] && chain_definitions+=$'\n'
                     chain_definitions+=$(cat <<EOF
@@ -457,9 +457,9 @@ EOF
                     ;;
                 encryptwss)
                     local wss_dialer_opts=""
-                    wss_dialer_opts=$(printf '\n      metadata:\n        path: "%s"' "${ws_path}")
+                    wss_dialer_opts=$(printf '\n        metadata:\n          path: "%s"' "${ws_path}")
                     if [[ ${is_cert} == [Yy] ]]; then
-                        wss_dialer_opts+=$(printf '\n      tls:\n        secure: true\n        serverName: "%s"' "${d_ip}")
+                        wss_dialer_opts+=$(printf '\n        tls:\n          secure: true\n          serverName: "%s"' "${d_ip}")
                     fi
                     [[ -n "$chain_definitions" ]] && chain_definitions+=$'\n'
                     chain_definitions+=$(cat <<EOF
@@ -500,7 +500,7 @@ EOF
                     local nodes_yaml=""
                     local peer_dialer_meta=""
                     if [[ "$dialer_type" == "ws" || "$dialer_type" == "wss" ]]; then
-                        peer_dialer_meta=$(printf '\n      metadata:\n        path: "%s"' "${ws_path}")
+                        peer_dialer_meta=$(printf '\n        metadata:\n          path: "%s"' "${ws_path}")
                     fi
                     while IFS= read -r node_addr; do
                         local node_name
