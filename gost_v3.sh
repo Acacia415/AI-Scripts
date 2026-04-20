@@ -411,7 +411,7 @@ EOF
                     if [[ "$dialer_type" == "wss" ]]; then
                         ws_path_opts=$(printf '\n        metadata:\n          path: "/ws"')
                     fi
-                    chain_definitions+=$(cat <<EOF
+                    chain_definitions+=$'\n'$(cat <<EOF
 - name: "chain_${service_name}"
   hops:
   - name: "hop_${service_name}"
@@ -426,7 +426,7 @@ EOF
 )
                     ;;
                 encryptws)
-                     chain_definitions+=$(cat <<EOF
+                     chain_definitions+=$'\n'$(cat <<EOF
 - name: "chain_${service_name}"
   hops:
   - name: "hop_${service_name}"
@@ -456,7 +456,7 @@ EOF
                         nodes_yaml+=$(printf '\n    - name: "node_%s"\n      addr: "%s"\n      connector:\n        type: "relay"\n      dialer:\n        type: "%s"%s' "$node_name" "$node_addr" "$dialer_type" "$peer_dialer_meta")
                     done < "/root/$d_ip.txt"
 
-                    chain_definitions+=$(cat <<EOF
+                    chain_definitions+=$'\n'$(cat <<EOF
 - name: "chain_${service_name}"
   hops:
   - name: "hop_${service_name}"
