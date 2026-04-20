@@ -34,12 +34,19 @@ function check_sys() {
     release="centos"
   fi
   bit=$(uname -m)
-  if test "$bit" != "x86_64"; then
-    echo "请输入你的芯片架构，/386/armv5/armv6/armv7/armv8"
-    read -r bit
-  else
-    bit="amd64"
-  fi
+  case "$bit" in
+    x86_64)  bit="amd64" ;;
+    aarch64) bit="arm64" ;;
+    armv7*)  bit="armv7" ;;
+    armv6*)  bit="armv6" ;;
+    armv5*)  bit="armv5" ;;
+    i386|i686) bit="386" ;;
+    *)
+      echo "未能自动识别芯片架构: $bit"
+      echo "请手动输入 (amd64/arm64/386/armv5/armv6/armv7):"
+      read -r bit
+      ;;
+  esac
 }
 
 function Installation_dependency() {
