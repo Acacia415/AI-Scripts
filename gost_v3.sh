@@ -34,12 +34,19 @@ function check_sys() {
     release="centos"
   fi
   bit=$(uname -m)
-  if test "$bit" != "x86_64"; then
-    echo "请输入你的芯片架构，/386/armv5/armv6/armv7/armv8"
-    read -r bit
-  else
-    bit="amd64"
-  fi
+  case "$bit" in
+    x86_64)  bit="amd64" ;;
+    aarch64) bit="arm64" ;;
+    armv7*)  bit="armv7" ;;
+    armv6*)  bit="armv6" ;;
+    armv5*)  bit="armv5" ;;
+    i386|i686) bit="386" ;;
+    *)
+      echo "未能自动识别芯片架构: $bit"
+      echo "请手动输入 (amd64/arm64/386/armv5/armv6/armv7):"
+      read -r bit
+      ;;
+  esac
 }
 
 function Installation_dependency() {
@@ -284,6 +291,12 @@ EOF
   listener:
     type: "${listener_type}"
 EOF
+                    if [[ "$listener_type" == "wss" ]]; then
+                        cat >> "$gost_conf_path" <<EOF
+    metadata:
+      path: "/ws"
+EOF
+                    fi
                     if [ -f "$HOME/gost_cert/cert.pem" ] && [ -f "$HOME/gost_cert/key.pem" ]; then
                         cat >> "$gost_conf_path" <<EOF
     tls:
@@ -306,6 +319,8 @@ EOF
     type: "relay"
   listener:
     type: "ws"
+    metadata:
+      path: "/ws"
   forwarder:
     nodes:
     - name: "target"
@@ -389,8 +404,12 @@ EOF
                 encrypttls|encryptwss)
                     local dialer_type=${is_encrypt//encrypt/}
                     local tls_dialer_opts=""
+                    local ws_path_opts=""
                     if [[ ${is_cert} == [Yy] ]]; then
                         tls_dialer_opts=$(printf '\n      tls:\n        secure: true\n        serverName: "%s"' "${d_ip}")
+                    fi
+                    if [[ "$dialer_type" == "wss" ]]; then
+                        ws_path_opts=$(printf '\n        metadata:\n          path: "/ws"')
                     fi
                     chain_definitions+=$(cat <<EOF
 - name: "chain_${service_name}"
@@ -402,7 +421,7 @@ EOF
       connector:
         type: "relay"
       dialer:
-        type: "${dialer_type}"${tls_dialer_opts}
+        type: "${dialer_type}"${ws_path_opts}${tls_dialer_opts}
 EOF
 )
                     ;;
@@ -418,6 +437,8 @@ EOF
         type: "relay"
       dialer:
         type: "ws"
+        metadata:
+          path: "/ws"
 EOF
 )
                     ;;
@@ -425,10 +446,14 @@ EOF
                     has_chains=true # This was missing, chains would not be created for peer* types
                     local dialer_type=${is_encrypt//peer/}
                     local nodes_yaml=""
+                    local peer_dialer_meta=""
+                    if [[ "$dialer_type" == "ws" || "$dialer_type" == "wss" ]]; then
+                        peer_dialer_meta=$(printf '\n        metadata:\n          path: "/ws"')
+                    fi
                     while IFS= read -r node_addr; do
                         local node_name
                         node_name=$(echo "$node_addr" | tr ':' '_')
-                        nodes_yaml+=$(printf '\n    - name: "node_%s"\n      addr: "%s"\n      connector:\n        type: "relay"\n      dialer:\n        type: "%s"' "$node_name" "$node_addr" "$dialer_type")
+                        nodes_yaml+=$(printf '\n    - name: "node_%s"\n      addr: "%s"\n      connector:\n        type: "relay"\n      dialer:\n        type: "%s"%s' "$node_name" "$node_addr" "$dialer_type" "$peer_dialer_meta")
                     done < "/root/$d_ip.txt"
 
                     chain_definitions+=$(cat <<EOF

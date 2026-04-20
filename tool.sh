@@ -486,8 +486,9 @@ install_gost_v3() {
     
     # 执行安装流程（增加错误处理和自动清理）
     if wget -O gost_v3.sh https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/gost_v3.sh; then
+        sed -i 's/\r$//' gost_v3.sh 2>/dev/null || dos2unix gost_v3.sh 2>/dev/null
         chmod +x gost_v3.sh
-        ./gost_v3.sh
+        bash gost_v3.sh
         rm -f gost_v3.sh  # 执行后清理脚本
     else
         echo -e "${RED}下载 Gost v3 安装脚本失败！${NC}"
