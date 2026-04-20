@@ -275,10 +275,14 @@ EOF
 - name: "${service_name}"
   addr: ":${s_port}"
   handler:
-    type: "relay"
+    type: "forward"
     chain: "chain_${service_name}"
   listener:
     type: "tcp"
+  forwarder:
+    nodes:
+    - name: "target"
+      addr: "${d_ip}:${d_port}"
 EOF
                     ;;
                 decrypttls|decryptwss)
