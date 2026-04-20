@@ -63,8 +63,26 @@ check_dependencies() {
 }
 
 validate_ip() { [[ $1 =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(/([12][0-9]|3[0-2]|[0-9]))?$ ]]; }
+validate_ipv6() { [[ "$1" =~ ^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?$ ]]; }
+validate_ip_any() {
+    if validate_ip "$1"; then echo "v4"; return 0
+    elif validate_ipv6 "$1"; then echo "v6"; return 0
+    else return 1; fi
+}
 validate_port() { [[ $1 =~ ^[0-9]+$ ]] && [ $1 -ge 1 ] && [ $1 -le 65535 ]; }
 pause() { echo ""; read -n 1 -s -r -p "按任意键继续..."; echo ""; }
+
+is_reserved_ip() {
+    local ip="$1"
+    [[ "$ip" =~ ^127\. ]] && return 0
+    [[ "$ip" =~ ^10\. ]] && return 0
+    [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]] && return 0
+    [[ "$ip" =~ ^192\.168\. ]] && return 0
+    [[ "$ip" =~ ^169\.254\. ]] && return 0
+    [[ "$ip" == "::1" ]] && return 0
+    [[ "$ip" =~ ^fe80: ]] && return 0
+    return 1
+}
 
 # ============================================
 # 监控核心功能（作为daemon运行）
@@ -73,13 +91,25 @@ pause() { echo ""; read -n 1 -s -r -p "按任意键继续..."; echo ""; }
 run_monitor() {
     [ -f /etc/ipset.conf ] && ipset restore -! < /etc/ipset.conf
     
-    ipset create whitelist hash:ip timeout 0 2>/dev/null || true
-    ipset create banlist hash:ip timeout 86400 2>/dev/null || true
+    ipset create whitelist hash:net timeout 0 2>/dev/null || true
+    ipset create whitelist_v6 hash:net family inet6 timeout 0 2>/dev/null || true
+    ipset create banlist hash:net timeout 86400 2>/dev/null || true
+    ipset create banlist_v6 hash:net family inet6 timeout 86400 2>/dev/null || true
     iptables -N TRAFFIC_BLOCK 2>/dev/null
     iptables -F TRAFFIC_BLOCK 2>/dev/null
     iptables -C INPUT -j TRAFFIC_BLOCK 2>/dev/null || iptables -I INPUT -j TRAFFIC_BLOCK
     iptables -A TRAFFIC_BLOCK -m set --match-set whitelist src -j ACCEPT
     iptables -A TRAFFIC_BLOCK -m set --match-set banlist src -j DROP
+    ip6tables -N TRAFFIC_BLOCK 2>/dev/null
+    ip6tables -F TRAFFIC_BLOCK 2>/dev/null
+    ip6tables -C INPUT -j TRAFFIC_BLOCK 2>/dev/null || ip6tables -I INPUT -j TRAFFIC_BLOCK
+    ip6tables -A TRAFFIC_BLOCK -m set --match-set whitelist_v6 src -j ACCEPT
+    ip6tables -A TRAFFIC_BLOCK -m set --match-set banlist_v6 src -j DROP
+    
+    # 创建流量统计链
+    iptables -N TRAFFIC_MONITOR 2>/dev/null
+    iptables -F TRAFFIC_MONITOR
+    iptables -C INPUT -j TRAFFIC_MONITOR 2>/dev/null || iptables -A INPUT -j TRAFFIC_MONITOR
     
     INTERFACE=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n1)
     [ -z "$INTERFACE" ] && echo -e "${RED}未找到网卡${NC}" && exit 1
@@ -93,6 +123,8 @@ run_monitor() {
     echo -e "持续时间: ${YELLOW}${DURATION}秒${NC}"
     
     declare -A ip_first_seen
+    declare -A ip_prev_bytes
+    declare -A tracked_ips
     
     while true; do
         RX1=$(cat /sys/class/net/$INTERFACE/statistics/rx_bytes)
@@ -107,8 +139,9 @@ run_monitor() {
         if (( $(echo "$RX_RATE > $LIMIT || $TX_RATE > $LIMIT" | bc -l) )); then
             echo -e "${YELLOW}⚠️  流量超限${NC}"
             
+            # 获取活跃连接的远端IP列表
             if [ -n "$FILTER_PORTS" ]; then
-                IP_LIST=$(ss -ntu state established | gawk -v ports="$FILTER_PORTS" '
+                ACTIVE_IPS=$(ss -ntu state established | gawk -v ports="$FILTER_PORTS" '
                     BEGIN { split(ports, pa, ","); for(i in pa) pmap[pa[i]]=1 }
                     NR > 1 {
                         match($4, /:([0-9]+)$/, lp);
@@ -117,40 +150,105 @@ run_monitor() {
                             ip = gensub(/\[|\]/, "", "g", substr($5, 1, RSTART-1));
                             if(ip != "0.0.0.0" && ip != "::") print ip;
                         }
-                    }' | sort | uniq -c | sort -nr)
+                    }' | sort -u)
             else
-                IP_LIST=$(ss -ntu state established | gawk -v port=22 '
+                ACTIVE_IPS=$(ss -ntu state established | gawk '
                     NR > 1 {
-                        match($5, /:([0-9]+)$/, port_arr);
-                        current_port = port_arr[1];
+                        match($4, /:([0-9]+)$/, lp);
+                        local_port = lp[1];
+                        match($5, /:([0-9]+)$/, rp);
                         ip = gensub(/\[|\]/, "", "g", substr($5, 1, RSTART-1));
-                        if (current_port != port && ip != "0.0.0.0") print ip;
-                    }' | sort | uniq -c | sort -nr)
+                        if(local_port != 22 && ip != "0.0.0.0" && ip != "::") print ip;
+                    }' | sort -u)
             fi
             
-            BAN_IP=$(echo "$IP_LIST" | awk 'NR==1 && $2 != "" {print $2}')
+            # 为每个活跃IP添加iptables统计规则（如果不存在）
+            for ip in $ACTIVE_IPS; do
+                # 去除IPv6映射前缀
+                clean_ip="${ip#::ffff:}"
+                # 跳过保留地址
+                is_reserved_ip "$clean_ip" && continue
+                # 跳过白名单
+                ipset test whitelist "$clean_ip" 2>/dev/null && continue
+                ipset test whitelist_v6 "$clean_ip" 2>/dev/null && continue
+                
+                if [[ -z "${tracked_ips[$clean_ip]}" ]]; then
+                    iptables -A TRAFFIC_MONITOR -s "$clean_ip" -j ACCEPT 2>/dev/null || \
+                    iptables -A TRAFFIC_MONITOR -s "${ip}" -j ACCEPT 2>/dev/null
+                    tracked_ips[$clean_ip]=1
+                    ip_prev_bytes[$clean_ip]=0
+                fi
+            done
             
-            if [[ -n "$BAN_IP" ]] && ! ipset test whitelist "$BAN_IP" &>/dev/null; then
-                ct=$(date +%s)
-                if [[ -z "${ip_first_seen[$BAN_IP]}" ]]; then
-                    ip_first_seen[$BAN_IP]=$ct
-                    echo -e "检测 ${RED}$BAN_IP${NC} 超速"
+            # 读取每个IP的字节计数，计算带宽
+            declare -A ip_bandwidth
+            local max_bw=0
+            local max_bw_ip=""
+            
+            while IFS= read -r line; do
+                local bytes=$(echo "$line" | awk '{print $2}')
+                local src_ip=$(echo "$line" | awk '{print $8}')
+                [ -z "$src_ip" ] || [ "$src_ip" == "0.0.0.0/0" ] && continue
+                src_ip="${src_ip%/32}"
+                
+                local prev=${ip_prev_bytes[$src_ip]:-0}
+                local diff=$((bytes - prev))
+                ip_prev_bytes[$src_ip]=$bytes
+                
+                # 跳过第一次采样（无前值）
+                [ "$prev" -eq 0 ] && continue
+                [ "$diff" -lt 0 ] && diff=0
+                
+                local bw=$(echo "scale=2; $diff / 1048576" | bc)
+                ip_bandwidth[$src_ip]=$bw
+                
+                if (( $(echo "$bw > $max_bw" | bc -l) )); then
+                    max_bw=$bw
+                    max_bw_ip=$src_ip
+                fi
+            done < <(iptables -L TRAFFIC_MONITOR -vnx 2>/dev/null | tail -n +3)
+            
+            # 只对带宽最高且超过阈值的IP进行封禁判定
+            if [[ -n "$max_bw_ip" ]] && (( $(echo "$max_bw > $LIMIT" | bc -l) )); then
+                local ct=$(date +%s)
+                if [[ -z "${ip_first_seen[$max_bw_ip]}" ]]; then
+                    ip_first_seen[$max_bw_ip]=$ct
+                    echo -e "检测 ${RED}$max_bw_ip${NC} 超速 (${max_bw}MB/s)"
                 else
-                    dur=$(( ct - ip_first_seen[$BAN_IP] ))
+                    local dur=$(( ct - ip_first_seen[$max_bw_ip] ))
                     if (( dur >= DURATION )); then
-                        # 去除IPv6映射前缀
-                        CLEAN_IP="${BAN_IP#::ffff:}"
-                        echo -e "${RED}🚫 封禁 $CLEAN_IP (${dur}秒)${NC}"
-                        ipset add banlist "$CLEAN_IP" timeout 86400
-                        echo "[BAN]|$(date '+%Y-%m-%d %H:%M:%S')|$CLEAN_IP|RX:${RX_RATE}MB/s|TX:${TX_RATE}MB/s|持续:${dur}秒" >> "$LOG_FILE"
-                        unset ip_first_seen[$BAN_IP]
+                        echo -e "${RED}🚫 封禁 $max_bw_ip (${dur}秒, ${max_bw}MB/s)${NC}"
+                        if validate_ipv6 "$max_bw_ip"; then
+                            ipset add banlist_v6 "$max_bw_ip" timeout 86400 2>/dev/null
+                        else
+                            ipset add banlist "$max_bw_ip" timeout 86400 2>/dev/null
+                        fi
+                        echo "[BAN]|$(date '+%Y-%m-%d %H:%M:%S')|$max_bw_ip|IP带宽:${max_bw}MB/s|总RX:${RX_RATE}MB/s|总TX:${TX_RATE}MB/s|持续:${dur}秒" >> "$LOG_FILE"
+                        # 清理该IP的统计规则
+                        iptables -D TRAFFIC_MONITOR -s "$max_bw_ip" -j ACCEPT 2>/dev/null
+                        iptables -D TRAFFIC_MONITOR -s "${max_bw_ip}/32" -j ACCEPT 2>/dev/null
+                        unset ip_first_seen[$max_bw_ip]
+                        unset tracked_ips[$max_bw_ip]
+                        unset ip_prev_bytes[$max_bw_ip]
                     else
-                        echo -e "${YELLOW}$BAN_IP 超速 ${dur}秒 (需${DURATION}秒)${NC}"
+                        echo -e "${YELLOW}$max_bw_ip 超速 ${dur}秒/${DURATION}秒 (${max_bw}MB/s)${NC}"
                     fi
                 fi
+            else
+                # 没有单个IP超限，清除所有计时
+                for k in "${!ip_first_seen[@]}"; do
+                    unset ip_first_seen[$k]
+                done
             fi
         else
-            ip_first_seen=()
+            # 总带宽正常，重置状态
+            for k in "${!ip_first_seen[@]}"; do
+                unset ip_first_seen[$k]
+            done
+            # 定期清理不活跃的统计规则（每次总带宽正常时）
+            iptables -F TRAFFIC_MONITOR 2>/dev/null
+            tracked_ips=()
+            ip_prev_bytes=()
         fi
         sleep 0.5
     done
@@ -206,8 +304,33 @@ install_monitor() {
     echo -e "${GREEN}✓ 持续时间: ${dur}秒${NC}"
     
     echo -e "\n${CYAN}[4/5] 白名单${NC}"
-    ipset create whitelist hash:ip 2>/dev/null || true
-    read -p "添加白名单? [y/N] " aw
+    ipset create whitelist hash:net 2>/dev/null || true
+    ipset create whitelist_v6 hash:net family inet6 2>/dev/null || true
+    ipset create banlist hash:net timeout 86400 2>/dev/null || true
+    ipset create banlist_v6 hash:net family inet6 timeout 86400 2>/dev/null || true
+    
+    # 自动添加本地地址
+    ipset add whitelist 127.0.0.1 2>/dev/null
+    ipset add whitelist_v6 ::1 2>/dev/null
+    echo -e "${GREEN}✓ 已自动添加 127.0.0.1 和 ::1${NC}"
+    
+    # 检测当前SSH连接IP
+    local ssh_ip=$(echo "$SSH_CLIENT" | awk '{print $1}')
+    if [ -n "$ssh_ip" ]; then
+        echo -e "${YELLOW}检测到当前SSH连接IP: ${NC}${GREEN}$ssh_ip${NC}"
+        read -p "添加到白名单? [Y/n] " add_ssh
+        if [[ ! "${add_ssh,,}" == "n" ]]; then
+            local ver=$(validate_ip_any "$ssh_ip")
+            if [ $? -eq 0 ] && [ "$ver" == "v6" ]; then
+                ipset add whitelist_v6 "$ssh_ip" 2>/dev/null
+            else
+                ipset add whitelist "$ssh_ip" 2>/dev/null
+            fi
+            echo -e "${GREEN}✓ 已添加 $ssh_ip${NC}"
+        fi
+    fi
+    
+    read -p "添加更多白名单? [y/N] " aw
     [[ "${aw,,}" == "y" ]] && add_whitelist_batch
     
     mkdir -p /etc/ipset
@@ -259,8 +382,16 @@ uninstall_monitor() {
     iptables -D INPUT -j TRAFFIC_BLOCK 2>/dev/null || true
     iptables -F TRAFFIC_BLOCK 2>/dev/null || true
     iptables -X TRAFFIC_BLOCK 2>/dev/null || true
+    iptables -D INPUT -j TRAFFIC_MONITOR 2>/dev/null || true
+    iptables -F TRAFFIC_MONITOR 2>/dev/null || true
+    iptables -X TRAFFIC_MONITOR 2>/dev/null || true
+    ip6tables -D INPUT -j TRAFFIC_BLOCK 2>/dev/null || true
+    ip6tables -F TRAFFIC_BLOCK 2>/dev/null || true
+    ip6tables -X TRAFFIC_BLOCK 2>/dev/null || true
     ipset flush whitelist 2>/dev/null && ipset destroy whitelist 2>/dev/null || true
+    ipset flush whitelist_v6 2>/dev/null && ipset destroy whitelist_v6 2>/dev/null || true
     ipset flush banlist 2>/dev/null && ipset destroy banlist 2>/dev/null || true
+    ipset flush banlist_v6 2>/dev/null && ipset destroy banlist_v6 2>/dev/null || true
     rm -rf "$CONFIG_DIR"
     rm -f /etc/ipset.conf /etc/logrotate.d/iptables_ban
     systemctl daemon-reload
@@ -347,13 +478,20 @@ manage_ports() {
 # ============================================
 
 add_whitelist_batch() {
-    echo -e "${CYAN}输入IP(空格分隔, 0结束):${NC}"
+    echo -e "${CYAN}输入IP或网段(如 1.2.3.4 或 183.135.0.0/16, 空格分隔, 0结束):${NC}"
     while read -p "IP: " ips; do
         [ "$ips" == "0" ] && break
         for ip in $ips; do
-            validate_ip "$ip" && {
-                ipset add whitelist "$ip" 2>/dev/null && echo -e "${GREEN}✓ $ip${NC}" || echo -e "${YELLOW}已存在: $ip${NC}"
-            } || echo -e "${RED}✗ 无效: $ip${NC}"
+            local ver=$(validate_ip_any "$ip")
+            if [ $? -eq 0 ]; then
+                if [ "$ver" == "v6" ]; then
+                    ipset add whitelist_v6 "$ip" 2>/dev/null && echo -e "${GREEN}✓ $ip (IPv6)${NC}" || echo -e "${YELLOW}已存在: $ip${NC}"
+                else
+                    ipset add whitelist "$ip" 2>/dev/null && echo -e "${GREEN}✓ $ip (IPv4)${NC}" || echo -e "${YELLOW}已存在: $ip${NC}"
+                fi
+            else
+                echo -e "${RED}✗ 无效: $ip${NC}"
+            fi
         done
     done
     ipset save > /etc/ipset.conf
@@ -365,27 +503,36 @@ manage_whitelist() {
         echo -e "${CYAN}════════════════════════════════${NC}"
         echo -e "${GREEN}    白名单管理${NC}"
         echo -e "${CYAN}════════════════════════════════${NC}\n"
-        ipset list whitelist &>/dev/null || ipset create whitelist hash:ip 2>/dev/null
+        ipset list whitelist &>/dev/null || ipset create whitelist hash:net 2>/dev/null
+        ipset list whitelist_v6 &>/dev/null || ipset create whitelist_v6 hash:net family inet6 2>/dev/null
         echo -e "${CYAN}1.${NC} 添加IP\n${CYAN}2.${NC} 查看列表\n${CYAN}3.${NC} 删除IP\n${CYAN}0.${NC} 返回\n"
         read -p "选择: " c
         case $c in
             1) add_whitelist_batch; pause ;;
-            2) echo -e "\n${YELLOW}白名单:${NC}"; ipset list whitelist | grep -E '^[0-9]' | nl; pause ;;
+            2)
+                echo -e "\n${YELLOW}白名单 (IPv4):${NC}"
+                local v4_list=$(ipset list whitelist | grep -E '^[0-9]')
+                [ -n "$v4_list" ] && echo "$v4_list" | nl || echo -e "  ${YELLOW}(空)${NC}"
+                echo -e "\n${YELLOW}白名单 (IPv6):${NC}"
+                local v6_list=$(ipset list whitelist_v6 | grep -E '^[0-9a-fA-F]')
+                [ -n "$v6_list" ] && echo "$v6_list" | nl || echo -e "  ${YELLOW}(空)${NC}"
+                pause
+                ;;
             3)
-                list=$(ipset list whitelist | grep -E '^[0-9]')
-                [ -z "$list" ] && { echo -e "${YELLOW}空${NC}"; pause; continue; }
-                echo "$list" | nl
-                echo -e "\n${YELLOW}输入序号或IP(空格分隔): ${NC}"
-                read -p "序号/IP: " inputs
-                mapfile -t ip_array < <(echo "$list" | awk '{print $1}')
+                echo -e "\n${YELLOW}IPv4:${NC}"
+                local v4=$(ipset list whitelist | grep -E '^[0-9]')
+                [ -n "$v4" ] && echo "$v4" | nl || echo -e "  (空)"
+                echo -e "\n${YELLOW}IPv6:${NC}"
+                local v6=$(ipset list whitelist_v6 | grep -E '^[0-9a-fA-F]')
+                [ -n "$v6" ] && echo "$v6" | nl || echo -e "  (空)"
+                [ -z "$v4" ] && [ -z "$v6" ] && { echo -e "${YELLOW}白名单为空${NC}"; pause; continue; }
+                echo -e "\n${YELLOW}输入IP地址(空格分隔): ${NC}"
+                read -p "IP: " inputs
                 for input in $inputs; do
-                    if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1 ] && [ "$input" -le "${#ip_array[@]}" ]; then
-                        # 序号
-                        idx=$((input - 1))
-                        ip="${ip_array[$idx]}"
-                        ipset del whitelist "$ip" 2>/dev/null && echo -e "${GREEN}✓ [$input] $ip${NC}" || echo -e "${RED}✗ $ip${NC}"
+                    local ver=$(validate_ip_any "$input")
+                    if [ $? -eq 0 ] && [ "$ver" == "v6" ]; then
+                        ipset del whitelist_v6 "$input" 2>/dev/null && echo -e "${GREEN}✓ $input${NC}" || echo -e "${RED}✗ $input${NC}"
                     else
-                        # IP地址
                         ipset del whitelist "$input" 2>/dev/null && echo -e "${GREEN}✓ $input${NC}" || echo -e "${RED}✗ $input${NC}"
                     fi
                 done
@@ -403,37 +550,55 @@ manage_blacklist() {
         echo -e "${CYAN}════════════════════════════════${NC}"
         echo -e "${GREEN}    黑名单管理${NC}"
         echo -e "${CYAN}════════════════════════════════${NC}\n"
-        ipset list banlist &>/dev/null || ipset create banlist hash:ip timeout 86400 2>/dev/null
+        ipset list banlist &>/dev/null || ipset create banlist hash:net timeout 86400 2>/dev/null
+        ipset list banlist_v6 &>/dev/null || ipset create banlist_v6 hash:net family inet6 timeout 86400 2>/dev/null
         echo -e "${CYAN}1.${NC} 添加IP\n${CYAN}2.${NC} 查看列表\n${CYAN}3.${NC} 删除IP\n${CYAN}0.${NC} 返回\n"
         read -p "选择: " c
         case $c in
             1)
-                echo -e "\n${YELLOW}输入IP(空格分隔, 0结束):${NC}"
+                echo -e "\n${YELLOW}输入IP(支持IPv4/IPv6, 空格分隔, 0结束):${NC}"
                 while read -p "IP: " ips; do
                     [ "$ips" == "0" ] && break
                     for ip in $ips; do
-                        validate_ip "$ip" && ipset add banlist "$ip" timeout 86400 2>/dev/null && echo -e "${GREEN}✓ $ip${NC}" || echo -e "${RED}✗ $ip${NC}"
+                        local ver=$(validate_ip_any "$ip")
+                        if [ $? -eq 0 ]; then
+                            if [ "$ver" == "v6" ]; then
+                                ipset add banlist_v6 "$ip" timeout 86400 2>/dev/null && echo -e "${GREEN}✓ $ip (IPv6)${NC}" || echo -e "${RED}✗ $ip${NC}"
+                            else
+                                ipset add banlist "$ip" timeout 86400 2>/dev/null && echo -e "${GREEN}✓ $ip (IPv4)${NC}" || echo -e "${RED}✗ $ip${NC}"
+                            fi
+                        else
+                            echo -e "${RED}✗ 无效: $ip${NC}"
+                        fi
                     done
                 done
                 ipset save > /etc/ipset.conf
                 pause
                 ;;
-            2) echo -e "\n${YELLOW}黑名单:${NC}"; ipset list banlist | grep -E '^[0-9]' | nl; pause ;;
+            2)
+                echo -e "\n${YELLOW}黑名单 (IPv4):${NC}"
+                local v4_list=$(ipset list banlist | grep -E '^[0-9]')
+                [ -n "$v4_list" ] && echo "$v4_list" | nl || echo -e "  ${YELLOW}(空)${NC}"
+                echo -e "\n${YELLOW}黑名单 (IPv6):${NC}"
+                local v6_list=$(ipset list banlist_v6 | grep -E '^[0-9a-fA-F]')
+                [ -n "$v6_list" ] && echo "$v6_list" | nl || echo -e "  ${YELLOW}(空)${NC}"
+                pause
+                ;;
             3)
-                list=$(ipset list banlist | grep -E '^[0-9]')
-                [ -z "$list" ] && { echo -e "${YELLOW}空${NC}"; pause; continue; }
-                echo "$list" | nl
-                echo -e "\n${YELLOW}输入序号或IP(空格分隔): ${NC}"
-                read -p "序号/IP: " inputs
-                mapfile -t ip_array < <(echo "$list" | awk '{print $1}')
+                echo -e "\n${YELLOW}IPv4:${NC}"
+                local v4=$(ipset list banlist | grep -E '^[0-9]')
+                [ -n "$v4" ] && echo "$v4" | nl || echo -e "  (空)"
+                echo -e "\n${YELLOW}IPv6:${NC}"
+                local v6=$(ipset list banlist_v6 | grep -E '^[0-9a-fA-F]')
+                [ -n "$v6" ] && echo "$v6" | nl || echo -e "  (空)"
+                [ -z "$v4" ] && [ -z "$v6" ] && { echo -e "${YELLOW}黑名单为空${NC}"; pause; continue; }
+                echo -e "\n${YELLOW}输入IP地址(空格分隔): ${NC}"
+                read -p "IP: " inputs
                 for input in $inputs; do
-                    if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1 ] && [ "$input" -le "${#ip_array[@]}" ]; then
-                        # 序号
-                        idx=$((input - 1))
-                        ip="${ip_array[$idx]}"
-                        ipset del banlist "$ip" 2>/dev/null && echo -e "${GREEN}✓ [$input] $ip${NC}" || echo -e "${RED}✗ $ip${NC}"
+                    local ver=$(validate_ip_any "$input")
+                    if [ $? -eq 0 ] && [ "$ver" == "v6" ]; then
+                        ipset del banlist_v6 "$input" 2>/dev/null && echo -e "${GREEN}✓ $input${NC}" || echo -e "${RED}✗ $input${NC}"
                     else
-                        # IP地址
                         ipset del banlist "$input" 2>/dev/null && echo -e "${GREEN}✓ $input${NC}" || echo -e "${RED}✗ $input${NC}"
                     fi
                 done
@@ -955,8 +1120,28 @@ manage_logs() {
         echo -e "${CYAN}1.${NC} 查看全部\n${CYAN}2.${NC} 查看最近\n${CYAN}3.${NC} 清空日志\n${CYAN}0.${NC} 返回\n"
         read -p "选择: " c
         case $c in
-            1) [ -f "$LOG_FILE" ] && { echo -e "\n${YELLOW}封禁记录:${NC}"; grep '^\[BAN\]' "$LOG_FILE" | nl | tail -50; } || echo -e "${YELLOW}无日志${NC}"; pause ;;
-            2) [ -f "$LOG_FILE" ] && { echo -e "\n${YELLOW}最近10条:${NC}"; grep '^\[BAN\]' "$LOG_FILE" | tail -10 | nl; } || echo -e "${YELLOW}无日志${NC}"; pause ;;
+            1)
+                if [ -f "$LOG_FILE" ]; then
+                    echo -e "\n${YELLOW}封禁记录:${NC}"
+                    grep '^\[BAN\]' "$LOG_FILE" | tail -50 | awk -F'|' '{
+                        printf "  %s  %-16s  %-18s  %-20s  %-20s  %s\n", $2, $3, $4, $5, $6, $7
+                    }'
+                else
+                    echo -e "${YELLOW}无日志${NC}"
+                fi
+                pause
+                ;;
+            2)
+                if [ -f "$LOG_FILE" ]; then
+                    echo -e "\n${YELLOW}最近10条:${NC}"
+                    grep '^\[BAN\]' "$LOG_FILE" | tail -10 | awk -F'|' '{
+                        printf "  %s  %-16s  %-18s  %-20s  %-20s  %s\n", $2, $3, $4, $5, $6, $7
+                    }'
+                else
+                    echo -e "${YELLOW}无日志${NC}"
+                fi
+                pause
+                ;;
             3) read -p "确认清空? [y/N] " cf; [[ "$cf" =~ [yY] ]] && > "$LOG_FILE" && echo -e "${GREEN}✓ 已清空${NC}"; pause ;;
             0) return ;;
         esac

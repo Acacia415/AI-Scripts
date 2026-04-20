@@ -97,8 +97,8 @@ resolve_domain() {
         return 0
     fi
     
-    # 解析域名
-    print_info "正在解析域名: $domain"
+    # 解析域名（日志输出到stderr，避免污染stdout的返回值）
+    print_info "正在解析域名: $domain" >&2
     ip=$(nslookup "$domain" 2>/dev/null | grep -A1 "Name:" | grep "Address:" | tail -1 | awk '{print $2}')
     
     if [[ -z "$ip" ]]; then
@@ -107,11 +107,11 @@ resolve_domain() {
     fi
     
     if [[ -z "$ip" ]]; then
-        print_error "无法解析域名: $domain"
+        print_error "无法解析域名: $domain" >&2
         return 1
     fi
     
-    print_info "域名解析成功: $domain -> $ip"
+    print_info "域名解析成功: $domain -> $ip" >&2
     echo "$ip"
     return 0
 }
