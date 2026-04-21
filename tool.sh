@@ -733,6 +733,26 @@ install_hexo_butterfly() {
     fi
 }
 
+# ======================= 安装 AnyTLS =======================
+install_anytls() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/anytls.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/anytls.sh; then
+        sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
+        chmod +x "$install_script"
+        bash "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载 AnyTLS 安装脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
 # ======================= 脚本更新 =======================
 update_script() {
   echo -e "${YELLOW}开始更新脚本...${NC}"
@@ -855,6 +875,7 @@ main_menu() {
     echo "14. 开放所有端口                       30. 重装系统"
     echo "15. 时间同步                           31. 部署Hexo博客"
     echo "16. Caddy反代管理                      32. 安装Hexo_butterfly主题"
+    echo "                                       33. 安装 AnyTLS"
     echo -e "${YELLOW}==========================================================================${NC}"
     echo "0. 退出脚本"
     echo -e "${YELLOW}-------------------------------------------------------------------------${NC}"
@@ -989,6 +1010,10 @@ main_menu() {
         ;;
       32)
         install_hexo_butterfly
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      33)
+        install_anytls
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       99)  
