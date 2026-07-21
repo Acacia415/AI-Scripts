@@ -753,6 +753,26 @@ install_anytls() {
     fi
 }
 
+# ======================= SaveAnyBot管理 =======================
+saveanybot_manager() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    
+    local install_script="/tmp/saveanybot-manager.sh"
+    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/saveanybot-manager.sh; then
+        sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
+        chmod +x "$install_script"
+        bash "$install_script"
+        rm -f "$install_script"
+    else
+        echo -e "${RED}下载 SaveAnyBot 管理脚本失败！${NC}"
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
 # ======================= 脚本更新 =======================
 update_script() {
   echo -e "${YELLOW}开始更新脚本...${NC}"
@@ -875,7 +895,7 @@ main_menu() {
     echo "14. 开放所有端口                       31. 部署Hexo博客"
     echo "15. 时间同步                           32. 安装Hexo_butterfly主题"
     echo "16. Caddy反代管理                      33. 安装 AnyTLS"
-    echo "17. Nginx管理"
+    echo "17. Nginx管理                          34. SaveAnyBot管理"
     echo -e "${YELLOW}==========================================================================${NC}"
     echo "0. 退出脚本"
     echo -e "${YELLOW}-------------------------------------------------------------------------${NC}"
@@ -1014,6 +1034,10 @@ main_menu() {
         ;;
       33)
         install_anytls
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      34)
+        saveanybot_manager
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       99)  
