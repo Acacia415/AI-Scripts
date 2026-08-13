@@ -1,14 +1,15 @@
 #!/bin/bash
 
+set -o pipefail
+
 # ImgHub Bot 一键安装脚本
 # 支持系统: Debian/Ubuntu 及其衍生版
 
 # --- 配置 ---
 PYTHON_SCRIPT_PATH="/opt/imghub_bot/imghub_bot.py"
 PYTHON_SCRIPT_DIR=$(dirname "${PYTHON_SCRIPT_PATH}")
-CONFIG_FILE_PATH="/root/imghub_config.ini"
+CONFIG_FILE_PATH="/etc/imghub/config.ini"
 DATA_DIR="/var/lib/imghub"
-LOG_FILE="/var/log/imghub.log" # Python脚本内指定的日志文件
 SERVICE_NAME="imghub_bot"
 
 # --- 颜色定义 ---
@@ -25,6 +26,7 @@ import json
 import logging
 import asyncio
 import configparser
+import tempfile
 from datetime import datetime
 from signal import SIGTERM # Not directly used in this version for shutdown, but good for reference
 from telegram import Update, Bot, InputFile
@@ -43,16 +45,14 @@ from pathlib import Path # <--- 确保导入 pathlib
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/var/log/imghub.log'), # Ensure this path is writable by the user running the script
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
 # 全局配置
-CONFIG_PATH = '/root/imghub_config.ini' # This is read by the script
+CONFIG_PATH = '/etc/imghub/config.ini'
 BASE_URL_FALLBACK = "https://example.com" # Fallback, should be overridden by config
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 class BotConfigError(Exception):
     """自定义配置异常"""
@@ -92,8 +92,13 @@ class ImageHostingService:
         """保存记录到文件"""
         try:
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-            with open(self.db_path, 'w') as f:
-                json.dump(self.file_records, f, indent=4) # Added indent for readability
+            db_dir = os.path.dirname(self.db_path)
+            with tempfile.NamedTemporaryFile('w', dir=db_dir, delete=False) as f:
+                json.dump(self.file_records, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+                temp_name = f.name
+            os.replace(temp_name, self.db_path)
             logger.info(f"成功保存了 {len(self.file_records)} 条文件记录")
         except Exception as e:
             logger.error(f"保存记录失败: {str(e)}")
@@ -147,9 +152,9 @@ class ImageHostingService:
         """启动Web服务器（异步版本）"""
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
-        self.site = web.TCPSite(self.runner, '0.0.0.0', 8080) # Listens on port 8080
+        self.site = web.TCPSite(self.runner, '127.0.0.1', 8080)
         await self.site.start()
-        logger.info("Web服务器已启动在 0.0.0.0:8080")
+        logger.info("Web服务器已启动在 127.0.0.1:8080")
 
         # 定期保存记录
         while True:
@@ -265,6 +270,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("❌ 未经授权的用户，无法上传图片。")
         return
 
+    downloaded_file_path_str = None
     try:
         bot: Bot = context.bot
         img_service: ImageHostingService = context.bot_data['img_service']
@@ -291,12 +297,19 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         if update.message.photo:
             logger.info("📷 收到照片")
-            file_to_process = await update.message.photo[-1].get_file()
+            photo = update.message.photo[-1]
+            if photo.file_size and photo.file_size > MAX_UPLOAD_BYTES:
+                await update.message.reply_text("❌ 文件超过 20 MiB 限制。")
+                return
+            file_to_process = await photo.get_file()
             mime_type = "image/jpeg" # Telegram converts photos to jpeg
             file_name_for_caption = f"photo_{file_to_process.file_unique_id}.jpg"
         elif update.message.document:
             doc = update.message.document
             logger.info(f"📎 收到文档: {doc.file_name}, MIME: {doc.mime_type}")
+            if doc.file_size and doc.file_size > MAX_UPLOAD_BYTES:
+                await update.message.reply_text("❌ 文件超过 20 MiB 限制。")
+                return
             file_name_for_caption = doc.file_name or f"document_{doc.file_unique_id}"
             
             # Check for supported image MIME types for documents
@@ -463,6 +476,12 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as e:
         logger.error(f"❗媒体处理异常: {str(e)}", exc_info=True)
         await update.message.reply_text("⚠️ 上传过程中发生内部错误，请稍后重试。")
+    finally:
+        if downloaded_file_path_str and os.path.exists(downloaded_file_path_str):
+            try:
+                os.remove(downloaded_file_path_str)
+            except OSError as cleanup_error:
+                logger.error(f"清理临时文件失败: {cleanup_error}")
 
 
 def setup_handlers(application: Application) -> None:
@@ -601,14 +620,19 @@ Description=ImgHub Telegram Bot Service
 After=network.target
 
 [Service]
-User=root
-Group=root
+User=imghub
+Group=imghub
 WorkingDirectory=${PYTHON_SCRIPT_DIR}
-ExecStart=/usr/bin/python3 ${PYTHON_SCRIPT_PATH}
+ExecStart=${PYTHON_SCRIPT_DIR}/venv/bin/python ${PYTHON_SCRIPT_PATH}
 Restart=always
 RestartSec=5
-StandardOutput=append:${LOG_FILE} # 将标准输出追加到日志文件
-StandardError=append:${LOG_FILE}  # 将标准错误追加到日志文件
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=${DATA_DIR}
 # 考虑增加 TimeoutStopSec=30 来给与程序足够的时间来优雅关闭
 # Environment="PYTHONUNBUFFERED=1" # 可选，用于无缓冲输出
 
@@ -639,8 +663,9 @@ install_dependencies() {
     fi
 
     echo -e "${GREEN}正在安装 Python 依赖 (python-telegram-bot[job-queue], aiohttp)...${NC}"
-    # 使用 --break-system-packages (用户要求)
-    if ! pip3 install "python-telegram-bot[job-queue]" aiohttp --break-system-packages; then
+    mkdir -p "${PYTHON_SCRIPT_DIR}"
+    python3 -m venv "${PYTHON_SCRIPT_DIR}/venv"
+    if ! "${PYTHON_SCRIPT_DIR}/venv/bin/pip" install --upgrade pip "python-telegram-bot[job-queue]" aiohttp; then
         echo -e "${RED}错误：无法安装 Python 依赖。${NC}"
         exit 1
     fi
@@ -652,11 +677,12 @@ setup_config_interactive() {
     
     local bot_token
     while true; do
-        read -p "请输入您的 Telegram Bot Token: " bot_token
-        if [[ -n "${bot_token}" ]]; then
+        read -r -s -p "请输入您的 Telegram Bot Token: " bot_token
+        echo
+        if [[ "${bot_token}" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; then
             break
         else
-            echo -e "${RED}Bot Token 不能为空，请重新输入。${NC}"
+            echo -e "${RED}Bot Token 格式无效，请重新输入。${NC}"
         fi
     done
 
@@ -678,6 +704,10 @@ setup_config_interactive() {
     # 清理用户名格式（去掉可能的@符号，保持一致性）
     if [[ -n "${channel_username}" ]]; then
         channel_username="${channel_username#@}"  # 去掉开头的@
+        if [[ ! "${channel_username}" =~ ^[A-Za-z0-9_]{5,32}$ ]]; then
+            echo -e "${RED}频道用户名格式无效。${NC}"
+            return 1
+        fi
         echo -e "${GREEN}已设置公开频道用户名: @${channel_username}${NC}"
     else
         echo -e "${YELLOW}未设置用户名，将作为私有频道处理${NC}"
@@ -700,7 +730,7 @@ setup_config_interactive() {
     local base_url
     while true; do
         read -p "请输入您图床的完整基础 URL (必须以 http:// 或 https:// 开头, 例如 https://img.yourdomain.com): " base_url
-        if [[ "${base_url}" =~ ^https?:// ]]; then
+        if [[ "${base_url}" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[-A-Za-z0-9._~/?#=&%]*)?$ ]]; then
             break
         else
             echo -e "${RED}基础 URL 格式不正确，必须以 http:// 或 https:// 开头。请重新输入。${NC}"
@@ -721,13 +751,24 @@ allowed_users = ${allowed_users}
 base_url = ${base_url}
 EOL
     # 设置配置文件权限，确保root可读写，其他用户无权访问
-    chmod 600 "${CONFIG_FILE_PATH}"
+    chown root:imghub "${CONFIG_FILE_PATH}"
+    chmod 640 "${CONFIG_FILE_PATH}"
     echo -e "${GREEN}配置文件已生成并设置权限。${NC}"
 }
 
 # --- 主逻辑 ---
 main() {
     check_root
+
+    local backup_dir
+    backup_dir="/var/backups/ai-scripts/imghub/$(date +%Y%m%d-%H%M%S)"
+    install -d -m 700 "$backup_dir"
+    [[ -f $PYTHON_SCRIPT_PATH ]] && cp -a "$PYTHON_SCRIPT_PATH" "$backup_dir/" || touch "$backup_dir/no-python-script"
+    [[ -f $CONFIG_FILE_PATH ]] && cp -a "$CONFIG_FILE_PATH" "$backup_dir/" || touch "$backup_dir/no-config"
+    [[ -f /etc/systemd/system/${SERVICE_NAME}.service ]] && cp -a "/etc/systemd/system/${SERVICE_NAME}.service" "$backup_dir/" || touch "$backup_dir/no-service"
+    systemctl is-active --quiet "${SERVICE_NAME}.service" 2>/dev/null && touch "$backup_dir/service-active"
+    systemctl is-enabled --quiet "${SERVICE_NAME}.service" 2>/dev/null && touch "$backup_dir/service-enabled"
+    id imghub >/dev/null 2>&1 || useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin imghub
 
     echo -e "${GREEN}开始安装 ImgHub Bot...${NC}"
 
@@ -742,7 +783,9 @@ main() {
             # 备份现有数据
             if [ -f "/var/lib/imghub/records.json" ]; then
                 echo -e "${YELLOW}正在备份现有记录...${NC}"
-                cp /var/lib/imghub/records.json /var/lib/imghub/records.json.bak.$(date +%Y%m%d_%H%M%S)
+                local records_backup
+                records_backup="/var/lib/imghub/records.json.bak.$(date +%Y%m%d_%H%M%S)"
+                cp /var/lib/imghub/records.json "$records_backup"
             fi
         else
             echo -e "${RED}安装已取消。${NC}"
@@ -754,20 +797,40 @@ main() {
 
     echo -e "${GREEN}正在创建数据目录: ${DATA_DIR}${NC}"
     mkdir -p "${DATA_DIR}"
+    chown imghub:imghub "${DATA_DIR}"
     # 可选：设置数据目录权限，如果服务不是以root运行，需要调整
     # chown youruser:yourgroup "${DATA_DIR}"
 
     echo -e "${GREEN}正在创建 Python 脚本目录: ${PYTHON_SCRIPT_DIR}${NC}"
     mkdir -p "${PYTHON_SCRIPT_DIR}"
+    mkdir -p "$(dirname "$CONFIG_FILE_PATH")"
 
     echo -e "${GREEN}正在写入 Python 脚本到: ${PYTHON_SCRIPT_PATH}${NC}"
-    echo "${PYTHON_SCRIPT_CONTENT}" > "${PYTHON_SCRIPT_PATH}"
-    chmod +x "${PYTHON_SCRIPT_PATH}" # 使脚本可执行
+    if ! printf '%s\n' "${PYTHON_SCRIPT_CONTENT}" | "${PYTHON_SCRIPT_DIR}/venv/bin/python" -c 'import ast,sys; ast.parse(sys.stdin.read())'; then
+        echo -e "${RED}内嵌 Python 脚本语法检查失败，原文件未覆盖。${NC}"
+        return 1
+    fi
+    local python_tmp
+    python_tmp=$(mktemp "${PYTHON_SCRIPT_DIR}/.imghub_bot.XXXXXX") || return 1
+    printf '%s\n' "${PYTHON_SCRIPT_CONTENT}" > "$python_tmp"
+    chmod 755 "$python_tmp"
+    mv -f -- "$python_tmp" "${PYTHON_SCRIPT_PATH}"
 
-    setup_config_interactive # 调用交互式配置
+    if [[ -f "$CONFIG_FILE_PATH" ]]; then
+        read -r -p "检测到现有配置，是否重新配置？[y/N]: " reconfigure
+        if [[ "$reconfigure" =~ ^[Yy]$ ]]; then setup_config_interactive || return 1; else echo -e "${YELLOW}已保留现有配置。${NC}"; fi
+    else
+        setup_config_interactive || return 1
+    fi
 
     echo -e "${GREEN}正在创建 Systemd 服务 (${SERVICE_NAME}.service)...${NC}"
-    echo "${SYSTEMD_SERVICE_CONTENT}" > "/etc/systemd/system/${SERVICE_NAME}.service"
+    printf '%s\n' "${SYSTEMD_SERVICE_CONTENT}" > "/etc/systemd/system/${SERVICE_NAME}.service"
+    if command -v systemd-analyze >/dev/null 2>&1 && ! systemd-analyze verify "/etc/systemd/system/${SERVICE_NAME}.service"; then
+        echo -e "${RED}systemd 服务文件校验失败，正在恢复。${NC}"
+        [[ -f "$backup_dir/${SERVICE_NAME}.service" ]] && cp -a "$backup_dir/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service" || rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+        systemctl daemon-reload
+        return 1
+    fi
 
     echo -e "${GREEN}重新加载 Systemd 守护进程...${NC}"
     systemctl daemon-reload
@@ -781,15 +844,23 @@ main() {
     else
         echo -e "${RED}错误：${SERVICE_NAME} 服务启动失败。请检查日志。${NC}"
         echo -e "${YELLOW}您可以使用 'journalctl -u ${SERVICE_NAME} -n 100 --no-pager' 查看服务日志。${NC}"
-        echo -e "${YELLOW}同时检查Python脚本日志 '${LOG_FILE}'。${NC}"
-        exit 1
+        echo -e "${YELLOW}同时检查：journalctl -u ${SERVICE_NAME} -n 100 --no-pager${NC}"
+        [[ -f "$backup_dir/imghub_bot.py" ]] && cp -a "$backup_dir/imghub_bot.py" "$PYTHON_SCRIPT_PATH" || rm -f "$PYTHON_SCRIPT_PATH"
+        [[ -f "$backup_dir/config.ini" ]] && cp -a "$backup_dir/config.ini" "$CONFIG_FILE_PATH" || rm -f "$CONFIG_FILE_PATH"
+        [[ -f "$backup_dir/${SERVICE_NAME}.service" ]] && cp -a "$backup_dir/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service" || rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+        systemctl daemon-reload
+        if [[ -f "$backup_dir/service-enabled" ]]; then systemctl enable "${SERVICE_NAME}.service" 2>/dev/null || true; else systemctl disable "${SERVICE_NAME}.service" 2>/dev/null || true; fi
+        if [[ -f "$backup_dir/service-active" ]]; then systemctl restart "${SERVICE_NAME}.service" 2>/dev/null || true; fi
+        echo -e "${YELLOW}已从 $backup_dir 恢复安装前文件。${NC}"
+        return 1
     fi
 
     echo -e "\n${GREEN}🎉 ImgHub Bot 安装和初步配置完成！ 🎉${NC}\n"
+    echo -e "${YELLOW}修改前备份：${backup_dir}${NC}"
 
     echo -e "${YELLOW}重要提示：反向代理设置${NC}"
     echo "---------------------------------------------------------------------"
-    echo "ImgHub Bot 的内部 Web 服务现在运行在 ${GREEN}0.0.0.0:8080${NC}。"
+    echo "ImgHub Bot 的内部 Web 服务现在仅运行在 ${GREEN}127.0.0.1:8080${NC}。"
     echo "您需要设置一个反向代理服务器（如 Nginx, Apache, Caddy 等）将您之前配置的"
     echo "基础 URL (${GREEN}$(grep base_url ${CONFIG_FILE_PATH} | cut -d '=' -f2 | xargs)${NC}) 指向到 ${GREEN}http://127.0.0.1:8080${NC}。"
     echo ""
@@ -836,7 +907,7 @@ main() {
     echo -e "启动服务: ${YELLOW}systemctl start ${SERVICE_NAME}.service${NC}"
     echo -e "重启服务: ${YELLOW}systemctl restart ${SERVICE_NAME}.service${NC}"
     echo -e "查看服务日志: ${YELLOW}journalctl -u ${SERVICE_NAME} -f --no-pager${NC}"
-    echo -e "查看Python脚本日志: ${YELLOW}tail -f ${LOG_FILE}${NC}"
+    echo -e "查看实时日志: ${YELLOW}journalctl -u ${SERVICE_NAME} -f -o cat${NC}"
     echo -e "编辑配置文件: ${YELLOW}nano ${CONFIG_FILE_PATH}${NC}"
     echo -e "Python脚本位置: ${YELLOW}${PYTHON_SCRIPT_PATH}${NC}"
     echo ""

@@ -1,272 +1,174 @@
 #!/bin/bash
 
-# 全局颜色定义
-RED='\033[31m'
-GREEN='\033[32m'
-YELLOW='\033[33m'
-BLUE='\033[34m'
-CYAN='\033[36m'
-NC='\033[0m'
+set -uo pipefail
 
-# ======================= Caddy反代管理 =======================
-configure_caddy_reverse_proxy() {
-    # 环境常量定义
-    local CADDY_SERVICE="/lib/systemd/system/caddy.service"
-    local CADDYFILE="/etc/caddy/Caddyfile"
-    local TEMP_CONF=$(mktemp)
-    local domain ip port
+RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; NC='\033[0m'
+CADDYFILE=/etc/caddy/Caddyfile
+SITE_DIR=/etc/caddy/ai-sites
+STATE_DIR=/var/lib/ai-scripts/caddy
+BACKUP_ROOT=/var/backups/ai-scripts/caddy
 
-    # 首次安装检测
-    if ! command -v caddy &>/dev/null; then
-        echo -e "${CYAN}开始安装Caddy服务器...${NC}"
-        
-        # 安装依赖组件（显示进度）
-        echo -e "${YELLOW}[1/5] 安装依赖组件...${NC}"
-        sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https 2>&1 | \
-            while read line; do 
-                echo "  ▸ $line"
-            done
-        
-        # 添加官方软件源（显示进度）
-        echo -e "\n${YELLOW}[2/5] 添加Caddy官方源...${NC}"
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
-            sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | \
-            sudo tee /etc/apt/sources.list.d/caddy-stable.list | \
-            sed 's/^/  ▸ /'
-        # 更新软件源（显示进度）
-        echo -e "\n${YELLOW}[3/5] 更新软件源...${NC}"
-        sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/caddy-stable.list" \
-            -o Dir::Etc::sourceparts="-" \
-            -o APT::Get::List-Cleanup="0" 2>&1 | \
-            grep -v '^$' | \
-            sed 's/^/  ▸ /'
-        # 安装Caddy（显示进度）
-        echo -e "\n${YELLOW}[4/5] 安装Caddy...${NC}"
-        sudo apt-get install -y caddy 2>&1 | \
-            grep --line-buffered -E 'Unpacking|Setting up' | \
-            sed 's/^/  ▸ /'
-        # 初始化配置（显示进度）
-        echo -e "\n${YELLOW}[5/5] 初始化配置...${NC}"
-        sudo mkdir -vp /etc/caddy | sed 's/^/  ▸ /'
-        [ ! -f "$CADDYFILE" ] && sudo touch "$CADDYFILE"
-        echo -e "# Caddyfile自动生成配置\n# 手动修改后请执行 systemctl reload caddy" | \
-            sudo tee "$CADDYFILE" | sed 's/^/  ▸ /'
-        sudo chown caddy:caddy "$CADDYFILE"
-        
-        echo -e "${GREEN}✅ Caddy安装完成，版本：$(caddy version)${NC}"
-    else
-        echo -e "${CYAN}检测到Caddy已安装，版本：$(caddy version)${NC}"
+require_root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo -e "${RED}请使用 root 权限运行。${NC}"; exit 1; }; }
+valid_domain() { [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; }
+valid_upstream() { [[ $1 =~ ^[A-Za-z0-9_.:-]+$ ]] && [[ $1 != *..* ]]; }
+valid_port() { [[ $1 =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
+
+backup_caddy() {
+    local timestamp dir
+    timestamp=$(date +%Y%m%d-%H%M%S)
+    dir="$BACKUP_ROOT/$timestamp"
+    install -d -m 700 "$dir"
+    [[ -d /etc/caddy ]] && cp -a /etc/caddy "$dir/caddy"
+    systemctl is-enabled --quiet caddy 2>/dev/null && touch "$dir/service-enabled"
+    systemctl is-active --quiet caddy 2>/dev/null && touch "$dir/service-active"
+    printf '%s' "$dir"
+}
+
+restore_caddy_backup() {
+    local backup=$1
+    [[ -d $backup/caddy ]] || return 1
+    rm -rf -- /etc/caddy
+    cp -a "$backup/caddy" /etc/caddy
+    systemctl daemon-reload
+}
+
+install_caddy() {
+    command -v caddy >/dev/null 2>&1 && return 0
+    local repo_backup key_tmp list_tmp
+    install -d -m 700 "$STATE_DIR"
+    repo_backup="$STATE_DIR/repository-before"
+    install -d -m 700 "$repo_backup"
+    [[ ! -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg ]] || cp -a /usr/share/keyrings/caddy-stable-archive-keyring.gpg "$repo_backup/key.gpg"
+    [[ ! -f /etc/apt/sources.list.d/caddy-stable.list ]] || cp -a /etc/apt/sources.list.d/caddy-stable.list "$repo_backup/caddy-stable.list"
+    if ! apt-get update || ! apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg; then return 1; fi
+    key_tmp=$(mktemp /usr/share/keyrings/.caddy-key.XXXXXX)
+    list_tmp=$(mktemp /etc/apt/sources.list.d/.caddy-list.XXXXXX)
+    if ! curl -1fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --batch --yes --dearmor -o "$key_tmp" \
+        || ! curl -1fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' -o "$list_tmp"; then
+        rm -f "$key_tmp" "$list_tmp"
+        return 1
     fi
+    install -m 0644 "$key_tmp" /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    install -m 0644 "$list_tmp" /etc/apt/sources.list.d/caddy-stable.list
+    rm -f "$key_tmp" "$list_tmp"
+    if ! apt-get update || ! apt-get install -y caddy; then
+        [[ ! -f "$repo_backup/key.gpg" ]] || cp -a "$repo_backup/key.gpg" /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        [[ -f "$repo_backup/key.gpg" ]] || rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        [[ ! -f "$repo_backup/caddy-stable.list" ]] || cp -a "$repo_backup/caddy-stable.list" /etc/apt/sources.list.d/caddy-stable.list
+        [[ -f "$repo_backup/caddy-stable.list" ]] || rm -f /etc/apt/sources.list.d/caddy-stable.list
+        return 1
+    fi
+    touch "$STATE_DIR/installed-by-script"
+}
 
-    # 配置输入循环
-    while : ; do
-        # 域名输入验证
-        until [[ $domain =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]]; do
-            read -p "请输入域名（无需https://）：" domain
-            domain=$(echo "$domain" | sed 's/https\?:\/\///g')
-            [[ $domain =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]] || echo -e "${RED}域名格式无效！示例：example.com${NC}"
-        done
+ensure_import() {
+    install -d -m 755 /etc/caddy "$SITE_DIR"
+    [[ -f $CADDYFILE ]] || printf '# Managed by Caddy package / administrator\n' > "$CADDYFILE"
+    if ! caddy validate --config "$CADDYFILE" --adapter caddyfile; then
+        echo -e "${RED}现有 Caddyfile 无效；为避免覆盖用户配置，操作已停止。${NC}"
+        return 1
+    fi
+    if ! grep -Fqx 'import /etc/caddy/ai-sites/*.caddy' "$CADDYFILE"; then
+        printf '\n# AI-Scripts managed sites\nimport /etc/caddy/ai-sites/*.caddy\n' >> "$CADDYFILE"
+    fi
+}
 
-        # 目标IP输入（支持域名/IPv4/IPv6）
-        read -p "请输入目标服务器地址（默认为localhost）:" ip
-        ip=${ip:-localhost}
+configure_proxy() {
+    install_caddy || return 1
+    local backup domain upstream port site temp old_site=''
+    read -r -p '域名（不含协议）: ' domain
+    valid_domain "$domain" || { echo -e "${RED}域名格式无效。${NC}"; return 1; }
+    read -r -p '上游地址 [localhost]: ' upstream
+    upstream=${upstream:-localhost}
+    valid_upstream "$upstream" || { echo -e "${RED}上游地址包含不安全字符。${NC}"; return 1; }
+    read -r -p '上游端口: ' port
+    valid_port "$port" || { echo -e "${RED}端口无效。${NC}"; return 1; }
 
-        # 端口输入验证
-        until [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1 -a "$port" -le 65535 ]; do
-            read -p "请输入目标端口号（1-65535）:" port
-            [[ $port =~ ^[0-9]+$ ]] || { echo -e "${RED}端口必须为数字！"; continue; }
-            [ "$port" -ge 1 -a "$port" -le 65535 ] || echo -e "${RED}端口范围1-65535！"
-        done
+    backup=$(backup_caddy) || return 1
+    ensure_import || { restore_caddy_backup "$backup"; return 1; }
 
-        # 配置冲突检测
-        if sudo caddy validate --config "$CADDYFILE" --adapter caddyfile 2>/dev/null; then
-            if grep -q "^$domain {" "$CADDYFILE"; then
-                echo -e "${YELLOW}⚠ 检测到现有配置："
-                grep -A3 "^$domain {" "$CADDYFILE"
-                read -p "要覆盖此配置吗？[y/N] " overwrite
-                [[ $overwrite =~ ^[Yy]$ ]] || continue
-                sudo caddy adapt --config "$CADDYFILE" --adapter caddyfile | \
-                awk -v domain="$domain" '/^'$domain' {/{flag=1} !flag; /^}/{flag=0}' | \
-                sudo tee "$TEMP_CONF" >/dev/null
-                sudo mv "$TEMP_CONF" "$CADDYFILE"
-            fi
-        else
-            echo -e "${YELLOW}⚠ 当前配置文件存在错误，将创建新配置${NC}"
-            sudo truncate -s 0 "$CADDYFILE"
-        fi
-
-        # 生成配置块
-        echo -e "\n# 自动生成配置 - $(date +%F)" | sudo tee -a "$CADDYFILE" >/dev/null
-        cat <<EOF | sudo tee -a "$CADDYFILE" >/dev/null
+    site="$SITE_DIR/$domain.caddy"
+    if [[ -f $site ]]; then
+        read -r -p '该域名配置已存在，覆盖？(y/N): ' answer
+        [[ $answer =~ ^[Yy]$ ]] || return 0
+        old_site=$(mktemp "$STATE_DIR/.site-backup.XXXXXX")
+        cp -a "$site" "$old_site"
+    fi
+    temp=$(mktemp "$SITE_DIR/.site.XXXXXX")
+    cat > "$temp" <<EOF
 $domain {
-    reverse_proxy $ip:$port {
-        header_up Host {host}
-        header_up X-Real-IP {remote}
-        header_up X-Forwarded-For {remote}
-        header_up X-Forwarded-Proto {scheme}
-    }
+    reverse_proxy $upstream:$port
     encode gzip
-    tls {
-        protocols tls1.2 tls1.3
-        ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-    }
 }
 EOF
+    chmod 644 "$temp"
+    mv -f "$temp" "$site"
+    caddy fmt "$site" --overwrite
 
-        # 格式化配置文件
-        sudo caddy fmt "$CADDYFILE" --overwrite
-
-        # 配置验证与生效
-        if ! sudo caddy validate --config "$CADDYFILE"; then
-            echo -e "${RED}配置验证失败！错误详情："
-            sudo caddy validate --config "$CADDYFILE" 2>&1 | grep -v "valid"
-            sudo sed -i "/# 自动生成配置 - $(date +%F)/,+6d" "$CADDYFILE"
-            return 1
-        fi
-
-        # 服务热重载
-        if systemctl is-active caddy &>/dev/null; then
-            sudo systemctl reload caddy || sudo systemctl restart caddy
-        else
-            sudo systemctl enable --now caddy &>/dev/null
-        fi
-
-        echo -e "${GREEN}✅ 配置生效成功！访问地址：https://$domain${NC}"
-        read -p "是否继续添加配置？[y/N] " more
-        [[ $more =~ ^[Yy]$ ]] || break
-
-        # 重置变量进行下一轮循环
-        domain=""
-        ip=""
-        port=""
-    done
-
-    # 清理临时文件
-    rm -f "$TEMP_CONF"
-}
-
-# ======================= 卸载Caddy =======================
-uninstall_caddy() {
-    echo -e "${RED}警告：此操作将完全移除Caddy及所有相关配置！${NC}"
-    read -p "确定要卸载Caddy吗？(y/N) " confirm
-    [[ ! $confirm =~ ^[Yy]$ ]] && return
-
-    # 停止服务
-    echo -e "${CYAN}停止Caddy服务...${NC}"
-    sudo systemctl stop caddy.service 2>/dev/null
-
-    # 卸载软件包
-    if command -v caddy &>/dev/null; then
-        echo -e "${CYAN}卸载Caddy程序...${NC}"
-        sudo apt-get purge -y caddy 2>/dev/null
-    fi
-
-    # 删除配置文件
-    declare -a caddy_files=(
-        "/etc/caddy"
-        "/lib/systemd/system/caddy.service"
-        "/usr/share/keyrings/caddy-stable-archive-keyring.gpg"
-        "/etc/apt/sources.list.d/caddy-stable.list"
-        "/var/lib/caddy"
-        "/etc/ssl/caddy"
-    )
-
-    # 删除文件及目录
-    echo -e "${CYAN}清理残留文件...${NC}"
-    for target in "${caddy_files[@]}"; do
-        if [[ -e $target ]]; then
-            echo "删除：$target"
-            sudo rm -rf "$target"
-        fi
-    done
-
-    # 删除APT源更新
-    sudo apt-get update 2>/dev/null
-
-    # 清除无人值守安装标记（如有）
-    sudo rm -f /var/lib/cloud/instances/*/sem/config_apt_source
-
-    # 删除日志（可选）
-    read -p "是否删除所有Caddy日志文件？(y/N) " del_log
-    if [[ $del_log =~ ^[Yy]$ ]]; then
-        sudo journalctl --vacuum-time=1s --quiet
-        sudo rm -f /var/log/caddy/*.log 2>/dev/null
-    fi
-
-    echo -e "${GREEN}✅ Caddy已完全卸载，再见！${NC}"
-}
-
-# ======================= 重启Caddy =======================
-restart_caddy() {
-    if ! command -v caddy &>/dev/null; then
-        echo -e "${RED}错误：Caddy未安装！${NC}"
+    if ! caddy validate --config "$CADDYFILE" --adapter caddyfile; then
+        echo -e "${RED}配置验证失败，正在自动回滚。${NC}"
+        if [[ -n $old_site ]]; then mv -f "$old_site" "$site"; else rm -f "$site"; fi
+        restore_caddy_backup "$backup"
         return 1
     fi
+    rm -f -- "$old_site"
 
-    # 验证配置文件
-    echo -e "${CYAN}验证配置文件...${NC}"
-    if ! sudo caddy validate --config /etc/caddy/Caddyfile; then
-        echo -e "${RED}配置文件验证失败！请检查配置后再重启。${NC}"
-        return 1
-    fi
-
-    echo -e "${CYAN}正在重启Caddy服务...${NC}"
-    if sudo systemctl restart caddy; then
-        sleep 1
-        if systemctl is-active caddy &>/dev/null; then
-            echo -e "${GREEN}✅ Caddy重启成功！${NC}"
-            systemctl status caddy --no-pager -l
-        else
-            echo -e "${RED}重启后服务未正常运行，请检查日志${NC}"
-            sudo journalctl -u caddy -n 20 --no-pager
-            return 1
-        fi
+    if systemctl is-active --quiet caddy; then
+        systemctl reload caddy || { restore_caddy_backup "$backup"; systemctl restart caddy || true; return 1; }
     else
-        echo -e "${RED}Caddy重启失败！${NC}"
-        return 1
+        systemctl enable --now caddy || { restore_caddy_backup "$backup"; return 1; }
     fi
+    echo -e "${GREEN}反向代理已生效：https://${domain}${NC}"
+    echo -e "${CYAN}操作前备份：${backup}${NC}"
 }
 
-# ======================= Caddy子菜单 =======================
-show_caddy_menu() {
-    clear
-    echo -e "${CYAN}=== Caddy 管理脚本 v1.2 ===${NC}"
-    echo "1. 安装/配置反向代理"
-    echo "2. 完全卸载Caddy"
-    echo "3. 重启Caddy"
-    echo "0. 返回主菜单"
-    echo -e "${YELLOW}===============================${NC}"
+restart_caddy() {
+    command -v caddy >/dev/null 2>&1 || { echo -e "${RED}Caddy 未安装。${NC}"; return 1; }
+    caddy validate --config "$CADDYFILE" --adapter caddyfile || return 1
+    systemctl restart caddy && systemctl is-active --quiet caddy
 }
 
-# ======================= Cady主逻辑 =======================
-caddy_main() {
+uninstall_caddy() {
+    local confirm backup
+    read -r -p '确认移除 AI-Scripts Caddy 配置？(y/N): ' confirm
+    [[ $confirm =~ ^[Yy]$ ]] || return 0
+    backup=$(backup_caddy) || return 1
+    rm -rf -- "$SITE_DIR"
+    if [[ -f $CADDYFILE ]]; then
+        sed -i '\|^# AI-Scripts managed sites$|d;\|^import /etc/caddy/ai-sites/\*\.caddy$|d' "$CADDYFILE"
+    fi
+
+    if [[ -e $STATE_DIR/installed-by-script ]]; then
+        systemctl disable --now caddy 2>/dev/null || true
+        apt-get purge -y caddy
+        if [[ -f "$STATE_DIR/repository-before/key.gpg" ]]; then cp -a "$STATE_DIR/repository-before/key.gpg" /usr/share/keyrings/caddy-stable-archive-keyring.gpg; else rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg; fi
+        if [[ -f "$STATE_DIR/repository-before/caddy-stable.list" ]]; then cp -a "$STATE_DIR/repository-before/caddy-stable.list" /etc/apt/sources.list.d/caddy-stable.list; else rm -f /etc/apt/sources.list.d/caddy-stable.list; fi
+    else
+        caddy validate --config "$CADDYFILE" --adapter caddyfile && systemctl reload caddy || true
+        echo -e "${YELLOW}Caddy 原本已存在，仅移除本脚本管理的站点。${NC}"
+    fi
+    echo -e "${YELLOW}为避免影响其他站点，/var/log/caddy 中的日志已保留。${NC}"
+    echo -e "${GREEN}操作完成。卸载前备份：${backup}${NC}"
+}
+
+main() {
+    require_root
+    local choice
     while true; do
-        show_caddy_menu
-        read -p "请输入Caddy管理选项：" caddy_choice
-        case $caddy_choice in
-            1) 
-                configure_caddy_reverse_proxy
-                read -p "按回车键返回菜单..." 
-                ;;
-            2) 
-                uninstall_caddy
-                read -p "按回车键返回菜单..." 
-                ;;
-            3) 
-                restart_caddy
-                read -p "按回车键返回菜单..." 
-                ;;
-            0) 
-                break
-                ;;
-            *) 
-                echo -e "${RED}无效选项！${NC}"
-                sleep 1
-                ;;
+        clear
+        echo '1. 安装/配置反向代理'
+        echo '2. 卸载本脚本管理的 Caddy 内容'
+        echo '3. 验证并重启 Caddy'
+        echo '0. 返回'
+        read -r -p '请选择: ' choice
+        case $choice in
+            1) configure_proxy; read -r -p '按回车继续……' _ ;;
+            2) uninstall_caddy; read -r -p '按回车继续……' _ ;;
+            3) restart_caddy; read -r -p '按回车继续……' _ ;;
+            0) return ;;
+            *) sleep 1 ;;
         esac
     done
 }
 
-# 执行函数
-caddy_main
+main "$@"

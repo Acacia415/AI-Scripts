@@ -9,11 +9,6 @@ set -e
 
 # 配置变量
 BLOG_DIR="/var/www/hexo-blog"
-THEME_NAME="butterfly"
-SITE_TITLE="颜颜宝贝的成长小站"
-SITE_SUBTITLE="记录颜颜成长的每一天"
-SITE_DESCRIPTION="这是记录颜颜宝贝成长的温馨小站，每一个瞬间都值得珍藏"
-SITE_AUTHOR="颜颜的爸爸妈妈"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -62,16 +57,48 @@ cd "$BLOG_DIR"
 print_info "步骤 1/10: 备份现有配置..."
 BACKUP_DIR="$HOME/hexo-backup-$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$BACKUP_DIR"
-[ -f "_config.yml" ] && cp _config.yml "$BACKUP_DIR/"
-[ -f "_config.butterfly.yml" ] && cp _config.butterfly.yml "$BACKUP_DIR/" 2>/dev/null || true
-print_success "配置已备份到: $BACKUP_DIR"
+BACKUP_ARCHIVE="$BACKUP_DIR/butterfly-managed-files.tar.gz"
+backup_targets=()
+for target in \
+    _config.yml _config.butterfly.yml package.json package-lock.json \
+    source/_posts/welcome.md scripts/count-media.js source/video/2025 source/gallery/2025; do
+    [ ! -e "$target" ] || backup_targets+=("$target")
+done
+if [ "${#backup_targets[@]}" -gt 0 ]; then
+    tar -czf "$BACKUP_ARCHIVE" "${backup_targets[@]}"
+else
+    tar -czf "$BACKUP_ARCHIVE" --files-from /dev/null
+fi
+printf '%s\n' "${backup_targets[@]}" > "$BACKUP_DIR/original-paths.txt"
+cat > "$BACKUP_DIR/restore.sh" << EOFRESTORE
+#!/bin/bash
+set -e
+cd "$BLOG_DIR"
+tar --no-same-owner -xzf "$BACKUP_ARCHIVE"
+echo "已恢复 Butterfly 修改前的已有文件。"
+EOFRESTORE
+chmod 700 "$BACKUP_DIR/restore.sh"
+
+rollback_on_error() {
+    local status=$?
+    trap - ERR
+    print_error "执行失败，正在恢复已被覆盖的原文件..."
+    tar --no-same-owner -xzf "$BACKUP_ARCHIVE" -C "$BLOG_DIR" 2>/dev/null || true
+    print_warning "恢复包和手动恢复脚本位于: $BACKUP_DIR"
+    exit "$status"
+}
+trap rollback_on_error ERR
+print_success "修改前文件已备份到: $BACKUP_DIR"
 
 # 步骤2：安装 Butterfly 主题
 print_info "步骤 2/10: 安装 Butterfly 主题..."
 if [ -d "themes/butterfly" ]; then
     print_warning "Butterfly 主题已存在，跳过安装"
 else
-    git clone -b master https://github.com/jerryc127/hexo-theme-butterfly.git themes/butterfly
+    THEME_TEMP="themes/.butterfly.new.$$"
+    rm -rf -- "$THEME_TEMP"
+    git clone -b master https://github.com/jerryc127/hexo-theme-butterfly.git "$THEME_TEMP"
+    mv -- "$THEME_TEMP" themes/butterfly
     print_success "Butterfly 主题安装完成"
 fi
 
@@ -254,7 +281,11 @@ print_info "步骤 6/10: 配置主题..."
 if grep -q "^theme: butterfly" _config.yml; then
     print_warning "主题已设置为 butterfly"
 else
-    sed -i 's/^theme:.*/theme: butterfly/' _config.yml
+    if grep -q '^theme:' _config.yml; then
+        sed -i 's/^theme:.*/theme: butterfly/' _config.yml
+    else
+        printf '\ntheme: butterfly\n' >> _config.yml
+    fi
     print_success "已设置主题为 butterfly"
 fi
 
@@ -263,8 +294,16 @@ print_info "步骤 7/10: 生成博客配置文件..."
 
 # 修改 _config.yml
 print_info "配置主配置文件 _config.yml..."
-sed -i 's|^sitemap:$|sitemap:|' _config.yml 2>/dev/null || true
-sed -i '/sitemap:/,/rel: false/c\sitemap:\n  path: sitemap.xml\n  rel: false' _config.yml 2>/dev/null || true
+if ! grep -q '^sitemap:' _config.yml; then
+    cat >> _config.yml << 'EOFSITEMAP'
+
+sitemap:
+  path: sitemap.xml
+  rel: false
+EOFSITEMAP
+else
+    print_warning "检测到已有 sitemap 配置，保留原配置以避免误删相邻 YAML 段落"
+fi
 
 print_success "主配置文件已优化"
 
@@ -579,6 +618,7 @@ print_success "粉色主题配置文件已生成"
 
 # 步骤8：创建示例文章
 print_info "步骤 8/10: 创建示例文章..."
+if [ ! -f source/_posts/welcome.md ]; then
 cat > source/_posts/welcome.md << 'EOF'
 ---
 title: 💕 欢迎来到颜颜的成长空间
@@ -621,7 +661,10 @@ cover: /img/cover1.jpg
   <p style="color: #666;">记录每一个珍贵瞬间，陪你慢慢长大</p>
 </div>
 EOF
-print_success "示例文章已创建"
+    print_success "示例文章已创建"
+else
+    print_warning "示例文章已存在，保留原文件"
+fi
 
 # 步骤9：创建资源目录和完整结构
 print_info "步骤 9/10: 创建资源目录和完整结构..."
@@ -634,6 +677,7 @@ mkdir -p source/music
 # 安装统计脚本
 print_info "安装媒体统计脚本..."
 mkdir -p scripts
+if [ ! -f scripts/count-media.js ]; then
 cat > scripts/count-media.js << 'EOFSCRIPT'
 const fs = require('fs');
 const path = require('path');
@@ -693,7 +737,10 @@ hexo.extend.tag.register('count_photos', function(args) {
   return countFiles(imgDir, photoExts, prefix, 'cover');
 });
 EOFSCRIPT
-print_success "统计脚本已安装"
+    print_success "统计脚本已安装"
+else
+    print_warning "统计脚本已存在，保留原文件"
+fi
 
 # 创建视频年份和月份目录结构
 print_info "创建视频目录结构..."
@@ -703,6 +750,7 @@ for month in {2..12}; do
     MONTH_DIR="source/video/2025/$(printf "%02d" $month)"
     mkdir -p "$MONTH_DIR"
     
+    if [ ! -f "$MONTH_DIR/index.md" ]; then
     cat > "$MONTH_DIR/index.md" << EOFMONTH
 ---
 title: 🎬 2025年${month}月视频
@@ -738,9 +786,11 @@ top_img: /img/video.jpg
   <p style="color: #FF69B4; font-size: 16px; margin: 0;">💕 2025年${month}月 · 共{% count_videos 2025 $month %}个视频</p>
 </div>
 EOFMONTH
+    fi
 done
 
 # 创建视频年份页
+if [ ! -f source/video/2025/index.md ]; then
 cat > source/video/2025/index.md << 'EOFYEAR'
 ---
 title: 🎬 2025年视频
@@ -806,6 +856,9 @@ cat >> source/video/2025/index.md << 'EOFBOTTOM'
   <p style="color: #FF69B4; font-size: 16px; margin: 0;">💕 2025年 · 宝贝的第一年 · 共{% count_videos 2025 %}个视频</p>
 </div>
 EOFBOTTOM
+else
+    print_warning "2025 视频年份页已存在，保留原文件"
+fi
 
 # 创建相册目录结构
 print_info "创建相册目录结构..."
@@ -815,6 +868,7 @@ for month in {2..10}; do
     MONTH_DIR="source/gallery/2025/$(printf "%02d" $month)"
     mkdir -p "$MONTH_DIR"
     
+    if [ ! -f "$MONTH_DIR/index.md" ]; then
     cat > "$MONTH_DIR/index.md" << EOFGALLERY
 ---
 title: 📸 2025年${month}月相册
@@ -842,6 +896,7 @@ top_img: /img/gallery.jpg
   <p style="color: #FF69B4; font-size: 16px; margin: 0;">💕 2025年${month}月 · 共{% count_photos 2025 $month %}张照片</p>
 </div>
 EOFGALLERY
+    fi
 done
 
 print_info "已创建以下目录："
@@ -858,6 +913,7 @@ print_info "步骤 10/10: 生成静态文件..."
 npx hexo clean
 npx hexo generate
 print_success "静态文件生成完成"
+trap - ERR
 
 echo ""
 print_pink "╔════════════════════════════════════════════════╗"

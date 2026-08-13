@@ -6,7 +6,9 @@
 # Author: Iris & Cascade
 # =====================================================
 
-set -e
+# 交互式菜单需要自行处理命令失败；启用管道失败传播，但不使用 set -e，
+# 避免 npm、git、systemctl 等命令失败时跳过脚本内的回滚与错误提示。
+set -o pipefail
 
 # 配置文件路径
 CONFIG_FILE="$HOME/.hexo_manager.conf"
@@ -19,6 +21,8 @@ NODE_VERSION_REQUIRED=20
 SCRIPT_VERSION="1.0.0"
 DEFAULT_SCHEDULE_TIME="03:00"
 CRON_MARKER="# HexoManagerAutoBackup"
+INSTALLED_SCRIPT="/usr/local/lib/ai-scripts/hexo_manager.sh"
+HEXO_PID_FILE="$HOME/.hexo_manager.pid"
 SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
 if [[ "$SCRIPT_PATH" != /* ]]; then
     SCRIPT_PATH="$(cd "$(dirname "$SCRIPT_PATH")" 2>/dev/null && pwd)/$(basename "$SCRIPT_PATH")"
@@ -59,6 +63,58 @@ print_warning() {
 
 print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# 仅允许脚本管理足够具体的绝对目录，防止配置被篡改或误输为系统根目录后
+# 被后续 rm -rf 清空。
+is_safe_managed_dir() {
+    local path="$1" normalized remainder
+    [[ -n "$path" && "$path" == /* && "$path" != *$'\n'* && "$path" != *$'\r'* ]] || return 1
+    [[ "$path" =~ ^/[A-Za-z0-9._/-]+$ ]] || return 1
+    normalized=$(realpath -m -- "$path" 2>/dev/null) || return 1
+    case "$normalized" in
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
+            return 1
+            ;;
+    esac
+    remainder=${normalized#/}
+    [[ "$remainder" == */*/* ]]
+}
+
+validate_managed_dirs() {
+    local normalized_blog normalized_backup
+    if ! is_safe_managed_dir "$BLOG_DIR"; then
+        print_error "博客目录不安全，必须是至少三级的绝对路径: $BLOG_DIR"
+        return 1
+    fi
+    if ! is_safe_managed_dir "$BACKUP_DIR"; then
+        print_error "备份目录不安全，必须是至少三级的绝对路径: $BACKUP_DIR"
+        return 1
+    fi
+    normalized_blog=$(realpath -m -- "$BLOG_DIR")
+    normalized_backup=$(realpath -m -- "$BACKUP_DIR")
+    if [[ "$normalized_blog" == "$normalized_backup" || "$normalized_blog/" == "$normalized_backup/"* || "$normalized_backup/" == "$normalized_blog/"* ]]; then
+        print_error "博客目录与备份目录不能相同或互相包含"
+        return 1
+    fi
+}
+
+stop_owned_nohup_service() {
+    local pid cmdline
+    [ -f "$HEXO_PID_FILE" ] || return 1
+    pid=$(cat "$HEXO_PID_FILE" 2>/dev/null)
+    [[ "$pid" =~ ^[0-9]+$ ]] || { rm -f "$HEXO_PID_FILE"; return 1; }
+    if ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$HEXO_PID_FILE"
+        return 1
+    fi
+    cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+    [[ "$cmdline" == *hexo*server* ]] || {
+        print_warning "PID 文件指向的进程不是 Hexo，拒绝终止: $pid"
+        return 1
+    }
+    kill "$pid"
+    rm -f "$HEXO_PID_FILE"
 }
 
 # 显示横幅
@@ -106,37 +162,59 @@ check_root() {
 
 # 加载配置文件
 load_config() {
+    BLOG_DIR="$DEFAULT_BLOG_DIR"
+    BACKUP_DIR="$DEFAULT_BACKUP_DIR"
+    HEXO_PORT="$DEFAULT_PORT"
+
     if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
+        # 配置文件是数据，不作为 shell 代码执行。
+        while IFS='=' read -r key value; do
+            value=${value%$'\r'}
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+                value=${value:1:${#value}-2}
+            fi
+            case "$key" in
+                BLOG_DIR) BLOG_DIR="$value" ;;
+                BACKUP_DIR) BACKUP_DIR="$value" ;;
+                HEXO_PORT) HEXO_PORT="$value" ;;
+            esac
+        done < "$CONFIG_FILE"
         print_info "已加载配置文件: $CONFIG_FILE"
-    else
-        # 使用默认配置
-        BLOG_DIR="$DEFAULT_BLOG_DIR"
-        BACKUP_DIR="$DEFAULT_BACKUP_DIR"
+    fi
+
+    if ! [[ "$HEXO_PORT" =~ ^[0-9]+$ ]] || [ "$HEXO_PORT" -lt 1024 ] || [ "$HEXO_PORT" -gt 65535 ]; then
+        print_warning "配置中的端口无效，已恢复默认值 $DEFAULT_PORT"
         HEXO_PORT="$DEFAULT_PORT"
     fi
-    
-    # 确保端口有值
-    if [ -z "$HEXO_PORT" ]; then
-        HEXO_PORT="$DEFAULT_PORT"
+    if ! validate_managed_dirs; then
+        print_warning "配置中的目录不安全，已恢复默认目录"
+        BLOG_DIR="$DEFAULT_BLOG_DIR"
+        BACKUP_DIR="$DEFAULT_BACKUP_DIR"
+        validate_managed_dirs || return 1
     fi
 }
 
 # 保存配置文件
 save_config() {
-    cat > "$CONFIG_FILE" << EOF
+    local config_tmp
+    validate_managed_dirs || return 1
+    config_tmp=$(mktemp "${CONFIG_FILE}.XXXXXX") || return 1
+    cat > "$config_tmp" << EOF
 # Hexo Manager 配置文件
 # 自动生成于 $(date)
 
 # 博客目录
-BLOG_DIR="$BLOG_DIR"
+BLOG_DIR=$BLOG_DIR
 
 # 备份目录
-BACKUP_DIR="$BACKUP_DIR"
+BACKUP_DIR=$BACKUP_DIR
 
 # Hexo 端口
-HEXO_PORT="$HEXO_PORT"
+HEXO_PORT=$HEXO_PORT
 EOF
+    chmod 600 "$config_tmp"
+    mv -f -- "$config_tmp" "$CONFIG_FILE"
     print_success "配置已保存到: $CONFIG_FILE"
 }
 
@@ -170,7 +248,11 @@ deploy_hexo() {
     if [[ "$use_default" =~ ^[Nn]$ ]]; then
         read -p "请输入博客目录（绝对路径）: " custom_dir
         if [ -n "$custom_dir" ]; then
-            BLOG_DIR="$custom_dir"
+            if ! is_safe_managed_dir "$custom_dir"; then
+                print_error "目录不安全；请输入至少三级的绝对路径，例如 /var/www/hexo-blog"
+                return 1
+            fi
+            BLOG_DIR="$(realpath -m -- "$custom_dir")"
             # 备份目录也相应调整
             BACKUP_DIR="${BLOG_DIR}_backups"
             print_info "使用自定义目录: $BLOG_DIR"
@@ -182,7 +264,7 @@ deploy_hexo() {
     # 选择端口
     echo ""
     read -p "Hexo 服务端口（默认 $HEXO_PORT）: " custom_port
-    if [ -n "$custom_port" ] && [[ "$custom_port" =~ ^[0-9]+$ ]]; then
+    if [ -n "$custom_port" ] && [[ "$custom_port" =~ ^[0-9]+$ ]] && [ "$custom_port" -ge 1024 ] && [ "$custom_port" -le 65535 ]; then
         HEXO_PORT="$custom_port"
         print_info "使用端口: $HEXO_PORT"
     else
@@ -230,7 +312,7 @@ deploy_hexo() {
     print_info "创建博客目录: $BLOG_DIR"
     sudo mkdir -p "$BLOG_DIR"
     sudo chown "$USER:$USER" "$BLOG_DIR"
-    cd "$BLOG_DIR"
+    cd "$BLOG_DIR" || return 1
     
     # 检查是否已存在 Hexo 项目
     if [ -f "$BLOG_DIR/package.json" ]; then
@@ -253,7 +335,7 @@ deploy_hexo() {
     
     # 初始化 Hexo 项目
     print_info "初始化 Hexo 博客..."
-    if [ -z "$(ls -A $BLOG_DIR)" ]; then
+    if [ -z "$(ls -A "$BLOG_DIR")" ]; then
         npx hexo init .
     else
         npx hexo init temp_hexo
@@ -277,8 +359,6 @@ deploy_hexo() {
     # 设置文件权限，确保 Web 服务器可读取
     if [ -d "$BLOG_DIR/public" ]; then
         print_info "设置静态文件权限..."
-        chmod -R 755 "$BLOG_DIR"
-        chmod -R 755 "$BLOG_DIR/public"
         find "$BLOG_DIR/public" -type f -exec chmod 644 {} \; 2>/dev/null
         find "$BLOG_DIR/public" -type d -exec chmod 755 {} \; 2>/dev/null
         print_success "文件权限已设置"
@@ -348,7 +428,7 @@ uninstall_hexo() {
             fi
             
             if [ -d "$BLOG_DIR" ]; then
-                cd "$BLOG_DIR"
+                cd "$BLOG_DIR" || return 1
                 print_info "删除 node_modules 和依赖文件..."
                 rm -rf node_modules package-lock.json .deploy_git public db.json
                 print_success "程序文件已删除"
@@ -458,11 +538,12 @@ uninstall_hexo() {
         fi
     fi
     
-    # 清理 nohup 进程
-    if pgrep -f "hexo server" > /dev/null 2>&1; then
-        print_info "[③] 停止 Hexo 进程..."
-        pkill -f "hexo server" 2>/dev/null || true
-        print_success "  ✓ Hexo 进程已停止"
+    # 清理本脚本启动的 nohup 进程，不使用宽泛的 pkill -f。
+    if [ -f "$HEXO_PID_FILE" ]; then
+        print_info "[③] 停止本脚本启动的 Hexo 进程..."
+        if stop_owned_nohup_service; then
+            print_success "  ✓ Hexo 进程已停止"
+        fi
     fi
     
     # 清理 Caddy 配置
@@ -509,8 +590,7 @@ uninstall_hexo() {
     if [[ "$remove_node" =~ ^[Yy]$ ]]; then
         print_info "卸载 Node.js 和 npm..."
         sudo apt remove -y nodejs npm 2>/dev/null || true
-        sudo apt autoremove -y 2>/dev/null || true
-        print_success "Node.js 已卸载"
+        print_success "Node.js 已卸载（未执行 autoremove，避免删除其他软件仍需的依赖）"
     fi
     
     echo ""
@@ -615,7 +695,7 @@ backup_hexo() {
     echo ""
     
     # 备份关键文件和目录
-    cd "$BLOG_DIR"
+    cd "$BLOG_DIR" || return 1
     
     # === 所有模式都备份的基础文件 ===
     print_info "[①] 备份源文件..."
@@ -656,13 +736,13 @@ backup_hexo() {
         else
             # 手动排除：复制除img和videos外的所有内容
             mkdir -p "$BACKUP_PATH/source"
-            cd source
+            cd source || return 1
             for item in *; do
                 if [ "$item" != "img" ] && [ "$item" != "videos" ]; then
                     cp -r "$item" "$BACKUP_PATH/source/" 2>/dev/null || true
                 fi
             done
-            cd ..
+            cd .. || return 1
             print_success "  ✓ 已手动排除媒体文件"
         fi
         
@@ -855,7 +935,7 @@ EOF
     
     # 压缩备份
     print_info "压缩备份文件..."
-    cd "$BACKUP_DIR"
+    cd "$BACKUP_DIR" || return 1
     tar -czf "hexo_backup_${BACKUP_TYPE}_$TIMESTAMP.tar.gz" "hexo_backup_${BACKUP_TYPE}_$TIMESTAMP"
     
     BACKUP_SIZE=$(du -sh "hexo_backup_${BACKUP_TYPE}_$TIMESTAMP.tar.gz" | cut -f1)
@@ -981,8 +1061,8 @@ setup_scheduled_backup() {
             ;;
         3)
             read -p "请输入完整 cron 表达式 (5 段，如 '*/30 * * * *'): " custom_expr
-            if [ -z "$custom_expr" ]; then
-                print_error "表达式不能为空"
+            if ! printf '%s\n' "$custom_expr" | grep -Eq '^[0-9*/,-]+([[:space:]]+[0-9*/,-]+){4}$'; then
+                print_error "cron 表达式无效；仅允许 5 段数字、*、/、逗号和连字符"
                 return 1
             fi
             CRON_EXPR="$custom_expr"
@@ -998,7 +1078,13 @@ setup_scheduled_backup() {
             ;;
     esac
     
-    CRON_JOB="$CRON_EXPR /bin/bash \"$SCRIPT_PATH\" --auto-backup $SCHEDULE_TYPE >> /var/log/hexo_manager_backup.log 2>&1 $CRON_MARKER"
+    # Cron 不应继续引用可能来自 /tmp 的临时脚本。日志交给系统日志管理，
+    # 避免 /var/log/hexo_manager_backup.log 无限增长。
+    if ! sudo install -D -m 0755 -- "$SCRIPT_PATH" "$INSTALLED_SCRIPT"; then
+        print_error "无法安装稳定的定时任务脚本: $INSTALLED_SCRIPT"
+        return 1
+    fi
+    CRON_JOB="$CRON_EXPR /bin/bash \"$INSTALLED_SCRIPT\" --auto-backup $SCHEDULE_TYPE 2>&1 | /usr/bin/logger -t hexo-manager $CRON_MARKER"
     EXISTING_CRON=$(crontab -l 2>/dev/null | grep -v "$CRON_MARKER" || true)
     printf "%s\n%s\n" "$EXISTING_CRON" "$CRON_JOB" | crontab -
     
@@ -1093,7 +1179,7 @@ restore_hexo() {
     echo ""
     
     # 查找所有备份文件
-    BACKUP_FILES=($(ls -t "$BACKUP_DIR"/hexo_backup_*.tar.gz 2>/dev/null))
+    mapfile -t BACKUP_FILES < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'hexo_backup_*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
     
     if [ ${#BACKUP_FILES[@]} -eq 0 ]; then
         print_error "未找到任何备份文件"
@@ -1190,10 +1276,17 @@ restore_hexo() {
     print_info "解压备份文件..."
     mkdir -p "$RESTORE_TEMP"
     
-    cd "$BACKUP_DIR"
-    tar -xzf "$SELECTED_BACKUP" -C "$RESTORE_TEMP" 2>/dev/null
-    
-    if [ $? -ne 0 ]; then
+    cd "$BACKUP_DIR" || return 1
+    if ! tar -tzf "$SELECTED_BACKUP" 2>/dev/null | awk '
+        /^\// || /(^|\/)\.\.($|\/)/ { bad=1 }
+        END { exit bad }
+    '; then
+        print_error "备份包包含不安全路径或文件已损坏，拒绝解压！"
+        rm -rf "$RESTORE_TEMP"
+        return 1
+    fi
+
+    if ! tar --no-same-owner --no-same-permissions -xzf "$SELECTED_BACKUP" -C "$RESTORE_TEMP" 2>/dev/null; then
         print_error "解压失败！"
         rm -rf "$RESTORE_TEMP"
         return 1
@@ -1272,7 +1365,7 @@ restore_hexo() {
     # 完全恢复模式：先清空
     if [ "$RESTORE_TYPE" = "full" ]; then
         print_info "[①] 清空目标目录..."
-        cd "$BLOG_DIR"
+        cd "$BLOG_DIR" || return 1
         rm -rf source themes _config*.yml package*.json scaffolds scripts db.json README.md .gitignore *.sh 2>/dev/null || true
         print_success "  ✓ 目标目录已清空"
     fi
@@ -1280,7 +1373,7 @@ restore_hexo() {
     # 恢复文件
     print_info "[②] 恢复文件..."
     
-    cd "$BACKUP_EXTRACTED"
+    cd "$BACKUP_EXTRACTED" || return 1
     
     # 恢复 source
     if [ -d "source" ]; then
@@ -1384,7 +1477,9 @@ restore_hexo() {
                     print_info "    → 清理 Caddyfile 中的冲突配置..."
                     
                     # 备份当前 Caddyfile
-                    sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.pre_restore.$(date +%Y%m%d_%H%M%S)
+                    local caddy_pre_restore
+                    caddy_pre_restore="/etc/caddy/Caddyfile.pre_restore.$(date +%Y%m%d_%H%M%S)"
+                    sudo cp /etc/caddy/Caddyfile "$caddy_pre_restore"
                     
                     # 对每个冲突域名，删除其配置块
                     for domain in $CONFLICT_DOMAINS; do
@@ -1511,7 +1606,7 @@ restore_hexo() {
             fi
         fi
         
-        cd "$BLOG_DIR"
+        cd "$BLOG_DIR" || return 1
         print_info "[⑤] 安装依赖..."
         npm install
         print_success "  ✓ 依赖安装完成"
@@ -1631,7 +1726,7 @@ git_push() {
         return 1
     fi
     
-    cd "$BLOG_DIR"
+    cd "$BLOG_DIR" || return 1
     
     if [ ! -d ".git" ]; then
         print_error "当前目录不是 Git 仓库，请先初始化"
@@ -1677,7 +1772,7 @@ git_pull() {
         return 1
     fi
     
-    cd "$BLOG_DIR"
+    cd "$BLOG_DIR" || return 1
     
     if [ ! -d ".git" ]; then
         print_error "当前目录不是 Git 仓库"
@@ -1691,7 +1786,7 @@ git_pull() {
         print_warning "检测到未提交的更改"
         read -p "是否暂存当前更改？(Y/n): " stash_changes
         if [[ ! "$stash_changes" =~ ^[Nn]$ ]]; then
-            git stash
+            git stash push -u -m "hexo-manager-auto-stash"
             STASHED=true
         fi
     fi
@@ -1741,7 +1836,7 @@ git_clone_repo() {
     sudo chown "$USER:$USER" "$BLOG_DIR"
     git clone "$repo_url" "$BLOG_DIR"
     
-    cd "$BLOG_DIR"
+    cd "$BLOG_DIR" || return 1
     
     if [ -f "package.json" ]; then
         print_info "安装依赖..."
@@ -1764,7 +1859,7 @@ git_init_repo() {
         return 1
     fi
     
-    cd "$BLOG_DIR"
+    cd "$BLOG_DIR" || return 1
     
     # 检查是否已存在Git仓库
     if [ -d ".git" ]; then
@@ -1960,7 +2055,12 @@ git_init_repo() {
 
 # 创建.gitignore文件
 create_gitignore() {
-    cat > .gitignore << 'EOF'
+    local entry
+    touch .gitignore
+    while IFS= read -r entry; do
+        [ -z "$entry" ] && continue
+        grep -Fqx -- "$entry" .gitignore || printf '%s\n' "$entry" >> .gitignore
+    done << 'EOF'
 # Hexo 缓存和生成文件
 .DS_Store
 Thumbs.db
@@ -1986,7 +2086,7 @@ Thumbs.db
 *.tmp
 *.temp
 EOF
-    print_success ".gitignore 已创建"
+    print_success ".gitignore 已补全（原有规则已保留）"
     echo ""
 }
 
@@ -2167,7 +2267,25 @@ create_systemd_service() {
         return 1
     fi
     
-    print_info "创建 systemd 服务配置..."
+    local service_user node_bin npx_bin service_backup
+    service_user=${SUDO_USER:-$USER}
+    if [ "$service_user" = "root" ]; then
+        service_user=$(stat -c '%U' "$BLOG_DIR" 2>/dev/null || true)
+    fi
+    if [ -z "$service_user" ] || [ "$service_user" = "root" ] || ! id "$service_user" >/dev/null 2>&1; then
+        read -p "请输入运行 Hexo 的普通系统用户: " service_user
+    fi
+    if [ -z "$service_user" ] || [ "$service_user" = "root" ] || ! id "$service_user" >/dev/null 2>&1; then
+        print_error "必须选择一个已存在的非 root 用户运行 Hexo 服务"
+        return 1
+    fi
+    node_bin=$(command -v node) || { print_error "未找到 node"; return 1; }
+    npx_bin=$(command -v npx) || { print_error "未找到 npx"; return 1; }
+    service_backup="/var/backups/ai-scripts/hexo/$(date +%Y%m%d_%H%M%S)"
+    sudo mkdir -p "$service_backup"
+    [ ! -f /etc/systemd/system/hexo-blog.service ] || sudo cp -a /etc/systemd/system/hexo-blog.service "$service_backup/"
+
+    print_info "创建 systemd 服务配置（用户: $service_user）..."
     
     # 创建服务文件
     sudo tee /etc/systemd/system/hexo-blog.service > /dev/null << EOF
@@ -2177,9 +2295,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=$USER
+User=$service_user
+Group=$(id -gn "$service_user")
 WorkingDirectory=$BLOG_DIR
-ExecStart=$(which npx) hexo server -p $HEXO_PORT
+ExecStart=$npx_bin hexo server -p $HEXO_PORT
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -2188,7 +2307,12 @@ SyslogIdentifier=hexo-blog
 
 # 环境变量
 Environment=NODE_ENV=production
-Environment=PATH=$(dirname $(which node)):$PATH
+Environment=PATH=$(dirname "$node_bin"):/usr/local/bin:/usr/bin:/bin
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=$BLOG_DIR
 
 [Install]
 WantedBy=multi-user.target
@@ -2331,7 +2455,7 @@ start_pm2_service() {
         return 1
     fi
     
-    cd "$BLOG_DIR"
+    cd "$BLOG_DIR" || return 1
     
     print_info "启动 PM2 服务..."
     
@@ -2343,6 +2467,14 @@ start_pm2_service() {
         # 启动新服务
         pm2 start npx --name "hexo-blog" -- hexo server -p $HEXO_PORT
     fi
+
+    # PM2 默认日志不会自动限额，安装并配置官方日志轮转模块。
+    if ! pm2 list | grep -q "pm2-logrotate"; then
+        pm2 install pm2-logrotate
+    fi
+    pm2 set pm2-logrotate:max_size 10M
+    pm2 set pm2-logrotate:retain 5
+    pm2 set pm2-logrotate:compress true
     
     print_success "=========================================="
     print_success "PM2 服务启动完成！"
@@ -2367,14 +2499,14 @@ start_nohup_service() {
         return 1
     fi
     
-    cd "$BLOG_DIR"
+    cd "$BLOG_DIR" || return 1
     
-    # 检查是否已在运行
-    if pgrep -f "hexo server" > /dev/null; then
-        print_warning "检测到 Hexo 服务器正在运行"
+    # 只管理本脚本记录的 PID，避免误杀其他用户或其他目录中的 Hexo。
+    if [ -f "$HEXO_PID_FILE" ] && kill -0 "$(cat "$HEXO_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+        print_warning "检测到本脚本启动的 Hexo 服务器正在运行"
         read -p "是否停止现有服务？(y/N): " kill_existing
         if [[ "$kill_existing" =~ ^[Yy]$ ]]; then
-            pkill -f "hexo server"
+            stop_owned_nohup_service || return 1
             sleep 2
             print_success "已停止现有服务"
         else
@@ -2386,14 +2518,28 @@ start_nohup_service() {
     
     # 创建日志目录
     mkdir -p "$BLOG_DIR/logs"
+    if command -v logrotate >/dev/null 2>&1; then
+        sudo tee /etc/logrotate.d/hexo-blog-nohup >/dev/null << EOF
+"$BLOG_DIR/logs/hexo.log" {
+    size 10M
+    rotate 5
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+    fi
     
     # 启动服务
-    nohup npx hexo server -p $HEXO_PORT > "$BLOG_DIR/logs/hexo.log" 2>&1 &
+    nohup npx hexo server -p "$HEXO_PORT" > "$BLOG_DIR/logs/hexo.log" 2>&1 &
+    PID=$!
+    printf '%s\n' "$PID" > "$HEXO_PID_FILE"
     
     sleep 2
     
-    if pgrep -f "hexo server" > /dev/null; then
-        PID=$(pgrep -f "hexo server")
+    if kill -0 "$PID" 2>/dev/null; then
         print_success "=========================================="
         print_success "Hexo 服务已后台启动！"
         print_success "=========================================="
@@ -2403,11 +2549,11 @@ start_nohup_service() {
         echo ""
         print_info "停止服务命令："
         echo "  kill $PID"
-        echo "  或 pkill -f 'hexo server'"
         echo ""
         print_info "查看日志命令："
         echo "  tail -f $BLOG_DIR/logs/hexo.log"
     else
+        rm -f "$HEXO_PID_FILE"
         print_error "服务启动失败，请查看日志"
         tail -n 20 "$BLOG_DIR/logs/hexo.log"
     fi
@@ -2520,6 +2666,7 @@ install_and_configure_caddy() {
 
 # 配置 Caddy
 configure_caddy() {
+    local caddy_backup had_caddyfile=false had_hexo_conf=false
     # 1. 检查 Hexo 博客目录是否存在
     if [ ! -d "$BLOG_DIR" ]; then
         print_error "博客目录不存在: $BLOG_DIR"
@@ -2544,19 +2691,28 @@ configure_caddy() {
     # 3. 输入域名
     read -p "请输入博客访问域名（例如 blog.example.com，留空则使用 localhost）: " domain_name
     domain_name="${domain_name:-localhost}"
+    if [[ "$domain_name" != "localhost" && ! "$domain_name" =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,63}$ ]]; then
+        print_error "域名格式无效"
+        return 1
+    fi
 
     print_info "将为域名: $domain_name 配置 Caddy"
 
     # 4. 备份现有 Caddyfile
+    caddy_backup="/var/backups/ai-scripts/hexo/caddy-$(date +%Y%m%d_%H%M%S)"
+    sudo mkdir -p "$caddy_backup"
     if [ -f "/etc/caddy/Caddyfile" ]; then
-        print_info "备份现有 Caddyfile..."
-        sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.backup.$(date +%Y%m%d_%H%M%S)
+        had_caddyfile=true
+        sudo cp -a /etc/caddy/Caddyfile "$caddy_backup/Caddyfile"
     fi
+    if [ -f "/etc/caddy/hexo-blog.caddy" ]; then
+        had_hexo_conf=true
+        sudo cp -a /etc/caddy/hexo-blog.caddy "$caddy_backup/hexo-blog.caddy"
+    fi
+    print_info "Caddy 配置备份目录: $caddy_backup"
 
     # 5. 检查是否已有 Hexo 配置
-    HEXO_CONF_EXISTS=false
     if [ -f "/etc/caddy/Caddyfile" ] && grep -q "hexo-blog" /etc/caddy/Caddyfile 2>/dev/null; then
-        HEXO_CONF_EXISTS=true
         print_warning "检测到已有 Hexo 博客相关配置（包含 hexo-blog 字样）"
         read -p "是否覆盖现有配置？(y/N): " overwrite
         if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
@@ -2585,7 +2741,7 @@ configure_caddy() {
     fi
 
     # 目录权限
-    sudo chmod -R 755 "$LOG_DIR"
+    sudo chmod 750 "$LOG_DIR"
 
     # 预创建日志文件（如果存在会保持 owner，不存在则创建）
     if [ -f "$LOG_FILE" ]; then
@@ -2605,7 +2761,7 @@ configure_caddy() {
     elif id www-data >/dev/null 2>&1; then
         sudo chown www-data:www-data "$LOG_FILE"
     fi
-    sudo chmod 644 "$LOG_FILE"
+    sudo chmod 640 "$LOG_FILE"
 
     # 7. 创建独立 Hexo 配置文件
     HEXO_CADDY_CONF="/etc/caddy/hexo-blog.caddy"
@@ -2640,7 +2796,7 @@ $domain_name {
     @static {
         path *.css *.js *.jpg *.jpeg *.png *.gif *.ico *.svg *.woff *.woff2 *.ttf *.eot *.webp
     }
-    header @static Cache-Control "public, max-age=31536000, immutable"
+    header @static Cache-Control "public, max-age=604800"
 
     # HTML 文件短缓存
     @html {
@@ -2650,14 +2806,18 @@ $domain_name {
 
     # 日志配置
     log {
-        output file $LOG_FILE
+        output file $LOG_FILE {
+            roll_size 10MiB
+            roll_keep 5
+            roll_keep_for 168h
+        }
         format json
     }
 
     # 安全头部
     header {
         # HSTS
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        Strict-Transport-Security "max-age=31536000"
         # 防止 MIME 类型嗅探
         X-Content-Type-Options "nosniff"
         # 点击劫持防护
@@ -2704,29 +2864,24 @@ EOF
     elif id www-data >/dev/null 2>&1; then
         sudo chown -R www-data:www-data "$LOG_DIR"
     fi
-    sudo chmod -R 755 "$LOG_DIR"
+    sudo chmod 750 "$LOG_DIR"
 
     # 10. 验证 Caddy 配置
     print_info "验证 Caddy 配置..."
     if sudo caddy validate --config /etc/caddy/Caddyfile; then
         print_success "配置验证成功！"
 
-        # 11. 是否重启 Caddy
-        read -p "是否立即重启 Caddy 应用配置？(Y/n): " restart_caddy
+        # 11. 热重载配置，避免不必要的停机。
+        read -p "是否立即重载 Caddy 应用配置？(Y/n): " restart_caddy
         if [[ ! "$restart_caddy" =~ ^[Nn]$ ]]; then
-            print_info "停止 Caddy 服务..."
-            sudo systemctl stop caddy
-            sleep 1
-
-            print_info "启动 Caddy 服务..."
-            if sudo systemctl start caddy; then
+            print_info "重载 Caddy 服务..."
+            if sudo systemctl reload caddy; then
                 sleep 2
 
                 if sudo systemctl is-active --quiet caddy; then
                     # 修复 public 目录权限
                     print_info "设置静态文件权限..."
                     if [ -d "$BLOG_DIR/public" ]; then
-                        sudo chmod -R 755 "$BLOG_DIR/public"
                         sudo find "$BLOG_DIR/public" -type f -exec chmod 644 {} \;
                         sudo find "$BLOG_DIR/public" -type d -exec chmod 755 {} \;
                         print_success "文件权限已修复"
@@ -2752,7 +2907,18 @@ EOF
                     sudo journalctl -u caddy -n 30 --no-pager
                 fi
             else
-                print_error "Caddy 启动失败！"
+                print_error "Caddy 重载失败，正在恢复配置备份！"
+                if [ "$had_caddyfile" = true ]; then
+                    sudo cp -a "$caddy_backup/Caddyfile" /etc/caddy/Caddyfile
+                else
+                    sudo rm -f /etc/caddy/Caddyfile
+                fi
+                if [ "$had_hexo_conf" = true ]; then
+                    sudo cp -a "$caddy_backup/hexo-blog.caddy" /etc/caddy/hexo-blog.caddy
+                else
+                    sudo rm -f /etc/caddy/hexo-blog.caddy
+                fi
+                sudo systemctl reload caddy 2>/dev/null || true
                 print_info "错误详情："
                 sudo journalctl -u caddy -n 30 --no-pager
                 echo ""
@@ -2765,12 +2931,17 @@ EOF
     else
         print_error "配置验证失败！"
         print_info "正在恢复备份..."
-        # 修正了此处错误的转义符 \
-        LATEST_BACKUP=$(ls -t /etc/caddy/Caddyfile.backup.* 2>/dev/null | head -1)
-        if [ -n "$LATEST_BACKUP" ]; then
-            sudo cp "$LATEST_BACKUP" /etc/caddy/Caddyfile
-            print_success "已恢复备份配置: $LATEST_BACKUP"
+        if [ "$had_caddyfile" = true ]; then
+            sudo cp -a "$caddy_backup/Caddyfile" /etc/caddy/Caddyfile
+        else
+            sudo rm -f /etc/caddy/Caddyfile
         fi
+        if [ "$had_hexo_conf" = true ]; then
+            sudo cp -a "$caddy_backup/hexo-blog.caddy" /etc/caddy/hexo-blog.caddy
+        else
+            sudo rm -f /etc/caddy/hexo-blog.caddy
+        fi
+        print_success "已从 $caddy_backup 恢复配置"
         return 1
     fi
 }
@@ -2796,6 +2967,7 @@ install_and_configure_nginx() {
 
 # 配置 Nginx
 configure_nginx() {
+    local nginx_backup had_nginx_site=false had_nginx_link=false
     if [ ! -d "$BLOG_DIR" ]; then
         print_error "博客目录不存在: $BLOG_DIR"
         print_info "请先运行选项1部署 Hexo 博客"
@@ -2817,22 +2989,33 @@ configure_nginx() {
     
     # 获取域名和端口
     read -p "输入域名（例如 blog.example.com）: " domain_name
-    if [ -z "$domain_name" ]; then
-        print_error "域名不能为空"
+    if [[ ! "$domain_name" =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,63}$ ]]; then
+        print_error "域名格式无效"
         return 1
     fi
     
     read -p "监听端口（默认 80）: " listen_port
     listen_port=${listen_port:-80}
+    if ! [[ "$listen_port" =~ ^[0-9]+$ ]] || [ "$listen_port" -lt 1 ] || [ "$listen_port" -gt 65535 ]; then
+        print_error "监听端口必须是 1-65535 之间的整数"
+        return 1
+    fi
     
     # 配置文件路径
     NGINX_SITE_CONF="/etc/nginx/sites-available/hexo-blog"
     NGINX_SITE_ENABLED="/etc/nginx/sites-enabled/hexo-blog"
     
+    nginx_backup="/var/backups/ai-scripts/hexo/nginx-$(date +%Y%m%d_%H%M%S)"
+    sudo mkdir -p "$nginx_backup"
     # 备份现有配置
     if [ -f "$NGINX_SITE_CONF" ]; then
+        had_nginx_site=true
         print_info "备份现有配置..."
-        sudo cp "$NGINX_SITE_CONF" "${NGINX_SITE_CONF}.backup.$(date +%Y%m%d_%H%M%S)"
+        sudo cp -a "$NGINX_SITE_CONF" "$nginx_backup/hexo-blog"
+    fi
+    if [ -L "$NGINX_SITE_ENABLED" ]; then
+        had_nginx_link=true
+        readlink "$NGINX_SITE_ENABLED" | sudo tee "$nginx_backup/enabled-link" >/dev/null
     fi
     
     # 创建配置文件
@@ -2869,8 +3052,8 @@ server {
     
     # 静态资源缓存
     location ~* \.(css|js|jpg|jpeg|png|gif|ico|svg|woff|woff2|ttf|eot|webp)\$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
+        expires 7d;
+        add_header Cache-Control "public";
     }
     
     # HTML 文件短缓存
@@ -2937,17 +3120,26 @@ EOF
                 echo "  sudo certbot --nginx -d $domain_name"
             else
                 print_error "Nginx 启动失败，请查看日志"
+                if [ "$had_nginx_site" = true ]; then
+                    sudo cp -a "$nginx_backup/hexo-blog" "$NGINX_SITE_CONF"
+                else
+                    sudo rm -f "$NGINX_SITE_CONF"
+                fi
+                [ "$had_nginx_link" = true ] || sudo rm -f "$NGINX_SITE_ENABLED"
+                sudo nginx -t >/dev/null 2>&1 && sudo systemctl restart nginx 2>/dev/null || true
                 sudo journalctl -u nginx -n 50 --no-pager
             fi
         fi
     else
         print_error "配置验证失败！"
         print_info "正在恢复备份..."
-        LATEST_BACKUP=$(ls -t "${NGINX_SITE_CONF}.backup."* 2>/dev/null | head -1)
-        if [ -n "$LATEST_BACKUP" ]; then
-            sudo cp "$LATEST_BACKUP" "$NGINX_SITE_CONF"
-            print_success "已恢复备份配置"
+        if [ "$had_nginx_site" = true ]; then
+            sudo cp -a "$nginx_backup/hexo-blog" "$NGINX_SITE_CONF"
+        else
+            sudo rm -f "$NGINX_SITE_CONF"
         fi
+        [ "$had_nginx_link" = true ] || sudo rm -f "$NGINX_SITE_ENABLED"
+        print_success "已从 $nginx_backup 恢复配置"
         return 1
     fi
 }
@@ -3017,7 +3209,9 @@ remove_caddy_config() {
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         # 备份
-        sudo cp /etc/caddy/hexo-blog.caddy /etc/caddy/hexo-blog.caddy.removed.$(date +%Y%m%d_%H%M%S)
+        local caddy_removed_backup
+        caddy_removed_backup="/etc/caddy/hexo-blog.caddy.removed.$(date +%Y%m%d_%H%M%S)"
+        sudo cp /etc/caddy/hexo-blog.caddy "$caddy_removed_backup"
         
         # 删除配置文件
         sudo rm -f /etc/caddy/hexo-blog.caddy
@@ -3050,7 +3244,9 @@ remove_nginx_config() {
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         # 备份
-        sudo cp /etc/nginx/sites-available/hexo-blog /etc/nginx/sites-available/hexo-blog.removed.$(date +%Y%m%d_%H%M%S)
+        local nginx_removed_backup
+        nginx_removed_backup="/etc/nginx/sites-available/hexo-blog.removed.$(date +%Y%m%d_%H%M%S)"
+        sudo cp /etc/nginx/sites-available/hexo-blog "$nginx_removed_backup"
         
         # 删除软链接
         sudo rm -f /etc/nginx/sites-enabled/hexo-blog
@@ -3075,7 +3271,7 @@ start_hexo_server() {
         return 1
     fi
     
-    cd "$BLOG_DIR"
+    cd "$BLOG_DIR" || return 1
     
     if [ ! -f "package.json" ]; then
         print_error "未检测到 Hexo 项目"
@@ -3088,7 +3284,7 @@ start_hexo_server() {
     print_warning "提示：生产环境请使用选项6的后台服务管理"
     echo ""
     
-    npx hexo server -p $HEXO_PORT
+    npx hexo server -p "$HEXO_PORT"
 }
 
 # 8. 生成静态文件
@@ -3098,7 +3294,7 @@ generate_static() {
         return 1
     fi
     
-    cd "$BLOG_DIR"
+    cd "$BLOG_DIR" || return 1
     
     print_info "清理缓存..."
     npx hexo clean
@@ -3119,7 +3315,6 @@ generate_static() {
         
         # 修复文件权限，确保 Web 服务器可读取
         print_info "设置文件权限..."
-        chmod -R 755 "$BLOG_DIR/public" 2>/dev/null || sudo chmod -R 755 "$BLOG_DIR/public"
         find "$BLOG_DIR/public" -type f -exec chmod 644 {} \; 2>/dev/null || sudo find "$BLOG_DIR/public" -type f -exec chmod 644 {} \;
         find "$BLOG_DIR/public" -type d -exec chmod 755 {} \; 2>/dev/null || sudo find "$BLOG_DIR/public" -type d -exec chmod 755 {} \;
         print_success "文件权限已设置（所有人可读）"
@@ -3164,7 +3359,7 @@ show_status() {
     
     echo ""
     if [ -d "$BLOG_DIR" ] && [ -f "$BLOG_DIR/package.json" ]; then
-        cd "$BLOG_DIR"
+        cd "$BLOG_DIR" || return 1
         echo "📦 Hexo 信息:"
         npx hexo version 2>/dev/null | head -5 || echo "   ❌ Hexo 未正确安装"
         
@@ -3230,7 +3425,7 @@ manage_plugins() {
         return 1
     fi
     
-    cd "$BLOG_DIR"
+    cd "$BLOG_DIR" || return 1
     
     print_info "=========================================="
     print_info "Hexo 插件库 (25+)"
@@ -3597,7 +3792,7 @@ manage_themes() {
         return 1
     fi
     
-    cd "$BLOG_DIR"
+    cd "$BLOG_DIR" || return 1
     
     print_info "=========================================="
     print_info "Hexo 主题管理"
@@ -3878,7 +4073,7 @@ switch_theme() {
     if [ -d "themes" ]; then
         for theme in themes/*; do
             if [ -d "$theme" ]; then
-                themes_list+=($(basename "$theme"))
+                themes_list+=("$(basename "$theme")")
             fi
         done
     fi
@@ -3987,18 +4182,26 @@ manage_config() {
         1)
             read -p "请输入新的博客目录（绝对路径）: " new_blog_dir
             if [ -n "$new_blog_dir" ]; then
-                BLOG_DIR="$new_blog_dir"
-                save_config
-                print_success "博客目录已更新为: $BLOG_DIR"
-                print_warning "注意：请确保该目录存在或重新部署博客"
+                if is_safe_managed_dir "$new_blog_dir"; then
+                    BLOG_DIR="$(realpath -m -- "$new_blog_dir")"
+                    save_config
+                    print_success "博客目录已更新为: $BLOG_DIR"
+                    print_warning "注意：请确保该目录存在或重新部署博客"
+                else
+                    print_error "目录不安全；请输入至少三级的绝对路径"
+                fi
             fi
             ;;
         2)
             read -p "请输入新的备份目录（绝对路径）: " new_backup_dir
             if [ -n "$new_backup_dir" ]; then
-                BACKUP_DIR="$new_backup_dir"
-                save_config
-                print_success "备份目录已更新为: $BACKUP_DIR"
+                if is_safe_managed_dir "$new_backup_dir"; then
+                    BACKUP_DIR="$(realpath -m -- "$new_backup_dir")"
+                    save_config
+                    print_success "备份目录已更新为: $BACKUP_DIR"
+                else
+                    print_error "目录不安全；请输入至少三级的绝对路径"
+                fi
             fi
             ;;
         3)

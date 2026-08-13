@@ -1,0 +1,27 @@
+name: Shell quality
+
+on:
+  push:
+    paths:
+      - '**.sh'
+      - '.github/workflows/shell-quality.yml'
+  pull_request:
+    paths:
+      - '**.sh'
+      - '.github/workflows/shell-quality.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Check Shell scripts
+        run: bash tests/check_shell.sh

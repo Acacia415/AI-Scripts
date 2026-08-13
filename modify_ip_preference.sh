@@ -4,7 +4,6 @@
 RED='\033[31m'
 GREEN='\033[32m'
 YELLOW='\033[33m'
-BLUE='\033[34m'
 CYAN='\033[36m'
 NC='\033[0m'
 
@@ -18,7 +17,23 @@ modify_ip_preference() {
     
     # 配置文件路径
     CONF_FILE="/etc/gai.conf"
-    BACKUP_FILE="/etc/gai.conf.bak"
+    BACKUP_DIR="/var/backups/ai-scripts/gai-conf"
+    BACKUP_FILE="$BACKUP_DIR/original.gai.conf"
+    NETWORK_BACKUP_DIR="/var/backups/ai-scripts/ip-preference"
+    NETWORK_STATE_DIR="/var/lib/ai-scripts/ip-preference"
+    install -d -m 700 "$NETWORK_BACKUP_DIR" "$NETWORK_STATE_DIR"
+
+    backup_gai_conf() {
+        local timestamp
+        timestamp=$(date +%Y%m%d-%H%M%S)
+        install -d -m 700 "$BACKUP_DIR"
+        if [ -f "$CONF_FILE" ]; then
+            [ -f "$BACKUP_FILE" ] || cp -a "$CONF_FILE" "$BACKUP_FILE"
+            cp -a "$CONF_FILE" "$BACKUP_DIR/gai.conf.$timestamp"
+        else
+            [ -e "$BACKUP_DIR/original-was-absent" ] || : > "$BACKUP_DIR/original-was-absent"
+        fi
+    }
     
     # 显示当前状态
     show_current_status() {
@@ -36,7 +51,8 @@ modify_ip_preference() {
         
         # 显示IPv6启用状态
         echo -e "\n${YELLOW}IPv6状态：${NC}"
-        local ipv6_disabled=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo "unknown")
+        local ipv6_disabled
+        ipv6_disabled=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo "unknown")
         if [ "$ipv6_disabled" = "1" ]; then
             echo -e "  ▸ ${RED}IPv6已禁用${NC}"
         elif [ "$ipv6_disabled" = "0" ]; then
@@ -57,7 +73,8 @@ modify_ip_preference() {
         
         # 尝试获取解析结果
         if command -v getent >/dev/null 2>&1; then
-            local result=$(getent ahosts "$test_host" 2>/dev/null | head -1)
+            local result
+            result=$(getent ahosts "$test_host" 2>/dev/null | head -1)
             if echo "$result" | grep -q ":"; then
                 echo -e "  ▸ 当前系统倾向使用 ${GREEN}IPv6${NC}"
             elif echo "$result" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"; then
@@ -94,16 +111,18 @@ modify_ip_preference() {
     
     # 应用IPv4优先配置
     apply_ipv4_preference() {
+        local gai_tmp
         echo -e "${YELLOW}\n[1/3] 备份原配置...${NC}"
         if [ -f "$CONF_FILE" ]; then
-            cp -f "$CONF_FILE" "$BACKUP_FILE" 2>/dev/null || true
+            backup_gai_conf
             echo -e "  ▸ 已备份到 $BACKUP_FILE"
         else
             echo -e "  ▸ 原配置文件不存在，跳过备份"
         fi
         
         echo -e "${YELLOW}[2/3] 生成新配置...${NC}"
-        cat > "$CONF_FILE" << EOF
+        gai_tmp=$(mktemp /etc/.gai.conf.XXXXXX) || return 1
+        cat > "$gai_tmp" << EOF
 # Configuration for getaddrinfo(3).
 #
 # This file is managed by the network toolbox script
@@ -135,6 +154,8 @@ scopev4 ::ffff:169.254.0.0/112  2
 scopev4 ::ffff:127.0.0.0/104    2
 scopev4 ::ffff:0.0.0.0/96       14
 EOF
+        chmod 644 "$gai_tmp"
+        mv -f -- "$gai_tmp" "$CONF_FILE"
         
         echo -e "${YELLOW}[3/3] 验证配置...${NC}"
         if [ -f "$CONF_FILE" ]; then
@@ -159,16 +180,18 @@ EOF
     
     # 应用IPv6优先配置
     apply_ipv6_preference() {
+        local gai_tmp
         echo -e "${YELLOW}\n[1/3] 备份原配置...${NC}"
         if [ -f "$CONF_FILE" ]; then
-            cp -f "$CONF_FILE" "$BACKUP_FILE" 2>/dev/null || true
+            backup_gai_conf
             echo -e "  ▸ 已备份到 $BACKUP_FILE"
         else
             echo -e "  ▸ 原配置文件不存在，跳过备份"
         fi
         
         echo -e "${YELLOW}[2/3] 生成新配置...${NC}"
-        cat > "$CONF_FILE" << EOF
+        gai_tmp=$(mktemp /etc/.gai.conf.XXXXXX) || return 1
+        cat > "$gai_tmp" << EOF
 # Configuration for getaddrinfo(3).
 #
 # This file is managed by the network toolbox script
@@ -200,6 +223,8 @@ scopev4 ::ffff:169.254.0.0/112  2
 scopev4 ::ffff:127.0.0.0/104    2
 scopev4 ::ffff:0.0.0.0/96       14
 EOF
+        chmod 644 "$gai_tmp"
+        mv -f -- "$gai_tmp" "$CONF_FILE"
         
         echo -e "${YELLOW}[3/3] 验证配置...${NC}"
         if [ -f "$CONF_FILE" ]; then
@@ -233,10 +258,16 @@ EOF
                 cp -f "$BACKUP_FILE" "$CONF_FILE"
                 echo -e "  ▸ ${GREEN}已从备份恢复${NC}"
             else
+                echo -e "  ${YELLOW}已取消恢复，当前配置保持不变。${NC}"
+                return 0
                 rm -f "$CONF_FILE"
                 echo -e "  ▸ ${GREEN}已删除配置文件，将使用系统默认${NC}"
             fi
         else
+            if [ ! -e "$BACKUP_DIR/original-was-absent" ]; then
+                echo -e "  ${RED}没有可验证的原始备份，拒绝删除当前配置。${NC}"
+                return 1
+            fi
             if [ -f "$CONF_FILE" ]; then
                 echo -e "  ▸ 删除配置文件..."
                 rm -f "$CONF_FILE"
@@ -257,35 +288,50 @@ EOF
     
     # 禁用IPv6
     disable_ipv6() {
+        local operation_backup sysctl_conf sysctl_tmp old_all old_default old_lo status
         echo -e "${YELLOW}\n正在禁用IPv6...${NC}"
-        
-        echo -e "  ▸ [1/3] 配置sysctl参数..."
-        # 临时禁用
-        sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1
-        sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1
-        sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1
-        
-        echo -e "  ▸ [2/3] 写入持久化配置..."
-        # 持久化配置
-        local sysctl_conf="/etc/sysctl.d/99-disable-ipv6.conf"
-        cat > "$sysctl_conf" << 'EOF'
-# Disable IPv6
+
+        operation_backup="$NETWORK_BACKUP_DIR/disable-$(date +%Y%m%d-%H%M%S)"
+        install -d -m 700 "$operation_backup"
+        sysctl_conf="/etc/sysctl.d/99-disable-ipv6.conf"
+        [[ ! -f "$sysctl_conf" ]] || cp -a "$sysctl_conf" "$operation_backup/99-disable-ipv6.conf"
+        old_all=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 0)
+        old_default=$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null || echo 0)
+        old_lo=$(sysctl -n net.ipv6.conf.lo.disable_ipv6 2>/dev/null || echo 0)
+
+        echo -e "  ▸ [1/3] 写入持久化配置..."
+        sysctl_tmp=$(mktemp /etc/sysctl.d/.99-disable-ipv6.XXXXXX) || return 1
+        cat > "$sysctl_tmp" << 'EOF'
+# Managed by AI-Scripts: disable IPv6
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
 EOF
-        
-        echo -e "  ▸ [3/3] 应用配置..."
-        sysctl -p "$sysctl_conf" >/dev/null 2>&1
-        
-        # 验证
-        local status=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
+        chmod 644 "$sysctl_tmp"
+        mv -f -- "$sysctl_tmp" "$sysctl_conf"
+        touch "$NETWORK_STATE_DIR/owns-disable-ipv6"
+
+        echo -e "  ▸ [2/3] 应用配置..."
+        if ! sysctl -p "$sysctl_conf" >/dev/null 2>&1; then
+            [[ ! -f "$operation_backup/99-disable-ipv6.conf" ]] || cp -a "$operation_backup/99-disable-ipv6.conf" "$sysctl_conf"
+            [[ -f "$operation_backup/99-disable-ipv6.conf" ]] || rm -f "$sysctl_conf"
+            sysctl -w "net.ipv6.conf.all.disable_ipv6=$old_all" >/dev/null 2>&1 || true
+            sysctl -w "net.ipv6.conf.default.disable_ipv6=$old_default" >/dev/null 2>&1 || true
+            sysctl -w "net.ipv6.conf.lo.disable_ipv6=$old_lo" >/dev/null 2>&1 || true
+            rm -f "$NETWORK_STATE_DIR/owns-disable-ipv6"
+            echo -e "${RED}应用失败，已恢复修改前状态。${NC}"
+            return 1
+        fi
+
+        echo -e "  ▸ [3/3] 验证配置..."
+        status=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
         if [ "$status" = "1" ]; then
             echo -e "\n${GREEN}✅ IPv6已成功禁用！${NC}"
             echo -e "${YELLOW}提示：${NC}"
             echo -e "  • 配置立即生效且重启后保持"
             echo -e "  • 已禁用所有网卡的IPv6功能"
             echo -e "  • 可以使用 'ip -6 addr' 验证（应该没有IPv6地址）"
+            echo -e "  • 修改前备份：$operation_backup"
         else
             echo -e "\n${RED}❌ IPv6禁用失败${NC}"
         fi
@@ -293,6 +339,7 @@ EOF
     
     # 恢复IPv6
     enable_ipv6() {
+        local status
         echo -e "${YELLOW}\n正在恢复IPv6...${NC}"
         
         echo -e "  ▸ [1/3] 配置sysctl参数..."
@@ -302,19 +349,20 @@ EOF
         sysctl -w net.ipv6.conf.lo.disable_ipv6=0 >/dev/null 2>&1
         
         echo -e "  ▸ [2/3] 删除持久化配置..."
-        # 删除禁用配置文件
-        rm -f /etc/sysctl.d/99-disable-ipv6.conf
+        # 仅删除本脚本确认拥有的持久化配置文件。
+        if [[ -e "$NETWORK_STATE_DIR/owns-disable-ipv6" ]] && grep -Fqx '# Managed by AI-Scripts: disable IPv6' /etc/sysctl.d/99-disable-ipv6.conf 2>/dev/null; then
+            cp -a /etc/sysctl.d/99-disable-ipv6.conf "$NETWORK_BACKUP_DIR/enable-$(date +%Y%m%d-%H%M%S).conf" 2>/dev/null || true
+            rm -f /etc/sysctl.d/99-disable-ipv6.conf "$NETWORK_STATE_DIR/owns-disable-ipv6"
+        elif [[ -f /etc/sysctl.d/99-disable-ipv6.conf ]]; then
+            echo -e "  ▸ ${YELLOW}该持久化文件并非本脚本确认创建，已保留。${NC}"
+        fi
         
         echo -e "  ▸ [3/3] 重新加载网络配置..."
         # 尝试重启网络服务
-        if systemctl is-active --quiet NetworkManager; then
-            systemctl restart NetworkManager 2>/dev/null || true
-        elif systemctl is-active --quiet networking; then
-            systemctl restart networking 2>/dev/null || true
-        fi
+        echo -e "  ${YELLOW}为避免 SSH 连接中断，不自动重启网络服务。${NC}"
         
         # 验证
-        local status=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
+        status=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
         if [ "$status" = "0" ]; then
             echo -e "\n${GREEN}✅ IPv6已成功恢复！${NC}"
             echo -e "${YELLOW}提示：${NC}"
@@ -328,10 +376,12 @@ EOF
     
     # 自动配置IPv6
     auto_config_ipv6() {
+        local operation_backup old_autoconf old_accept_ra sysctl_tmp sysctl_conf
         echo -e "${YELLOW}\n自动配置IPv6...${NC}"
         
         # 检查IPv6是否已禁用
-        local ipv6_disabled=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
+        local ipv6_disabled
+        ipv6_disabled=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
         if [ "$ipv6_disabled" = "1" ]; then
             echo -e "${RED}错误：IPv6当前已禁用，请先恢复IPv6${NC}"
             return 1
@@ -339,7 +389,8 @@ EOF
         
         echo -e "  ▸ [1/4] 检测网络接口..."
         # 获取主要网络接口
-        local main_iface=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n1)
+        local main_iface
+        main_iface=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n1)
         if [ -z "$main_iface" ]; then
             echo -e "${RED}无法检测到主网络接口${NC}"
             return 1
@@ -348,24 +399,38 @@ EOF
         
         echo -e "  ▸ [2/4] 配置IPv6自动配置参数..."
         # 启用IPv6自动配置
-        sysctl -w net.ipv6.conf.$main_iface.autoconf=1 >/dev/null 2>&1
-        sysctl -w net.ipv6.conf.$main_iface.accept_ra=1 >/dev/null 2>&1
-        sysctl -w net.ipv6.conf.all.forwarding=0 >/dev/null 2>&1
-        
+        if ! [[ $main_iface =~ ^[a-zA-Z0-9_.:-]+$ ]] || [ ! -d "/sys/class/net/$main_iface" ]; then
+            echo -e "${RED}检测到不安全或不存在的网络接口名称，操作已取消。${NC}"
+            return 1
+        fi
         echo -e "  ▸ [3/4] 写入持久化配置..."
-        local sysctl_conf="/etc/sysctl.d/98-ipv6-autoconfig.conf"
-        cat > "$sysctl_conf" << EOF
-# IPv6 Auto Configuration
+        sysctl_conf="/etc/sysctl.d/98-ipv6-autoconfig.conf"
+        operation_backup="$NETWORK_BACKUP_DIR/autoconfig-$(date +%Y%m%d-%H%M%S)"
+        install -d -m 700 "$operation_backup"
+        [[ ! -f "$sysctl_conf" ]] || cp -a "$sysctl_conf" "$operation_backup/98-ipv6-autoconfig.conf"
+        old_autoconf=$(sysctl -n "net.ipv6.conf.${main_iface}.autoconf" 2>/dev/null || echo 0)
+        old_accept_ra=$(sysctl -n "net.ipv6.conf.${main_iface}.accept_ra" 2>/dev/null || echo 0)
+        sysctl_tmp=$(mktemp /etc/sysctl.d/.98-ipv6-autoconfig.XXXXXX) || return 1
+        cat > "$sysctl_tmp" << EOF
+# Managed by AI-Scripts: IPv6 auto configuration
 net.ipv6.conf.$main_iface.autoconf = 1
 net.ipv6.conf.$main_iface.accept_ra = 1
-net.ipv6.conf.all.forwarding = 0
 EOF
-        sysctl -p "$sysctl_conf" >/dev/null 2>&1
+        chmod 644 "$sysctl_tmp"
+        mv -f -- "$sysctl_tmp" "$sysctl_conf"
+        if ! sysctl -p "$sysctl_conf" >/dev/null 2>&1; then
+            [[ ! -f "$operation_backup/98-ipv6-autoconfig.conf" ]] || cp -a "$operation_backup/98-ipv6-autoconfig.conf" "$sysctl_conf"
+            [[ -f "$operation_backup/98-ipv6-autoconfig.conf" ]] || rm -f "$sysctl_conf"
+            sysctl -w "net.ipv6.conf.${main_iface}.autoconf=$old_autoconf" >/dev/null 2>&1 || true
+            sysctl -w "net.ipv6.conf.${main_iface}.accept_ra=$old_accept_ra" >/dev/null 2>&1 || true
+            echo -e "${RED}应用失败，已恢复修改前状态。${NC}"
+            return 1
+        fi
         
         echo -e "  ▸ [4/4] 触发IPv6地址获取..."
         # 尝试重启网络接口以触发IPv6配置
         if command -v dhclient >/dev/null 2>&1; then
-            dhclient -6 $main_iface 2>/dev/null || true
+            dhclient -6 "$main_iface" 2>/dev/null || true
         fi
         
         # 等待一下让IPv6地址生成
@@ -374,7 +439,7 @@ EOF
         # 显示IPv6地址
         echo -e "\n${GREEN}✅ IPv6自动配置已完成！${NC}"
         echo -e "\n${YELLOW}当前IPv6地址：${NC}"
-        ip -6 addr show $main_iface | grep -E 'inet6' | awk '{print "  ▸ " $2}' || echo -e "  ▸ ${YELLOW}尚未获取到IPv6地址${NC}"
+        ip -6 addr show "$main_iface" | grep -E 'inet6' | awk '{print "  ▸ " $2}' || echo -e "  ▸ ${YELLOW}尚未获取到IPv6地址${NC}"
         
         echo -e "\n${YELLOW}提示：${NC}"
         echo -e "  • 已启用SLAAC（无状态地址自动配置）"

@@ -21,26 +21,36 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# 1. 清理旧的 alias 快捷方式
-sed -i '/^alias p=/d' ~/.bashrc > /dev/null 2>&1
-sed -i '/^alias p=/d' ~/.profile > /dev/null 2>&1
-sed -i '/^alias p=/d' ~/.bash_profile > /dev/null 2>&1
-
 # 2. 定义本地脚本存放路径
 LOCAL_SCRIPT="$HOME/tool.sh"
+TOOL_BACKUP_DIR="/var/backups/ai-scripts/tool"
+mkdir -p "$TOOL_BACKUP_DIR"
+tool_backup_stamp=$(date +%Y%m%d-%H%M%S)
+[[ ! -f "$LOCAL_SCRIPT" ]] || cp -a "$LOCAL_SCRIPT" "$TOOL_BACKUP_DIR/tool.sh.$tool_backup_stamp"
+[[ ! -f /usr/local/bin/p ]] || cp -a /usr/local/bin/p "$TOOL_BACKUP_DIR/p.$tool_backup_stamp"
+mapfile -t old_tool_backups < <(find "$TOOL_BACKUP_DIR" -maxdepth 1 -type f -printf '%T@ %p\n' | sort -rn | tail -n +21 | cut -d' ' -f2-)
+((${#old_tool_backups[@]} == 0)) || rm -f -- "${old_tool_backups[@]}"
 
 # 3. 判断执行方式
 if [[ "$0" == "/dev/fd/"* || "$0" == "/proc/self/fd/"* ]]; then
     # 通过 bash <(curl …) 执行
-    curl -fsSL https://link.irisu.de/toolbox -o "$LOCAL_SCRIPT"
+    local_tool_temp=$(mktemp "$HOME/.tool-install.XXXXXX")
+    if ! curl -fsSL --connect-timeout 10 --max-time 120 https://link.irisu.de/toolbox -o "$local_tool_temp" \
+        || ! bash -n "$local_tool_temp"; then
+        rm -f "$local_tool_temp"
+        echo -e "${RED}工具箱下载或语法检查失败，未覆盖本地副本。${NC}"
+        exit 1
+    fi
+    install -m 0755 "$local_tool_temp" "$LOCAL_SCRIPT"
+    rm -f "$local_tool_temp"
 else
     # 本地文件执行
-    cp -f "$(realpath "$0")" "$LOCAL_SCRIPT"
+    current_script=$(realpath "$0")
+    [[ "$current_script" == "$(realpath -m "$LOCAL_SCRIPT")" ]] || install -m 0755 "$current_script" "$LOCAL_SCRIPT"
 fi
 
 # 4. 将脚本复制到 /usr/local/bin/p 并赋予可执行权限
-cp -f "$LOCAL_SCRIPT" /usr/local/bin/p
-chmod +x /usr/local/bin/p
+install -m 0755 "$LOCAL_SCRIPT" /usr/local/bin/p
 
 # 5. 提示信息（首次运行或直接执行脚本时显示）
 if [[ $(realpath "$0") != "/usr/local/bin/p" ]]; then
@@ -59,8 +69,8 @@ display_system_info() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/display_system_info.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/display_system_info.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-display-system.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/display_system_info.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -78,8 +88,8 @@ enable_root_login() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/enable_root_login.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/enable_root_login.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-enable-root.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/enable_root_login.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -97,8 +107,8 @@ traffic_monitor() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/traffic_monitor.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/traffic_monitor.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-traffic-monitor.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/traffic_monitor.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -111,6 +121,7 @@ traffic_monitor() {
 
 # ======================= 安装snell协议 =======================
 install_snell() {
+    local installer; installer=$(mktemp /tmp/ai-snell.XXXXXX)
     clear
     # 添加来源提示（使用工具箱内置颜色变量）
     echo -e "${YELLOW}════════════════════════════════════${NC}"
@@ -118,11 +129,12 @@ install_snell() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
     # 执行安装流程（增加错误处理和自动清理）
-    if wget -O snell.sh https://raw.githubusercontent.com/xOS/Snell/master/Snell.sh; then
-        chmod +x snell.sh
-        ./snell.sh
-        rm -f snell.sh  # 新增清理步骤
+    if wget --https-only --timeout=30 --tries=2 -O "$installer" https://raw.githubusercontent.com/xOS/Snell/master/Snell.sh \
+        && bash -n "$installer"; then
+        bash "$installer"
+        rm -f "$installer"
     else
+        rm -f "$installer"
         echo -e "${RED}下载 Snell 安装脚本失败！${NC}"
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
@@ -131,16 +143,18 @@ install_snell() {
 
 # ======================= 安装Hysteria2协议 =======================
 install_hysteria2() {
+    local installer; installer=$(mktemp /tmp/ai-hysteria.XXXXXX)
     clear
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Misaka-blog/hysteria-install${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    if wget -N --no-check-certificate https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/hysteria.sh; then
-        chmod +x hysteria.sh
-        bash hysteria.sh
-        rm -f hysteria.sh  # 新增清理步骤
+    if wget --https-only --timeout=30 --tries=2 -O "$installer" https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/hysteria.sh \
+        && bash -n "$installer"; then
+        bash "$installer"
+        rm -f "$installer"
     else
+        rm -f "$installer"
         echo -e "${RED}下载 Hysteria2 安装脚本失败！${NC}"
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
@@ -149,16 +163,18 @@ install_hysteria2() {
 
 # ======================= 安装SS协议 =======================
 install_ss_rust() {
+    local installer; installer=$(mktemp /tmp/ai-ss-rust.XXXXXX)
     clear
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/xOS/Shadowsocks-Rust${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    if wget -O ss-rust.sh --no-check-certificate https://raw.githubusercontent.com/xOS/Shadowsocks-Rust/master/ss-rust.sh; then
-        chmod +x ss-rust.sh
-        ./ss-rust.sh
-        rm -f ss-rust.sh  # 清理安装脚本
+    if wget --https-only --timeout=30 --tries=2 -O "$installer" https://raw.githubusercontent.com/xOS/Shadowsocks-Rust/master/ss-rust.sh \
+        && bash -n "$installer"; then
+        bash "$installer"
+        rm -f "$installer"
     else
+        rm -f "$installer"
         echo -e "${RED}下载 SS-Rust 安装脚本失败！${NC}"
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
@@ -167,16 +183,18 @@ install_ss_rust() {
 
 # ====================== 安装 ShadowTLS ======================
 install_shadowtls() {
+    local installer; installer=$(mktemp /tmp/ai-shadowtls.XXXXXX)
     clear
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     echo -e "${CYAN}脚本来源：https://github.com/Kismet0123/ShadowTLS-Manager${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    if wget -O ShadowTLS_Manager.sh --no-check-certificate https://raw.githubusercontent.com/Kismet0123/ShadowTLS-Manager/refs/heads/main/ShadowTLS_Manager.sh; then
-        chmod +x ShadowTLS_Manager.sh
-        ./ShadowTLS_Manager.sh
-        rm -f ShadowTLS_Manager.sh  # 清理安装脚本
+    if wget --https-only --timeout=30 --tries=2 -O "$installer" https://raw.githubusercontent.com/Kismet0123/ShadowTLS-Manager/refs/heads/main/ShadowTLS_Manager.sh \
+        && bash -n "$installer"; then
+        bash "$installer"
+        rm -f "$installer"
     else
+        rm -f "$installer"
         echo -e "${RED}下载 ShadowTLS 安装脚本失败！${NC}"
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
@@ -191,8 +209,8 @@ install_iptables_forward() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/iptables_forward.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/iptables.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-iptables-forward.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/iptables.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -204,6 +222,120 @@ install_iptables_forward() {
 }
 
 # ======================= 一键GOST转发 =======================
+cleanup_gost_v2_logging() {
+    systemctl disable --now gost-logrotate.timer >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/gost-logrotate.timer
+    rm -f /etc/systemd/system/gost-logrotate.service
+    rm -f /etc/systemd/system/gost.service.d/20-log-rotation.conf
+    rmdir /etc/systemd/system/gost.service.d 2>/dev/null || true
+    rm -f /etc/logrotate.d/gost
+    rm -f /var/log/gost/gost-v2.log /var/log/gost/gost-v2.log.*
+    rmdir /var/log/gost 2>/dev/null || true
+    systemctl daemon-reload
+}
+
+configure_gost_v2_logging() {
+    if [[ ! -x /usr/bin/gost || ! -f /etc/gost/config.json || ! -f /usr/lib/systemd/system/gost.service ]]; then
+        cleanup_gost_v2_logging
+        return 0
+    fi
+
+    local gost_backup existing_file
+    gost_backup="/var/backups/ai-scripts/gost-v2/$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$gost_backup"
+    for existing_file in \
+        /etc/gost/config.json \
+        /etc/systemd/system/gost.service.d/20-log-rotation.conf \
+        /etc/logrotate.d/gost \
+        /etc/systemd/system/gost-logrotate.service \
+        /etc/systemd/system/gost-logrotate.timer; do
+        [[ ! -f "$existing_file" ]] || cp -a --parents "$existing_file" "$gost_backup"
+    done
+
+    # 旧版脚本会把 Debug 固定为 true，活跃转发时会产生大量日志。
+    sed -i -E 's/("Debug"[[:space:]]*:[[:space:]]*)true/\1false/g' /etc/gost/config.json
+
+    if ! command -v logrotate >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update && apt-get install -y logrotate
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y logrotate
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y logrotate
+        else
+            echo -e "${RED}未找到 logrotate，无法配置 GOST 日志轮转。${NC}"
+            return 1
+        fi
+    fi
+
+    local logrotate_bin
+    logrotate_bin=$(command -v logrotate)
+    install -d -m 750 /var/log/gost
+    touch /var/log/gost/gost-v2.log
+    chmod 640 /var/log/gost/gost-v2.log
+    install -d -m 755 /etc/systemd/system/gost.service.d
+
+    cat > /etc/systemd/system/gost.service.d/20-log-rotation.conf <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/bin/sh -c 'exec /usr/bin/gost -C /etc/gost/config.json >>/var/log/gost/gost-v2.log 2>&1'
+StandardOutput=null
+StandardError=journal
+EOF
+
+    cat > /etc/logrotate.d/gost <<'EOF'
+/var/log/gost/gost-v2.log {
+    size 20M
+    rotate 5
+    maxage 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+EOF
+
+    cat > /etc/systemd/system/gost-logrotate.service <<EOF
+[Unit]
+Description=Rotate GOST v2 logs
+
+[Service]
+Type=oneshot
+ExecStart=${logrotate_bin} /etc/logrotate.d/gost
+EOF
+
+    cat > /etc/systemd/system/gost-logrotate.timer <<'EOF'
+[Unit]
+Description=Rotate GOST v2 logs hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+AccuracySec=5m
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    if ! systemctl daemon-reload \
+        || ! systemctl enable --now gost-logrotate.timer \
+        || ! systemctl restart gost; then
+        echo -e "${RED}GOST 日志配置应用失败，正在恢复。${NC}"
+        systemctl disable --now gost-logrotate.timer 2>/dev/null || true
+        rm -f /etc/systemd/system/gost.service.d/20-log-rotation.conf \
+            /etc/logrotate.d/gost \
+            /etc/systemd/system/gost-logrotate.service \
+            /etc/systemd/system/gost-logrotate.timer
+        [[ ! -d "$gost_backup/etc" ]] || cp -a "$gost_backup/etc/." /etc/
+        systemctl daemon-reload
+        systemctl restart gost 2>/dev/null || true
+        return 1
+    fi
+    echo -e "${GREEN}GOST v2 日志已限制为 20MB/文件、最多 5 个备份并保留不超过 14 天。${NC}"
+    echo -e "${CYAN}修改前备份：$gost_backup${NC}"
+}
+
 install_gost_forward() {
     clear
     echo -e "${YELLOW}════════════════════════════════════${NC}"
@@ -211,11 +343,14 @@ install_gost_forward() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/Multi-EasyGost${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/gost_forward.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/Multi-EasyGost/refs/heads/test/gost.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-gost-forward.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/Multi-EasyGost/refs/heads/test/gost.sh; then
         chmod +x "$install_script"
         "$install_script"
+        local manager_status=$?
         rm -f "$install_script"
+        configure_gost_v2_logging || return 1
+        return "$manager_status"
     else
         echo -e "${RED}下载 GOST转发 脚本失败！${NC}"
         read -n 1 -s -r -p "按任意键返回主菜单..."
@@ -230,8 +365,8 @@ install_3x_ui() {
     echo -e "${CYAN}脚本来源：https://github.com/mhsanaei/3x-ui${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/3x-ui_install.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-3xui.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -249,8 +384,8 @@ install_media_check() {
     echo -e "${CYAN}脚本来源：ip.check.place${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/media_check.sh"
-    if curl -L -s -o "$install_script" https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-media-check.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -270,9 +405,9 @@ install_speedtest() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
     # 下载packagecloud安装脚本
-    local install_script="/tmp/speedtest_install.sh"
+    local install_script; install_script=$(mktemp /tmp/ai-speedtest.XXXXXX)
     echo -e "${CYAN}下载Speedtest安装脚本...${NC}"
-    if ! curl -s --ssl https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh -o "$install_script"; then
+    if ! curl -fsS --connect-timeout 10 --max-time 120 https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh -o "$install_script"; then
         echo -e "${RED}下载Speedtest安装脚本失败！${NC}"
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
@@ -320,7 +455,7 @@ install_besttrace() {
     
     # 下载并执行besttrace脚本
     echo -e "${CYAN}开始BestTrace测试...${NC}"
-    wget -qO- git.io/besttrace | bash
+    wget --https-only --timeout=30 --tries=2 -qO- https://git.io/besttrace | bash
     
     echo -e "${GREEN}BestTrace测试完成！${NC}"
 }
@@ -333,9 +468,9 @@ nginx_main() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local nginx_script="/tmp/nginx-manager.sh"
+    local nginx_script; nginx_script=$(mktemp /tmp/ai-nginx-manager.XXXXXX)
     
-    if wget -O "$nginx_script" --no-check-certificate \
+    if wget --https-only --timeout=30 --tries=2 -O "$nginx_script" \
         https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/nginx-manager.sh; then
         chmod +x "$nginx_script"
         "$nginx_script"
@@ -369,7 +504,17 @@ install_magic_tcp() {
     
     # 执行优化脚本
     echo -e "${CYAN}正在应用TCP优化参数...${NC}"
-    if bash <(curl -sSL https://raw.githubusercontent.com/qiuxiuya/magicTCP/main/main.sh); then
+    if bash <(curl -fsSL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/qiuxiuya/magicTCP/main/main.sh); then
+        cat > /etc/logrotate.d/magic-tcp <<'EOF'
+/var/log/magic_tcp.log {
+    size 10M
+    rotate 3
+    compress
+    delaycompress
+    missingok
+    notifempty
+}
+EOF
         echo -e "${GREEN}✅ 优化成功完成，重启后生效${NC}"
     else
         echo -e "${RED}❌ 优化过程中出现错误，请检查：${NC}"
@@ -389,8 +534,8 @@ install_dns_unlock() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/dns_unlock.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/dns_unlock.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-dns-unlock.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/dns_unlock.sh; then
         # 转换行尾符，避免CRLF导致的执行问题
         sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
         chmod +x "$install_script"
@@ -413,10 +558,10 @@ install_tg_image_host() {
     echo # Add an empty line for spacing
 
     local install_script_url="https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/install_imghub.sh"
-    local temp_install_script="/tmp/tg_imghub_install.sh"
+    local temp_install_script; temp_install_script=$(mktemp /tmp/ai-imghub.XXXXXX)
 
     echo -e "${CYAN}正在下载 TG图床 安装脚本...${NC}"
-    if curl -sSL -o "$temp_install_script" "$install_script_url"; then
+    if curl -fsSL --connect-timeout 10 --max-time 120 -o "$temp_install_script" "$install_script_url"; then
         chmod +x "$temp_install_script"
         echo -e "${GREEN}下载完成，开始执行安装脚本...${NC}"
         # Execute the script
@@ -438,6 +583,7 @@ install_tg_image_host() {
 
 # ======================= 安装Fail2Ban =======================
 install_fail2ban() {
+    local installer; installer=$(mktemp /tmp/ai-fail2ban.XXXXXX)
     clear
     # 添加来源提示（使用工具箱内置颜色变量）
     echo -e "${YELLOW}════════════════════════════════════${NC}"
@@ -445,11 +591,12 @@ install_fail2ban() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
     # 执行安装流程（增加错误处理和自动清理）
-    if wget -O install_fail2ban.sh https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/install_fail2ban.sh; then
-        chmod +x install_fail2ban.sh
-        ./install_fail2ban.sh
-        rm -f install_fail2ban.sh  # 新增清理步骤
+    if wget --https-only --timeout=30 --tries=2 -O "$installer" https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/install_fail2ban.sh \
+        && bash -n "$installer"; then
+        bash "$installer"
+        rm -f "$installer"
     else
+        rm -f "$installer"
         echo -e "${RED}下载 Fail2Ban 安装脚本失败！${NC}"
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
@@ -458,6 +605,7 @@ install_fail2ban() {
 
 # ======================= 安装 acme.sh =======================
 install_acme() {
+    local installer; installer=$(mktemp /tmp/ai-acme.XXXXXX)
     clear
     # 添加来源提示
     echo -e "${YELLOW}════════════════════════════════════${NC}"
@@ -465,11 +613,12 @@ install_acme() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
     # 执行安装流程（增加错误处理和自动清理）
-    if wget -O acme.sh https://raw.githubusercontent.com/Acacia415/acme-script/refs/heads/main/acme.sh; then
-        chmod +x acme.sh
-        ./acme.sh
-        rm -f acme.sh  # 执行后清理脚本
+    if wget --https-only --timeout=30 --tries=2 -O "$installer" https://raw.githubusercontent.com/Acacia415/acme-script/refs/heads/main/acme.sh \
+        && bash -n "$installer"; then
+        bash "$installer"
+        rm -f "$installer"
     else
+        rm -f "$installer"
         echo -e "${RED}下载 acme.sh 安装脚本失败！${NC}"
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
@@ -478,6 +627,7 @@ install_acme() {
 
 # ======================= 安装 Gost v3 =======================
 install_gost_v3() {
+    local installer; installer=$(mktemp /tmp/ai-gost-v3.XXXXXX)
     clear
     # 添加来源提示
     echo -e "${YELLOW}════════════════════════════════════${NC}"
@@ -485,12 +635,13 @@ install_gost_v3() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
     # 执行安装流程（增加错误处理和自动清理）
-    if wget -O gost_v3.sh https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/gost_v3.sh; then
-        sed -i 's/\r$//' gost_v3.sh 2>/dev/null || dos2unix gost_v3.sh 2>/dev/null
-        chmod +x gost_v3.sh
-        bash gost_v3.sh
-        rm -f gost_v3.sh  # 执行后清理脚本
+    if wget --https-only --timeout=30 --tries=2 -O "$installer" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/gost_v3.sh; then
+        sed -i 's/\r$//' "$installer" 2>/dev/null || true
+        if ! bash -n "$installer"; then rm -f "$installer"; echo -e "${RED}Gost v3 脚本语法检查失败！${NC}"; return 1; fi
+        bash "$installer"
+        rm -f "$installer"
     else
+        rm -f "$installer"
         echo -e "${RED}下载 Gost v3 安装脚本失败！${NC}"
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
@@ -499,6 +650,7 @@ install_gost_v3() {
 
 # ======================= 修改主机名 =======================
 change_hostname() {
+    local installer; installer=$(mktemp /tmp/ai-hostname.XXXXXX)
     clear
     # 添加来源提示
     echo -e "${YELLOW}════════════════════════════════════${NC}"
@@ -506,11 +658,12 @@ change_hostname() {
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
     # 执行安装流程（增加错误处理和自动清理）
-    if wget -O change_hostname.sh https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/change_hostname.sh; then
-        chmod +x change_hostname.sh
-        ./change_hostname.sh
-        rm -f change_hostname.sh  # 执行后清理脚本
+    if wget --https-only --timeout=30 --tries=2 -O "$installer" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/change_hostname.sh \
+        && bash -n "$installer"; then
+        bash "$installer"
+        rm -f "$installer"
     else
+        rm -f "$installer"
         echo -e "${RED}下载主机名修改脚本失败！${NC}"
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
@@ -524,8 +677,8 @@ open_all_ports() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/open_all_ports.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/open_all_ports.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-open-ports.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/open_all_ports.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -543,8 +696,8 @@ caddy_manager() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/caddy_manager.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/caddy_manager.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-caddy-manager.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/caddy_manager.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -562,8 +715,8 @@ modify_ip_preference() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/modify_ip_preference.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/modify_ip_preference.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-ip-preference.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/modify_ip_preference.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -581,8 +734,8 @@ install_shell_beautify() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/install_shell_beautify.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_shell_beautify.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-shell-beautify.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_shell_beautify.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -600,8 +753,8 @@ install_substore() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/install_substore.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_substore.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-substore.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/install_substore.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -619,8 +772,8 @@ optimize_tcp_bbr() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/optimize_tcp_bbr.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/optimize_tcp_bbr.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-optimize-bbr.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/optimize_tcp_bbr.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -638,8 +791,8 @@ restore_tcp_config() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/restore_tcp_config.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/restore_tcp_config.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-restore-tcp.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/restore_tcp_config.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -657,8 +810,8 @@ reinstall_system() {
     echo -e "${CYAN}脚本来源：https://github.com/bin456789/reinstall${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/reinstall_system.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/reinstall_system.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-reinstall-system.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/reinstall_system.sh; then
         # 转换行尾符，避免CRLF导致的执行问题
         sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
         chmod +x "$install_script"
@@ -679,8 +832,8 @@ sync_time() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/sync-time.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/sync-time.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-sync-time.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/sync-time.sh; then
         # 转换行尾符，避免CRLF导致的执行问题
         sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
         chmod +x "$install_script"
@@ -700,9 +853,9 @@ deploy_hexo_blog() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════${NC}"
     
-    local install_script="/tmp/hexo_manager.sh"
+    local install_script; install_script=$(mktemp /tmp/ai-hexo-manager.XXXXXX)
     local target_script="/usr/local/bin/hexo_manager.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/Hexo/hexo_manager.sh; then
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/Hexo/hexo_manager.sh; then
         chmod +x "$install_script"
         install -m 755 "$install_script" "$target_script"
         "$target_script"
@@ -721,8 +874,8 @@ install_hexo_butterfly() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}═══════════════════════════════════════${NC}"
     
-    local install_script="/tmp/butterfly_setup.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/Hexo/butterfly_setup.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-butterfly-setup.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/Hexo/butterfly_setup.sh; then
         chmod +x "$install_script"
         "$install_script"
         rm -f "$install_script"
@@ -740,8 +893,8 @@ install_anytls() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/anytls.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/anytls.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-anytls.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/anytls.sh; then
         sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
         chmod +x "$install_script"
         bash "$install_script"
@@ -760,8 +913,8 @@ saveanybot_manager() {
     echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    local install_script="/tmp/saveanybot-manager.sh"
-    if curl -Ls -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/saveanybot-manager.sh; then
+    local install_script; install_script=$(mktemp /tmp/ai-saveany-manager.XXXXXX)
+    if curl -fLs --connect-timeout 10 --max-time 120 -o "$install_script" https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/saveanybot-manager.sh; then
         sed -i 's/\r$//' "$install_script" 2>/dev/null || dos2unix "$install_script" 2>/dev/null
         chmod +x "$install_script"
         bash "$install_script"
@@ -776,20 +929,23 @@ saveanybot_manager() {
 # ======================= 脚本更新 =======================
 update_script() {
   echo -e "${YELLOW}开始更新脚本...${NC}"
-  
-  # 删除旧脚本
-  rm -f /root/tool.sh
-  
-  # 下载并执行新脚本
-  if curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o /root/tool.sh && 
-     chmod +x /root/tool.sh
+
+  local update_temp backup_file
+  update_temp=$(mktemp /root/.tool.sh.XXXXXX)
+  backup_file="$TOOL_BACKUP_DIR/tool.sh.update-$(date +%Y%m%d-%H%M%S)"
+  if curl -fsSL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o "$update_temp" &&
+     bash -n "$update_temp"
   then
+    [[ -f /root/tool.sh ]] && cp -a /root/tool.sh "$backup_file"
+    chmod 755 "$update_temp"
+    mv -f "$update_temp" /root/tool.sh
     echo -e "${GREEN}更新成功，即将启动新脚本...${NC}"
     sleep 2
     exec /root/tool.sh  # 用新脚本替换当前进程
   else
+    rm -f "$update_temp"
     echo -e "${RED}更新失败！请手动执行："
-    echo -e "curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o tool.sh"
+    echo -e "curl -fsSL --connect-timeout 10 --max-time 120 https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o tool.sh"
     echo -e "chmod +x tool.sh && ./tool.sh${NC}"
     exit 1
   fi
@@ -830,11 +986,7 @@ uninstall_toolbox() {
     echo -e "${GREEN}✓ 已删除 $HOME/tool.sh${NC}"
   fi
   
-  # 清理可能存在的 alias（虽然当前版本没用到，但为了兼容性）
-  sed -i '/^alias p=/d' ~/.bashrc 2>/dev/null
-  sed -i '/^alias p=/d' ~/.profile 2>/dev/null
-  sed -i '/^alias p=/d' ~/.bash_profile 2>/dev/null
-  echo -e "${GREEN}✓ 已清理配置文件${NC}"
+  # 当前版本不写入 alias，因此不修改用户的 shell 配置文件。
   
   echo
   echo -e "${GREEN}════════════════════════════════════${NC}"
@@ -1074,4 +1226,3 @@ if (( BASH_VERSINFO < 4 )); then
 fi
 
 main_menu
-

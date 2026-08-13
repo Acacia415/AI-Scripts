@@ -8,6 +8,9 @@
 AI-Scripts/
 ├── tool.sh                          # 主菜单脚本
 ├── README.md                        # 项目说明文档
+├── LICENSE                          # MIT许可证
+├── SCRIPTS_MAPPING.md               # 主菜单与脚本映射
+├── anytls.sh                        # AnyTLS管理
 ├── caddy_manager.sh                 # Caddy反代管理
 ├── change_hostname.sh               # 主机名修改工具
 ├── display_system_info.sh           # 系统信息查询
@@ -27,7 +30,9 @@ AI-Scripts/
 ├── optimize_tcp_bbr.sh              # TCP性能优化(BBR+fq)
 ├── reinstall_system.sh              # 系统重装工具
 ├── restore_tcp_config.sh            # 恢复TCP原始配置
-└── sync-time.sh                     # 时间同步脚本
+├── saveanybot-manager.sh            # SaveAnyBot与OpenList管理
+├── sync-time.sh                     # 时间同步脚本
+└── Hexo/                            # Hexo博客、Butterfly主题与使用文档
 ```
 
 ## 🚀 快速开始
@@ -82,15 +87,23 @@ sudo ./tool.sh
 - **安装 Hysteria2 协议服务** - 安装Hysteria2代理
 - **安装 SS-Rust 协议服务** - 安装Shadowsocks-Rust
 - **安装 ShadowTLS** - 安装ShadowTLS服务
+- **安装 AnyTLS** - 安装和管理AnyTLS服务
 
 ### 端口转发
 - **一键IPTables转发** - IPTables端口转发管理
 - **一键GOST转发** - GOST端口转发管理
 - **安装 Gost v3** - 安装Gost v3版本
+  - GOST v2关闭Debug日志并按20MB轮转，最多保留5个备份
+  - GOST v3使用内置日志轮转，单文件20MB，最多保留5个备份和14天
 
 ### 面板工具
 - **安装 3X-UI 管理面板** - 安装3X-UI代理管理面板
 - **安装Sub-Store** - 安装订阅转换工具
+- **SaveAnyBot管理** - 部署SaveAnyBot、OpenList并接入多种网盘
+
+### 博客工具
+- **部署Hexo博客** - 部署、备份恢复、Git同步和后台服务管理
+- **安装Butterfly主题** - 初始化主题、相册、视频和时光轴页面
 
 ### 其他工具
 - **流媒体解锁检测** - 检测当前IP的流媒体解锁情况
@@ -100,6 +113,9 @@ sudo ./tool.sh
 - **搭建TG图床** - 搭建Telegram图床服务
 - **安装Fail2Ban** - 安装Fail2Ban防护服务
 - **安装 acme.sh** - 安装SSL证书管理工具
+
+> [!WARNING]
+> 本项目包含开启root密码登录、清空防火墙、修改DNS/内核参数和重装系统等高风险功能。请先阅读目标脚本，并在具备快照和带外控制台的测试环境验证。
 
 ## 📖 模块说明
 
@@ -135,7 +151,7 @@ curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/optimize_t
 ### 项目结构说明
 
 - `tool.sh` - 主菜单脚本，负责显示菜单和调用各个模块
-- `SCRIPTS_MAPPING.md` - 记录脚本拆分的详细信息和映射关系
+- `SCRIPTS_MAPPING.md` - 记录脚本拆分、外部来源和系统改动范围
 - 独立脚本 - 各个功能模块的独立实现
 
 ### 添加新模块
@@ -146,13 +162,22 @@ curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/optimize_t
 4. 在 `tool.sh` 中添加菜单项和调用代码
 5. 更新 `SCRIPTS_MAPPING.md` 文档
 
+### 质量检查
+
+```bash
+# 始终执行 Bash 语法检查；系统已安装 ShellCheck 时同时执行错误级静态分析
+bash tests/check_shell.sh
+```
+
+GitHub Actions 会在 Shell 脚本变更时自动执行同一套检查。历史脚本暂未统一开启严格模式；新增模块建议使用 `set -Eeuo pipefail`，并处理好交互命令和允许失败的探测命令。
+
 ## 🤝 贡献
 
 欢迎提交 Issue 和 Pull Request！
 
 ## 📄 许可证
 
-MIT License
+[MIT License](LICENSE)
 
 ## ⚠️ 免责声明
 
