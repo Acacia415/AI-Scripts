@@ -1,105 +1,61 @@
 #!/bin/bash
 
-# 全局颜色定义
-RED='\033[31m'
-GREEN='\033[32m'
-YELLOW='\033[33m'
-BLUE='\033[34m'
-CYAN='\033[36m'
-NC='\033[0m'
+set -Eeuo pipefail
 
-# ======================= 命令行美化 =======================
+RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; NC='\033[0m'
+
 install_shell_beautify() {
-    clear
-    echo -e "${YELLOW}════════════════════════════════════${NC}"
-    echo -e "${CYAN}正在安装命令行美化组件...${NC}"
-    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo -e "${RED}请使用 root 权限运行。${NC}"; return 1; }
+    command -v apt-get >/dev/null 2>&1 || { echo -e "${RED}当前脚本仅支持 apt 系统。${NC}"; return 1; }
+    apt-get update && apt-get install -y git zsh curl
 
-    echo -e "${CYAN}[1/6] 更新软件源...${NC}"
-    apt-get update > /dev/null 2>&1
+    local timestamp backup_dir temp_installer zsh_custom spaceship_dir new_theme
+    timestamp=$(date +%Y%m%d-%H%M%S)
+    backup_dir="/var/backups/ai-scripts/shell-beautify/${timestamp}"
+    install -d -m 700 "$backup_dir"
+    [[ -f $HOME/.zshrc ]] && cp -a "$HOME/.zshrc" "$backup_dir/zshrc"
+    [[ -d $HOME/.oh-my-zsh ]] && cp -a "$HOME/.oh-my-zsh" "$backup_dir/oh-my-zsh"
 
-    echo -e "${CYAN}[2/6] 安装依赖组件...${NC}"
-    if ! command -v git &> /dev/null; then
-        apt-get install -y git > /dev/null
-    else
-        echo -e "${GREEN} ✓ Git 已安装${NC}"
-    fi
-
-    echo -e "${CYAN}[3/6] 检查zsh...${NC}"
-    if ! command -v zsh &> /dev/null; then
-        echo -e "${YELLOW}未检测到zsh，正在安装...${NC}"
-        apt-get install -y zsh > /dev/null
-    else
-        echo -e "${GREEN} ✓ Zsh 已安装${NC}"
-    fi
-
-    echo -e "${CYAN}[4/6] 配置oh-my-zsh...${NC}"
-    if [ ! -d "$HOME/.oh-my-zsh" ]; then
-        echo -e "首次安装oh-my-zsh..."
-        sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}oh-my-zsh安装失败！请检查网络连接${NC}"
+    if [[ ! -d $HOME/.oh-my-zsh ]]; then
+        temp_installer=$(mktemp /tmp/ai-ohmyzsh.XXXXXX)
+        if ! curl -fsSL --connect-timeout 10 --max-time 60 https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o "$temp_installer" \
+            || ! sh -n "$temp_installer" \
+            || ! sh "$temp_installer" --unattended; then
+            rm -f "$temp_installer"
+            echo -e "${RED}Oh My Zsh 最新安装脚本下载、校验或执行失败。${NC}"
             return 1
         fi
-    else
-        echo -e "${GREEN} ✓ oh-my-zsh 已安装${NC}"
+        rm -f "$temp_installer"
     fi
 
-    echo -e "${CYAN}[5/6] 设置Spaceship主题并自定义...${NC}"
-    ZSH_CUSTOM="$HOME/.oh-my-zsh/custom"
-    SPACESHIP_REPO="https://github.com/spaceship-prompt/spaceship-prompt.git"
-    SPACESHIP_DIR="$ZSH_CUSTOM/themes/spaceship-prompt"
-    SPACESHIP_SYMLINK="$ZSH_CUSTOM/themes/spaceship.zsh-theme"
-
-    rm -rf "$SPACESHIP_DIR"
-    rm -f "$SPACESHIP_SYMLINK"
-
-    git clone --depth=1 "$SPACESHIP_REPO" "$SPACESHIP_DIR" > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}❌ 主题克隆失败！请检查网络或Git配置。${NC}"
+    zsh_custom=${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}
+    spaceship_dir="$zsh_custom/themes/spaceship-prompt"
+    new_theme=$(mktemp -d "$zsh_custom/themes/.spaceship.XXXXXX")
+    if ! git clone --depth=1 https://github.com/spaceship-prompt/spaceship-prompt.git "$new_theme/repo"; then
+        rm -rf -- "$new_theme"
+        echo -e "${RED}主题下载失败；原主题和 .zshrc 未改动。${NC}"
         return 1
     fi
+    [[ -d $spaceship_dir ]] && mv "$spaceship_dir" "$backup_dir/spaceship-prompt"
+    mv "$new_theme/repo" "$spaceship_dir"
+    rm -rf -- "$new_theme"
+    ln -sfn "$spaceship_dir/spaceship.zsh-theme" "$zsh_custom/themes/spaceship.zsh-theme"
 
-    ln -s "$SPACESHIP_DIR/spaceship.zsh-theme" "$SPACESHIP_SYMLINK"
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}❌ 创建符号链接失败！${NC}"
-        return 1
-    fi
-    echo -e "${GREEN} ✓ 主题文件安装完成${NC}"
-
-    # 配置 .zshrc 文件
-    sed -i 's/^ZSH_THEME=.*/ZSH_THEME="spaceship"/' ~/.zshrc
-
-    # 自定义Docker图标
-    if grep -q "^SPACESHIP_DOCKER_SYMBOL=" ~/.zshrc; then
-        sed -i 's/^SPACESHIP_DOCKER_SYMBOL=.*/SPACESHIP_DOCKER_SYMBOL="D "/' ~/.zshrc
+    [[ -f $HOME/.zshrc ]] || touch "$HOME/.zshrc"
+    if grep -q '^ZSH_THEME=' "$HOME/.zshrc"; then
+        sed -i 's/^ZSH_THEME=.*/ZSH_THEME="spaceship"/' "$HOME/.zshrc"
     else
-        sed -i '/^ZSH_THEME="spaceship"/i SPACESHIP_DOCKER_SYMBOL="D "' ~/.zshrc
+        printf '\nZSH_THEME="spaceship"\n' >> "$HOME/.zshrc"
     fi
-
-    # 自定义箭头符号
-    if grep -q "^SPACESHIP_CHAR_SYMBOL=" ~/.zshrc; then
-        sed -i 's/^SPACESHIP_CHAR_SYMBOL=.*/SPACESHIP_CHAR_SYMBOL="❯ "/' ~/.zshrc
+    if grep -q '^SPACESHIP_DOCKER_SYMBOL=' "$HOME/.zshrc"; then
+        sed -i 's/^SPACESHIP_DOCKER_SYMBOL=.*/SPACESHIP_DOCKER_SYMBOL="D "/' "$HOME/.zshrc"
     else
-        sed -i '/^ZSH_THEME="spaceship"/i SPACESHIP_CHAR_SYMBOL="❯ "' ~/.zshrc
-    fi
-    echo -e "${GREEN} ✓ .zshrc 配置完成 (图标已自定义)${NC}"
-
-    echo -e "${CYAN}[6/6] 设置默认shell...${NC}"
-    if [ "$SHELL" != "$(which zsh)" ]; then
-        chsh -s $(which zsh) >/dev/null
+        printf 'SPACESHIP_DOCKER_SYMBOL="D "\n' >> "$HOME/.zshrc"
     fi
 
-    echo -e "\n${GREEN}✅ 美化完成！重启终端后生效${NC}"
-    read -p "$(echo -e "${YELLOW}是否立即生效主题？[${GREEN}Y${YELLOW}/n] ${NC}")" confirm
-    confirm=${confirm:-Y}
-    if [[ "${confirm^^}" == "Y" ]]; then
-        echo -e "${GREEN}正在应用新配置...${NC}"
-        exec zsh
-    else
-        echo -e "\n${YELLOW}可稍后手动执行：${CYAN}exec zsh ${YELLOW}生效配置${NC}"
-    fi
+    chsh -s "$(command -v zsh)" "$(id -un)"
+    echo -e "${GREEN}安装完成。修改前备份：${backup_dir}${NC}"
+    echo -e "${YELLOW}重新登录后生效。${NC}"
 }
 
-# 执行函数
 install_shell_beautify

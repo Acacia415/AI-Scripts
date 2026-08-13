@@ -1,726 +1,234 @@
 #!/bin/bash
 
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # 无颜色
+set -uo pipefail
 
-# 检查root权限
-check_root() {
-    if [ "$(id -u)" != "0" ]; then
-        echo -e "${RED}错误：此脚本需要root权限执行${NC}"
-        exit 1
-    fi
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+STATE_DIR=/var/lib/ai-scripts/nginx
+SITES_FILE="$STATE_DIR/sites.tsv"
+BACKUP_ROOT=/var/backups/ai-scripts/nginx
+
+require_root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo -e "${RED}请使用 root 权限运行。${NC}"; exit 1; }; }
+valid_domain() { [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; }
+valid_upstream() { [[ $1 =~ ^[A-Za-z0-9_.:-]+$ ]] && [[ $1 != *..* ]]; }
+valid_port() { [[ $1 =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
+pause_menu() { read -r -p '按回车继续……' _; }
+
+backup_nginx() {
+    local timestamp dir
+    timestamp=$(date +%Y%m%d-%H%M%S)
+    dir="$BACKUP_ROOT/$timestamp"
+    install -d -m 700 "$dir"
+    [[ -d /etc/nginx ]] && cp -a /etc/nginx "$dir/nginx"
+    [[ -f $SITES_FILE ]] && cp -a "$SITES_FILE" "$dir/sites.tsv"
+    printf '%s' "$dir"
 }
 
-# 检查DNS解析
-check_dns_resolution() {
-    local domain=$1
-    echo -e "${YELLOW}正在验证域名解析: $domain...${NC}"
-    
-    # 检查dig命令是否存在，如果不存在则安装
-    if ! command -v dig &> /dev/null; then
-        echo -e "${YELLOW}未检测到dig命令，正在尝试安装...${NC}"
-        if command -v apt-get &> /dev/null; then
-            apt-get update && apt-get install -y dnsutils
-        elif command -v yum &> /dev/null; then
-            yum install -y bind-utils
-        else
-            echo -e "${RED}无法自动安装dig工具，请手动安装后重试${NC}"
-            return 1
-        fi
-    fi
-    
-    # 验证安装成功
-    if ! command -v dig &> /dev/null; then
-        echo -e "${RED}dig工具安装失败${NC}"
-        return 1
-    fi
-    
-    # 继续原有的DNS检查
-    if ! dig +short A "$domain" | grep -qP '^\d+\.\d+\.\d+\.\d+$'; then
-        echo -e "${RED}错误：域名 $domain 未解析到IP地址${NC}"
-        echo -e "${YELLOW}请检查："
-        echo -e "1. DNS解析记录是否正确"
-        echo -e "2. 域名是否已生效（新域名可能需要等待）${NC}"
-        return 1
-    fi
-    return 0
-}
-
-# 安装Certbot（增强兼容性）
-install_certbot() {
-    echo -e "${YELLOW}正在安装Certbot...${NC}"
-  
-    # 自动选择安装方式
-    if command -v apt-get &> /dev/null; then
-        apt-get update
-        apt-get install -y python3-pip python3-venv certbot python3-certbot-nginx
-    elif command -v yum &> /dev/null; then
-        yum install -y python3-pip certbot python3-certbot-nginx
-    else
-        echo -e "${YELLOW}使用pip进行安装...${NC}"
-        if ! command -v pip3 &> /dev/null; then
-            echo -e "${YELLOW}正在安装pip...${NC}"
-            python3 -m ensurepip --default-pip || {
-                echo -e "${RED}pip安装失败，尝试使用系统包管理器安装${NC}"
-                if command -v apt-get &> /dev/null; then
-                    apt-get update && apt-get install -y python3-pip
-                elif command -v yum &> /dev/null; then
-                    yum install -y python3-pip
-                else
-                    echo -e "${RED}无法安装pip，请手动安装后重试${NC}"
-                    return 1
-                fi
-            }
-        fi
-        pip3 install certbot certbot-nginx
-    fi
-
-    # 验证安装
-    if ! command -v certbot &> /dev/null; then
-        echo -e "${RED}Certbot安装失败，请手动安装：https://certbot.eff.org/${NC}"
-        return 1
-    fi
-  
-    echo -e "${GREEN}Certbot安装成功！${NC}"
-    return 0
-}
-
-# 安装/更新Nginx
 install_nginx() {
-    clear
-    check_root
-    echo -e "${YELLOW}正在安装依赖...${NC}"
-  
-    # 安装必要工具
-    if ! command -v fuser &>/dev/null; then
-        if command -v apt-get &> /dev/null; then
-            apt-get install -y psmisc
-        elif command -v yum &> /dev/null; then
-            yum install -y psmisc
-        fi
+    if command -v nginx >/dev/null 2>&1; then return 0; fi
+    if ss -ltn '( sport = :80 or sport = :443 )' 2>/dev/null | tail -n +2 | grep -q .; then
+        echo -e "${RED}80 或 443 已被其他程序占用；不会自动结束该程序。请先处理冲突。${NC}"
+        return 1
     fi
-
-    # 检测系统类型
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        OS=$ID
+    install -d -m 700 "$STATE_DIR"
+    touch "$STATE_DIR/installed-by-script"
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update && apt-get install -y nginx curl certbot python3-certbot-nginx
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y nginx certbot python3-certbot-nginx
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y nginx certbot python3-certbot-nginx
     else
-        echo -e "${RED}无法检测操作系统类型${NC}"
-        exit 1
+        echo -e "${RED}不支持的包管理器。${NC}"; return 1
     fi
-
-    # 检测端口占用
-    echo -e "${YELLOW}检查端口占用情况...${NC}"
-    if ss -tulpn | grep -E ':80\s|:443\s'; then
-        echo -e "${YELLOW}警告：检测到80或443端口已被占用${NC}"
-        read -p "是否尝试释放端口？(y/n): " FREE_PORT
-        if [[ "$FREE_PORT" == "y" ]]; then
-            echo -e "${YELLOW}尝试释放端口...${NC}"
-            fuser -k 80/tcp 443/tcp 2>/dev/null
-        else
-            echo -e "${YELLOW}继续安装，但可能导致Nginx无法启动${NC}"
-        fi
-    fi
-
-    case $OS in
-        debian|ubuntu)
-            apt update
-            apt install -y curl wget gnupg2 ca-certificates lsb-release apt-transport-https
-          
-            echo -e "${YELLOW}添加Nginx存储库...${NC}"
-            mkdir -p /etc/apt/keyrings
-            curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg
-            echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/$OS `lsb_release -cs` nginx" | tee /etc/apt/sources.list.d/nginx.list
-          
-            apt update
-            apt install -y nginx
-            ;;
-        centos|rhel)
-            rpm -Uvh http://nginx.org/packages/centos/7/noarch/RPMS/nginx-release-centos-7-0.el7.ngx.noarch.rpm
-            yum install -y nginx
-            ;;
-        *)
-            echo -e "${RED}不支持的Linux发行版${NC}"
-            exit 1
-            ;;
-    esac
-
-    # 安装后配置
-    echo -e "${YELLOW}正在创建必要目录结构...${NC}"
-    mkdir -p /etc/nginx/conf.d
-    mkdir -p /var/log/nginx
-    chown -R nginx:nginx /var/log/nginx
-
-    if [ ! -f /etc/nginx/nginx.conf ]; then
-        echo -e "${YELLOW}生成默认nginx.conf...${NC}"
-        cat <<EOF | tee /etc/nginx/nginx.conf >/dev/null
-user nginx;
-worker_processes auto;
-error_log /var/log/nginx/error.log;
-pid /var/run/nginx.pid;
-
-events {
-    worker_connections 1024;
-}
-
-http {
-    include       /etc/nginx/mime.types;
-    default_type  application/octet-stream;
-    sendfile        on;
-    keepalive_timeout  65;
-    include /etc/nginx/conf.d/*.conf;
-}
-EOF
-    fi
-
-    # 防火墙配置
-    if command -v ufw &> /dev/null; then
-        ufw allow 'Nginx Full'
-        ufw reload
-    elif command -v firewall-cmd &> /dev/null; then
-        firewall-cmd --permanent --add-service=http
-        firewall-cmd --permanent --add-service=https
-        firewall-cmd --reload
-    fi
-
+    nginx -t || return 1
     systemctl enable --now nginx
-  
-    # 错误处理
-    if ! systemctl is-active --quiet nginx; then
-        echo -e "${RED}启动失败，执行深度修复...${NC}"
-      
-        # 日志分析
-        local error_log=$(journalctl -u nginx -n 50 | grep -iE 'error|failed')
-        echo -e "${YELLOW}关键错误摘要：\n$error_log${NC}"
-      
-        # 端口冲突解决
-        fuser -k 80/tcp 443/tcp 2>/dev/null
-      
-        # 配置重置
-        echo -e "${YELLOW}重建核心目录结构...${NC}"
-        mkdir -p /etc/nginx/conf.d
-        mkdir -p /var/log/nginx
-        chown -R nginx:nginx /var/log/nginx
-
-        echo -e "${YELLOW}生成最小化配置...${NC}"
-        cat <<EOF | tee /etc/nginx/nginx.conf >/dev/null
-user nginx;
-worker_processes auto;
-error_log /var/log/nginx/error.log;
-pid /var/run/nginx.pid;
-
-events {
-    worker_connections 1024;
 }
 
-http {
-    include       /etc/nginx/mime.types;
-    default_type  application/octet-stream;
-    sendfile        on;
-    keepalive_timeout  65;
-    include /etc/nginx/conf.d/*.conf;
-}
-EOF
-      
-        # 重试启动
-        sudo systemctl restart nginx || {
-            echo -e "${RED}终极修复失败，建议："
-            echo -e "1. 检查/var/log/nginx/error.log"
-            echo -e "2. 使用调试模式运行: sudo nginx -g 'daemon off; master_process on;'${NC}"
-            exit 1
-        }
-    fi
-
-    echo -e "${GREEN}Nginx 安装完成，版本信息：$(nginx -v 2>&1)${NC}"
+record_site() {
+    local domain=$1 upstream=$2 port=$3 temp
+    install -d -m 700 "$STATE_DIR"
+    touch "$SITES_FILE"; chmod 600 "$SITES_FILE"
+    temp=$(mktemp "$STATE_DIR/.sites.XXXXXX")
+    awk -F '\t' -v domain="$domain" '$1 != domain' "$SITES_FILE" > "$temp"
+    printf '%s\t%s\t%s\n' "$domain" "$upstream" "$port" >> "$temp"
+    chmod 600 "$temp" && mv -f "$temp" "$SITES_FILE"
 }
 
-# 配置反向代理（支持多域名）
-setup_reverse_proxy() {
-    clear
-    check_root
-  
-    # 只读取单个域名
-    read -p "请输入域名 (无需http): " DOMAIN
-    # 检查单个域名的DNS解析
-    if ! check_dns_resolution "$DOMAIN"; then
-        echo -e "${RED}域名解析检查失败，操作取消${NC}"
-        return 1
-    fi
-    echo -e "${GREEN}将为以下域名配置反向代理: $DOMAIN${NC}"
-  
-    # 智能判断上游地址
-    while true; do
-        read -p "是否为本地服务？(y/n): " IS_LOCAL
-        case $IS_LOCAL in
-            [Yy]* )
-                UPSTREAM_IP="127.0.0.1"
-                echo -e "${YELLOW}使用本地服务，自动设置上游IP为127.0.0.1${NC}"
-                break
-                ;;
-            [Nn]* )
-                while true; do
-                    read -p "请输入上游服务器IP地址: " UPSTREAM_IP
-                    if [[ $UPSTREAM_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                        break
-                    else
-                        echo -e "${RED}错误：无效的IP地址格式${NC}"
-                    fi
-                done
-                break
-                ;;
-            * )
-                echo -e "${RED}请回答 y 或 n${NC}"
-                ;;
-        esac
-    done
-
-    # 端口验证
-    while true; do
-        read -p "请输入上游服务器端口: " UPSTREAM_PORT
-        if [[ $UPSTREAM_PORT =~ ^[0-9]+$ ]] && [ $UPSTREAM_PORT -ge 1 ] && [ $UPSTREAM_PORT -le 65535 ]; then
-            break
-        else
-            echo -e "${RED}端口号必须为1-65535之间的数字${NC}"
-        fi
-    done
-
-    CONF_FILE="/etc/nginx/conf.d/${DOMAIN}.conf"
-  
-    # 生成配置
-    cat > $CONF_FILE <<EOF
+write_site() {
+    local domain=$1 upstream=$2 port=$3 config temp
+    config="/etc/nginx/conf.d/ai-${domain}.conf"
+    temp=$(mktemp /etc/nginx/conf.d/.ai-site.XXXXXX)
+    if [[ -f /etc/letsencrypt/live/$domain/fullchain.pem && -f /etc/letsencrypt/live/$domain/privkey.pem ]]; then
+        cat > "$temp" <<EOF
+# Managed by AI-Scripts nginx-manager.sh
 server {
     listen 80;
-    server_name $DOMAIN;
-
-    location / {
-        proxy_pass http://$UPSTREAM_IP:$UPSTREAM_PORT;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-EOF
-
-    # 配置测试
-    if ! nginx -t; then
-        echo -e "${RED}Nginx配置测试失败，请检查输入参数${NC}"
-        rm -f $CONF_FILE
-        return 1
-    fi
-    systemctl reload nginx
-
-    # 安装Certbot
-    if ! command -v certbot &> /dev/null; then
-        install_certbot || return 1
-    fi
-
-    # 构建certbot命令参数，支持多域名
-    local CERTBOT_DOMAINS=""
-    for domain in "${VALID_DOMAINS[@]}"; do
-        CERTBOT_DOMAINS="$CERTBOT_DOMAINS -d $domain"
-    done
-
-    # 申请证书（添加备用方案）
-    if certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email admin@$DOMAIN --redirect; then
-        echo -e "${GREEN}成功使用Nginx插件申请证书${NC}"
-    else
-        echo -e "${YELLOW}Nginx插件失败，尝试使用standalone模式...${NC}"
-        systemctl stop nginx
-      
-        if certbot certonly --standalone $CERTBOT_DOMAINS --non-interactive --agree-tos --email admin@$DOMAIN; then
-            echo -e "${GREEN}成功使用standalone模式申请证书${NC}"
-          
-            # 更新nginx配置
-            cat > $CONF_FILE <<EOF
-server {
-    listen 80;
-    server_name ${VALID_DOMAINS[@]};
+    server_name $domain;
     return 301 https://\$host\$request_uri;
 }
-
 server {
     listen 443 ssl;
-    server_name ${VALID_DOMAINS[@]};
-  
-    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
-  
+    server_name $domain;
+    ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 1d;
-    ssl_session_tickets off;
-  
     location / {
-        proxy_pass http://$UPSTREAM_IP:$UPSTREAM_PORT;
+        proxy_pass http://$upstream:$port;
+        proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
     }
 }
 EOF
-        else
-            echo -e "${RED}证书申请失败，请检查："
-            echo -e "1. 域名解析是否正确"
-            echo -e "2. 80端口是否开放"
-            echo -e "3. 防火墙配置${NC}"
-            systemctl start nginx
-            return 1
-        fi
-      
-        systemctl start nginx
-    fi
-
-    # 添加自动续期
-    (crontab -l 2>/dev/null; echo "0 3 * * * /usr/bin/certbot renew --quiet --post-hook \"systemctl reload nginx\"") | sort -u | crontab -
-  
-    # 最终测试
-    echo -e "${YELLOW}正在进行最终配置检查...${NC}"
-    if curl -I https://$DOMAIN --max-time 10 >/dev/null 2>&1; then
-        echo -e "${GREEN}SSL测试通过！访问地址：https://$DOMAIN${NC}"
     else
-        echo -e "${YELLOW}访问测试失败，但配置可能仍然有效，请手动验证${NC}"
+        cat > "$temp" <<EOF
+# Managed by AI-Scripts nginx-manager.sh
+server {
+    listen 80;
+    server_name $domain;
+    location / {
+        proxy_pass http://$upstream:$port;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
     fi
+    chmod 644 "$temp" && mv -f "$temp" "$config"
 }
 
-# 删除网站配置
-delete_site_config() {
-    clear
-    check_root
-  
-    # 获取所有配置的域名列表
-    echo -e "${BLUE}▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-    echo -e "当前存在的域名配置列表：${NC}"
-    local config_files=(/etc/nginx/conf.d/*.conf)
-  
-    if [ ${#config_files[@]} -eq 0 ] || [[ "${config_files[0]}" == "/etc/nginx/conf.d/*.conf" ]]; then
-        echo -e "${YELLOW}没有找到任何域名配置${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return
-    fi
-  
-    # 显示带序号的可选域名
-    local i=1
-    declare -A domain_map
-    for file in "${config_files[@]}"; do
-        domain=$(basename "$file" .conf)
-        domain_map[$i]=$domain
-        echo -e "${GREEN}$i. $domain${NC}"
-        ((i++))
-        done
-    echo -e "${BLUE}▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁"
-  
-    # 用户选择要删除的配置
-    while true; do
-        read -p "请输入要删除的配置编号 (或直接输入域名): " INPUT
-        if [[ $INPUT =~ ^[0-9]+$ ]]; then
-            if [ -n "${domain_map[$INPUT]}" ]; then
-                DOMAIN=${domain_map[$INPUT]}
-                break
-            else
-                echo -e "${RED}错误：无效的编号${NC}"
-            fi
-        else
-            if [ -f "/etc/nginx/conf.d/${INPUT}.conf" ]; then
-                DOMAIN=$INPUT
-                break
-            else
-                echo -e "${RED}错误：域名配置不存在${NC}"
-            fi
-        fi
-    done
+configure_site() {
+    install_nginx || return 1
+    local domain upstream port email config backup old=''
+    read -r -p '域名: ' domain
+    valid_domain "$domain" || { echo -e "${RED}域名无效。${NC}"; return 1; }
+    read -r -p '上游地址 [127.0.0.1]: ' upstream
+    upstream=${upstream:-127.0.0.1}
+    valid_upstream "$upstream" || { echo -e "${RED}上游地址无效。${NC}"; return 1; }
+    read -r -p '上游端口: ' port
+    valid_port "$port" || { echo -e "${RED}端口无效。${NC}"; return 1; }
+    read -r -p "证书通知邮箱 [admin@$domain]: " email
+    email=${email:-admin@$domain}
+    [[ $email =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || { echo -e "${RED}邮箱无效。${NC}"; return 1; }
 
-    CONF_FILE="/etc/nginx/conf.d/${DOMAIN}.conf"
-    SSL_CONF="/etc/letsencrypt/live/${DOMAIN}"
-  
-    # 执行删除操作
-    if [ -f $CONF_FILE ]; then
-        rm -f $CONF_FILE
-        echo -e "${YELLOW}已删除配置文件: $CONF_FILE${NC}"
-      
-        read -p "是否删除SSL证书？(y/n): " DEL_SSL
-        if [ "$DEL_SSL" = "y" ]; then
-            certbot delete --cert-name $DOMAIN 2>/dev/null
-            rm -rf /etc/letsencrypt/live/$DOMAIN
-            rm -rf /etc/letsencrypt/archive/$DOMAIN
-            rm -rf /etc/letsencrypt/renewal/${DOMAIN}.conf
-            echo -e "${YELLOW}已删除SSL证书相关文件${NC}"
-        fi
-      
-        systemctl reload nginx
-        echo -e "${GREEN}配置删除完成${NC}"
+    backup=$(backup_nginx)
+    config="/etc/nginx/conf.d/ai-${domain}.conf"
+    [[ -f $config ]] && { old=$(mktemp "$STATE_DIR/.site.XXXXXX"); cp -a "$config" "$old"; }
+    write_site "$domain" "$upstream" "$port"
+    if ! nginx -t; then
+        [[ -n $old ]] && mv -f "$old" "$config" || rm -f "$config"
+        echo -e "${RED}配置校验失败，已回滚。${NC}"
+        return 1
+    fi
+    systemctl reload nginx || { [[ -n $old ]] && mv -f "$old" "$config" || rm -f "$config"; systemctl reload nginx || true; return 1; }
+
+    if ! certbot --nginx -d "$domain" --non-interactive --agree-tos --email "$email" --redirect; then
+        echo -e "${YELLOW}证书申请失败，保留已验证的 HTTP 反向代理配置；没有停止 Nginx。${NC}"
+    fi
+    nginx -t && systemctl reload nginx
+    record_site "$domain" "$upstream" "$port"
+    rm -f -- "$old"
+    echo -e "${GREEN}站点配置完成。操作前备份：${backup}${NC}"
+}
+
+list_sites() {
+    if [[ ! -s $SITES_FILE ]]; then echo -e "${YELLOW}没有本脚本管理的站点。${NC}"; return 1; fi
+    awk -F '\t' '{printf "%-3d %-30s -> %s:%s\n", NR, $1, $2, $3}' "$SITES_FILE"
+}
+
+select_site() {
+    local number total
+    list_sites >&2 || return 1
+    read -r -p '选择编号: ' number
+    total=$(wc -l < "$SITES_FILE")
+    [[ $number =~ ^[0-9]+$ ]] && (( number >= 1 && number <= total )) || return 1
+    sed -n "${number}p" "$SITES_FILE"
+}
+
+edit_site() {
+    local row domain old_upstream old_port upstream port config backup
+    row=$(select_site) || { echo -e "${RED}选择无效。${NC}"; return; }
+    IFS=$'\t' read -r domain old_upstream old_port <<< "$row"
+    read -r -p "上游地址 [$old_upstream]: " upstream; upstream=${upstream:-$old_upstream}
+    read -r -p "上游端口 [$old_port]: " port; port=${port:-$old_port}
+    valid_upstream "$upstream" && valid_port "$port" || { echo -e "${RED}输入无效。${NC}"; return 1; }
+    backup=$(backup_nginx); config="/etc/nginx/conf.d/ai-${domain}.conf"
+    cp -a "$config" "${config}.ai-rollback"
+    write_site "$domain" "$upstream" "$port"
+    if nginx -t && systemctl reload nginx; then
+        rm -f "${config}.ai-rollback"; record_site "$domain" "$upstream" "$port"
+        echo -e "${GREEN}修改成功。备份：$backup${NC}"
     else
-        echo -e "${RED}未找到该域名的配置文件${NC}"
+        mv -f "${config}.ai-rollback" "$config"; systemctl reload nginx || true
+        echo -e "${RED}修改失败，已回滚。${NC}"
     fi
 }
 
-# 编辑反向代理配置
-edit_proxy_config() {
-    clear
-    check_root
-  
-    # 获取所有配置的域名列表
-    echo -e "${BLUE}▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-    echo -e "当前存在的域名配置列表：${NC}"
-    local config_files=(/etc/nginx/conf.d/*.conf)
-  
-    if [ ${#config_files[@]} -eq 0 ] || [[ "${config_files[0]}" == "/etc/nginx/conf.d/*.conf" ]]; then
-        echo -e "${YELLOW}没有找到任何域名配置${NC}"
-        read -n 1 -s -r -p "按任意键返回主菜单..."
-        return
-    fi
-  
-    # 显示带序号的可选域名
-    local i=1
-    declare -A domain_map
-    for file in "${config_files[@]}"; do
-        domain=$(basename "$file" .conf)
-        domain_map[$i]=$domain
-        echo -e "${GREEN}$i. $domain${NC}"
-        ((i++))
-    done
-    echo -e "${BLUE}▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁"
-  
-    # 用户选择要编辑的配置
-    while true; do
-        read -p "请输入要编辑的配置编号 (或直接输入域名): " INPUT
-        if [[ $INPUT =~ ^[0-9]+$ ]]; then
-            if [ -n "${domain_map[$INPUT]}" ]; then
-                DOMAIN=${domain_map[$INPUT]}
-                break
-            else
-                echo -e "${RED}错误：无效的编号${NC}"
-            fi
-        else
-            if [ -f "/etc/nginx/conf.d/${INPUT}.conf" ]; then
-                DOMAIN=$INPUT
-                break
-            else
-                echo -e "${RED}错误：域名配置不存在${NC}"
-            fi
-        fi
-    done
-
-    CONF_FILE="/etc/nginx/conf.d/${DOMAIN}.conf"
-  
-    # 显示当前配置信息
-    echo -e "${YELLOW}当前配置信息:${NC}"
-    current_upstream=$(grep -oP "proxy_pass http://\K[^:]+(?=:[0-9]+)" "$CONF_FILE")
-    current_port=$(grep -oP "proxy_pass http://[^:]+:\K[0-9]+" "$CONF_FILE")
-  
-    echo "上游IP: $current_upstream"
-    echo "上游端口: $current_port"
-  
-    # 修改选项
-    echo -e "${BLUE}▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-    echo -e "请选择修改项目:${NC}"
-    echo "1. 修改上游IP"
-    echo "2. 修改上游端口"
-    echo "3. 修改IP和端口"
-    echo "4. 返回主菜单"
-    read -p "请输入选项: " EDIT_CHOICE
-
-    case $EDIT_CHOICE in
-        1)
-            while true; do
-                read -p "新IP地址: " NEW_IP
-                if [[ $NEW_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                    sed -i "s|proxy_pass http://$current_upstream:$current_port|proxy_pass http://$NEW_IP:$current_port|g" "$CONF_FILE"
-                    break
-                else
-                    echo -e "${RED}无效的IP格式！${NC}"
-                fi
-            done
-            ;;
-        2)
-            while true; do
-                read -p "新端口号: " NEW_PORT
-                if [[ $NEW_PORT =~ ^[0-9]+$ && $NEW_PORT -le 65535 ]]; then
-                    sed -i "s|proxy_pass http://$current_upstream:$current_port|proxy_pass http://$current_upstream:$NEW_PORT|g" "$CONF_FILE"
-                    break
-                else
-                    echo -e "${RED}无效的端口号！${NC}"
-                fi
-            done
-            ;;
-        3)
-            while true; do
-                read -p "新IP地址: " NEW_IP
-                [[ $NEW_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && break
-                echo -e "${RED}无效的IP格式！${NC}"
-            done
-            while true; do
-                read -p "新端口号: " NEW_PORT
-                [[ $NEW_PORT =~ ^[0-9]+$ && $NEW_PORT -le 65535 ]] && break
-                echo -e "${RED}无效的端口号！${NC}"
-            done
-            sed -i "s|proxy_pass http://$current_upstream:$current_port|proxy_pass http://$NEW_IP:$NEW_PORT|g" "$CONF_FILE"
-            ;;
-        4)
-            return
-            ;;
-        *)
-            echo -e "${RED}无效选项！${NC}"
-            return
-            ;;
-    esac
-
-    # 配置测试
-    if nginx -t; then
-        systemctl reload nginx
-        echo -e "${GREEN}配置更新成功！${NC}"
-    else
-        echo -e "${RED}配置测试失败，正在回滚...${NC}"
-        sed -i "s|proxy_pass http://.*|proxy_pass http://$current_upstream:$current_port|g" "$CONF_FILE"
-        systemctl reload nginx
-    fi
+delete_site() {
+    local row domain upstream port config temp backup answer
+    row=$(select_site) || { echo -e "${RED}选择无效。${NC}"; return; }
+    IFS=$'\t' read -r domain upstream port <<< "$row"
+    read -r -p "确认删除 $domain？(y/N): " answer
+    [[ $answer =~ ^[Yy]$ ]] || return 0
+    backup=$(backup_nginx); config="/etc/nginx/conf.d/ai-${domain}.conf"
+    rm -f "$config"
+    if ! nginx -t; then cp -a "$backup/nginx/conf.d/ai-${domain}.conf" "$config"; return 1; fi
+    systemctl reload nginx
+    temp=$(mktemp "$STATE_DIR/.sites.XXXXXX")
+    awk -F '\t' -v domain="$domain" '$1 != domain' "$SITES_FILE" > "$temp" && chmod 600 "$temp" && mv -f "$temp" "$SITES_FILE"
+    read -r -p '是否同时让 Certbot 删除该域名证书？(y/N): ' answer
+    [[ $answer =~ ^[Yy]$ ]] && certbot delete --cert-name "$domain" --non-interactive || true
+    echo -e "${GREEN}删除完成。备份：$backup${NC}"
 }
 
-# 查看Nginx日志
-view_nginx_logs() {
-    clear
-    check_root
-  
-    echo -e "${BLUE}▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-    echo -e "选择日志类型:${NC}"
-    echo "1. 实时错误日志"
-    echo "2. 实时访问日志"
-    echo "3. 查看历史错误日志"
-    echo "4. 查看历史访问日志"
-    echo "5. 返回"
-  
-    read -p "请输入选项: " LOG_CHOICE
-  
-    case $LOG_CHOICE in
-        1)
-            echo -e "${YELLOW}按Ctrl+C退出实时查看${NC}"
-            tail -f /var/log/nginx/error.log
-            ;;
-        2)
-            echo -e "${YELLOW}按Ctrl+C退出实时查看${NC}"
-            tail -f /var/log/nginx/access.log
-            ;;
-        3)
-            less /var/log/nginx/error.log
-            ;;
-        4)
-            less /var/log/nginx/access.log
-            ;;
-        5)
-            return
-            ;;
-        *)
-            echo -e "${RED}无效选项！${NC}"
-            ;;
-    esac
-}
-
-# 完全卸载Nginx
 uninstall_nginx() {
-    clear
-    check_root
-    echo -e "${RED}⚠️  警告：这将永久删除Nginx及相关配置！⚠️${NC}"
-    read -p "确认卸载？(y/n): " CONFIRM
-  
-    if [ "$CONFIRM" = "y" ]; then
-        # 停止服务
-        systemctl stop nginx
-        systemctl disable nginx
-      
-        # 卸载软件包
-        if command -v apt-get &> /dev/null; then
-            apt purge nginx* -y
-            apt autoremove -y
-        elif command -v yum &> /dev/null; then
-            yum remove nginx -y
-        fi
-      
-        # 删除配置和日志
-        rm -rf /etc/nginx
-        rm -rf /var/log/nginx
-        rm -rf /var/www/html/*
-      
-        # 删除证书
-        rm -rf /etc/letsencrypt/live/*
-        rm -rf /etc/letsencrypt/archive/*
-        rm -rf /etc/letsencrypt/renewal/*
-      
-        # 清理定时任务
-        crontab -l | grep -v 'certbot renew' | crontab -
-      
-        echo -e "${GREEN}Nginx已完全卸载！${NC}"
-    else
-        echo -e "${YELLOW}取消卸载${NC}"
+    local answer backup domain _
+    read -r -p '确认移除本脚本管理的全部 Nginx 站点？(y/N): ' answer
+    [[ $answer =~ ^[Yy]$ ]] || return 0
+    backup=$(backup_nginx)
+    if [[ -f $SITES_FILE ]]; then
+        while IFS=$'\t' read -r domain _; do rm -f "/etc/nginx/conf.d/ai-${domain}.conf"; done < "$SITES_FILE"
     fi
+    if [[ -e $STATE_DIR/installed-by-script ]]; then
+        systemctl disable --now nginx 2>/dev/null || true
+        if command -v apt-get >/dev/null 2>&1; then apt-get purge -y nginx; else yum remove -y nginx; fi
+    else
+        nginx -t && systemctl reload nginx || true
+        echo -e "${YELLOW}Nginx 原本已存在，已保留软件、其他站点、网站文件和证书。${NC}"
+    fi
+    rm -f "$SITES_FILE"
+    echo -e "${GREEN}完成。卸载前备份：$backup${NC}"
 }
 
-# 查看配置列表
-list_configs() {
-    clear
-    check_root
-  
-    echo -e "${BLUE}▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-    echo -e "活动配置列表：${NC}"
-    find /etc/nginx/conf.d/ -name "*.conf" -exec ls -l --time-style=+"%Y-%m-%d %H:%M" {} \;
-  
-    echo -e "\n${BLUE}▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-    echo -e "SSL证书状态：${NC}"
-    certbot certificates 2>/dev/null | awk '/Certificate Name:|Domains:|Expiry Date:/'
-  
-    echo -e "\n${BLUE}▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-    echo -e "Nginx进程状态：${NC}"
-    ps aux | grep -E "nginx: (master|worker)"
-}
-
-# 主菜单
-main_menu() {
+main() {
+    require_root
+    install -d -m 700 "$STATE_DIR"
+    local choice
     while true; do
         clear
-        echo -e "${BLUE}▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-        echo -e "                    Nginx 管理工具 v3.0"
-        echo -e "▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁${NC}"
-        echo -e "${GREEN}1. 安装/更新Nginx"
-        echo -e "2. 配置反向代理"
-        echo -e "3. 删除网站配置"
-        echo -e "4. 编辑代理配置"
-        echo -e "5. 查看日志"
-        echo -e "6. 配置列表"
-        echo -e "${RED}7. 完全卸载"
-        echo -e "${YELLOW}0. 退出${NC}"
-        echo -e "${BLUE}▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔${NC}"
-
-        read -p "请输入选项: " choice
+        echo -e "${BLUE}Nginx 反向代理管理${NC}"
+        echo '1. 安装/新增站点  2. 查看站点  3. 编辑站点'
+        echo '4. 删除站点       5. 验证并重启 Nginx'
+        echo '6. 卸载本脚本内容 0. 退出'
+        read -r -p '请选择: ' choice
         case $choice in
-            1) install_nginx ;;
-            2) setup_reverse_proxy ;;
-            3) delete_site_config ;;
-            4) edit_proxy_config ;;
-            5) view_nginx_logs ;;
-            6) list_configs ;;
-            7) uninstall_nginx ;;
-            0) 
-                echo -e "${YELLOW}退出脚本...${NC}"
-                exit 0 
-                ;;
-            *) 
-                echo -e "${RED}无效选项，请重新输入${NC}"
-                sleep 1
-                ;;
+            1) configure_site; pause_menu ;;
+            2) list_sites || true; pause_menu ;;
+            3) edit_site; pause_menu ;;
+            4) delete_site; pause_menu ;;
+            5) nginx -t && systemctl restart nginx; pause_menu ;;
+            6) uninstall_nginx; pause_menu ;;
+            0) return ;;
+            *) sleep 1 ;;
         esac
-        read -n 1 -s -r -p "按任意键继续..."
     done
 }
 
-# 脚本入口
-main_menu
+main "$@"

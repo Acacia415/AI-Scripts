@@ -3,7 +3,7 @@
 > 🚀 为 Debian 12 (ARM) 优化的 Hexo 博客完整解决方案  
 > 支持：部署 | 卸载 | 备份 | Git同步 | Caddy反代
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 [![Hexo](https://img.shields.io/badge/Hexo-6.x-0E83CD.svg)](https://hexo.io)
 [![Node](https://img.shields.io/badge/Node.js-20.x-339933.svg)](https://nodejs.org)
 [![Debian](https://img.shields.io/badge/Debian-12-A81D33.svg)](https://www.debian.org)
@@ -51,7 +51,7 @@
 
 ```bash
 # 下载脚本
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/hexo_manager.sh -o hexo_manager.sh
+curl -fsSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/Hexo/hexo_manager.sh -o hexo_manager.sh
 
 # 添加执行权限
 chmod +x hexo_manager.sh
@@ -64,8 +64,8 @@ chmod +x hexo_manager.sh
 
 ```bash
 # 克隆仓库
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
-cd YOUR_REPO
+git clone https://github.com/Acacia415/AI-Scripts.git
+cd AI-Scripts/Hexo
 
 # 运行
 chmod +x hexo_manager.sh
@@ -75,7 +75,7 @@ chmod +x hexo_manager.sh
 ### 方式三：一键执行（不保存）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/hexo_manager.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/Hexo/hexo_manager.sh | bash
 ```
 
 ---
@@ -1002,7 +1002,8 @@ npm install hexo-filter-image --save
 ```bash
 # Fork 项目
 # 克隆你的 Fork
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+git clone https://github.com/Acacia415/AI-Scripts.git
+cd AI-Scripts/Hexo
 
 # 创建分支
 git checkout -b feature/your-feature
@@ -1020,7 +1021,7 @@ git push origin feature/your-feature
 
 ## 📄 License
 
-MIT License - 详见 [LICENSE](LICENSE) 文件
+MIT License - 详见 [LICENSE](../LICENSE) 文件
 
 ---
 
@@ -1036,8 +1037,8 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 ## 📮 联系方式
 
 - **Author:** Iris & Cascade
-- **GitHub:** [YOUR_USERNAME](https://github.com/YOUR_USERNAME)
-- **Email:** your.email@example.com
+- **GitHub:** [Acacia415](https://github.com/Acacia415)
+- **反馈:** [GitHub Issues](https://github.com/Acacia415/AI-Scripts/issues)
 
 ---
 

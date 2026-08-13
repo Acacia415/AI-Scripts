@@ -13,6 +13,7 @@ SAVEANY_SERVICE="/etc/systemd/system/saveany-bot.service"
 OPENLIST_DIR="/opt/openlist"
 STATE_FILE="/etc/saveanybot-manager.conf"
 OPENLIST_PORT="5244"
+OPENLIST_BIND="127.0.0.1"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -47,9 +48,23 @@ require_root() {
 
 load_state() {
   if [[ -f "${STATE_FILE}" ]]; then
-    # 该文件仅保存目录和端口，不保存密码。
-    # shellcheck disable=SC1090
-    source "${STATE_FILE}"
+    local key value
+    # 状态文件是数据，不作为 shell 代码执行；安装目录保持脚本内的固定安全值。
+    while IFS='=' read -r key value; do
+      value="${value%$'\r'}"
+      [[ -z "${key}" || "${key}" == \#* ]] && continue
+      if [[ "${value}" == \'*\' && "${value}" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      case "${key}" in
+        OPENLIST_PORT) [[ "${value}" =~ ^[0-9]+$ ]] && OPENLIST_PORT="${value}" ;;
+        OPENLIST_BIND) [[ "${value}" == "127.0.0.1" || "${value}" == "0.0.0.0" ]] && OPENLIST_BIND="${value}" ;;
+      esac
+    done < "${STATE_FILE}"
+    if (( OPENLIST_PORT < 1 || OPENLIST_PORT > 65535 )); then
+      warn "状态文件中的 OpenList 端口无效，使用默认端口 5244。"
+      OPENLIST_PORT="5244"
+    fi
   fi
 }
 
@@ -58,6 +73,7 @@ save_state() {
 SAVEANY_DIR='${SAVEANY_DIR}'
 OPENLIST_DIR='${OPENLIST_DIR}'
 OPENLIST_PORT='${OPENLIST_PORT}'
+OPENLIST_BIND='${OPENLIST_BIND}'
 EOF
   chmod 600 "${STATE_FILE}"
 }
@@ -89,9 +105,13 @@ install_base_packages() {
 backup_file() {
   local file="$1"
   if [[ -f "${file}" ]]; then
-    local backup="${file}.bak-$(date +%Y%m%d-%H%M%S)"
+    local backup
+    backup="${file}.bak-$(date +%Y%m%d-%H%M%S)"
     cp -a "${file}" "${backup}"
     info "已备份：${backup}"
+    local old_backups=()
+    mapfile -t old_backups < <(find "$(dirname "$file")" -maxdepth 1 -type f -name "$(basename "$file").bak-*" -printf '%T@ %p\n' | sort -rn | tail -n +11 | cut -d' ' -f2-)
+    ((${#old_backups[@]} == 0)) || rm -f -- "${old_backups[@]}"
   fi
 }
 
@@ -213,9 +233,13 @@ download_saveanybot() {
   release_json="${tmpdir}/release.json"
 
   info "获取 SaveAnyBot 最新版本信息..."
-  curl -fsSL --retry 3 \
+  if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 30 \
     https://api.github.com/repos/krau/SaveAny-Bot/releases/latest \
-    -o "${release_json}"
+    -o "${release_json}"; then
+    rm -rf "${tmpdir}"
+    error "获取最新版本信息失败。"
+    return 1
+  fi
 
   asset_url="$(jq -r --arg arch "${arch}" '
     .assets[]
@@ -237,11 +261,23 @@ download_saveanybot() {
   fi
 
   info "下载：$(basename "${asset_url}")"
-  curl -fL --retry 3 --progress-bar "${asset_url}" -o "${tmpdir}/package"
+  if ! curl -fL --retry 3 --connect-timeout 10 --max-time 180 --progress-bar "${asset_url}" -o "${tmpdir}/package"; then
+    rm -rf "${tmpdir}"
+    error "下载 SaveAnyBot 最新发布包失败。"
+    return 1
+  fi
 
   case "${asset_url}" in
-    *.tar.gz|*.tgz) tar -xzf "${tmpdir}/package" -C "${tmpdir}" ;;
-    *.zip) unzip -q "${tmpdir}/package" -d "${tmpdir}" ;;
+    *.tar.gz|*.tgz)
+      tar -tzf "${tmpdir}/package" | awk '/^\// || /(^|\/)\.\.($|\/)/ { bad=1 } END { exit bad }' \
+        || { rm -rf "${tmpdir}"; error "压缩包包含不安全路径。"; return 1; }
+      tar --no-same-owner --no-same-permissions -xzf "${tmpdir}/package" -C "${tmpdir}"
+      ;;
+    *.zip)
+      unzip -Z1 "${tmpdir}/package" | awk '/^\// || /(^|\/)\.\.($|\/)/ { bad=1 } END { exit bad }' \
+        || { rm -rf "${tmpdir}"; error "压缩包包含不安全路径。"; return 1; }
+      unzip -q "${tmpdir}/package" -d "${tmpdir}"
+      ;;
     *)
       rm -rf "${tmpdir}"
       error "未知发布文件格式。"
@@ -328,10 +364,17 @@ After=network-online.target
 
 [Service]
 Type=simple
+User=saveany
+Group=saveany
 WorkingDirectory=${SAVEANY_DIR}
 ExecStart=${SAVEANY_BIN}
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=${SAVEANY_DIR}
 
 [Install]
 WantedBy=multi-user.target
@@ -344,6 +387,7 @@ install_saveanybot() {
   printf "${CYAN}=== 安装或更新 SaveAnyBot ===${NC}\n\n"
   install_base_packages
 
+  id saveany >/dev/null 2>&1 || useradd --system --home-dir "${SAVEANY_DIR}" --shell /usr/sbin/nologin saveany
   mkdir -p "${SAVEANY_DIR}/data" "${SAVEANY_DIR}/cache" "${SAVEANY_DIR}/downloads"
 
   if [[ -x "${SAVEANY_BIN}" ]]; then
@@ -351,7 +395,7 @@ install_saveanybot() {
     confirm "继续更新吗？" || return 0
   fi
 
-  local arch
+  local arch binary_backup=''
   arch="$(map_arch)"
   download_saveanybot "${arch}"
 
@@ -360,7 +404,8 @@ install_saveanybot() {
   fi
 
   if [[ -f "${SAVEANY_BIN}" ]]; then
-    cp -a "${SAVEANY_BIN}" "${SAVEANY_BIN}.bak-$(date +%Y%m%d-%H%M%S)"
+    binary_backup="${SAVEANY_BIN}.bak-$(date +%Y%m%d-%H%M%S)"
+    cp -a "${SAVEANY_BIN}" "${binary_backup}"
   fi
   mv -f "${SAVEANY_BIN}.new" "${SAVEANY_BIN}"
   chmod 755 "${SAVEANY_BIN}"
@@ -371,6 +416,8 @@ install_saveanybot() {
     info "检测到现有配置，已保留：${SAVEANY_CONFIG}"
     chmod 600 "${SAVEANY_CONFIG}"
   fi
+  chown -R saveany:saveany "${SAVEANY_DIR}"
+  chmod 600 "${SAVEANY_CONFIG}"
 
   write_systemd_service
   local service_start_time
@@ -386,6 +433,11 @@ install_saveanybot() {
     journalctl -u saveany-bot --since "${service_start_time}" -n 80 --no-pager || true
     printf "\n"
     warn "常见原因：Bot Token 错误、服务器无法访问 Telegram、DNS异常或需要代理。"
+    if [[ -n "${binary_backup}" && -f "${binary_backup}" ]]; then
+      cp -a "${binary_backup}" "${SAVEANY_BIN}"
+      systemctl restart saveany-bot 2>/dev/null || true
+      warn "已恢复更新前程序：${binary_backup}"
+    fi
     return 1
   fi
 
@@ -402,11 +454,17 @@ install_openlist() {
   install_base_packages
   install_docker
 
-  local input_port
+  local input_port input_bind compose_backup=''
   read -r -p "OpenList 对外端口 [${OPENLIST_PORT}]: " input_port
   OPENLIST_PORT="${input_port:-${OPENLIST_PORT}}"
   if [[ ! "${OPENLIST_PORT}" =~ ^[0-9]+$ ]] || (( OPENLIST_PORT < 1 || OPENLIST_PORT > 65535 )); then
     error "端口无效。"
+    return 1
+  fi
+  read -r -p "监听地址 [${OPENLIST_BIND}，输入 0.0.0.0 可公网访问]: " input_bind
+  OPENLIST_BIND="${input_bind:-${OPENLIST_BIND}}"
+  if [[ "${OPENLIST_BIND}" != "127.0.0.1" && "${OPENLIST_BIND}" != "0.0.0.0" ]]; then
+    error "监听地址只允许 127.0.0.1 或 0.0.0.0。"
     return 1
   fi
 
@@ -415,9 +473,12 @@ install_openlist() {
   if [[ -f "${OPENLIST_DIR}/docker-compose.yml" ]]; then
     warn "检测到现有 OpenList Compose 配置。"
     if confirm "是否用本脚本的配置覆盖？现有 data 目录不会删除。"; then
-      backup_file "${OPENLIST_DIR}/docker-compose.yml"
+      compose_backup="${OPENLIST_DIR}/docker-compose.yml.bak-$(date +%Y%m%d-%H%M%S)"
+      cp -a "${OPENLIST_DIR}/docker-compose.yml" "${compose_backup}"
+      info "已备份：${compose_backup}"
     else
       info "保留现有 Compose 配置，仅执行拉取和启动。"
+      warn "现有配置由用户管理；请确认其中已设置 Docker 日志 max-size/max-file。"
       (
         cd "${OPENLIST_DIR}"
         compose pull
@@ -438,23 +499,46 @@ services:
     volumes:
       - ./data:/opt/openlist/data
     ports:
-      - "${OPENLIST_PORT}:5244"
+      - "${OPENLIST_BIND}:${OPENLIST_PORT}:5244"
     environment:
       - UMASK=022
       - TZ=Asia/Shanghai
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 EOF
+  chmod 600 "${OPENLIST_DIR}/docker-compose.yml"
 
-  (
+  if ! (
     cd "${OPENLIST_DIR}"
     compose pull
     compose up -d
-  )
+  ); then
+    error "OpenList 更新失败，正在恢复 Compose 配置。"
+    if [[ -n "${compose_backup}" ]]; then
+      cp -a "${compose_backup}" "${OPENLIST_DIR}/docker-compose.yml"
+      (cd "${OPENLIST_DIR}" && compose up -d) || true
+    else
+      (cd "${OPENLIST_DIR}" && compose down) || true
+      rm -f "${OPENLIST_DIR}/docker-compose.yml"
+    fi
+    return 1
+  fi
 
   sleep 4
   if ! docker ps --format '{{.Names}}' | grep -qx 'openlist'; then
     error "OpenList 容器没有正常运行。"
     docker logs --tail 100 openlist 2>/dev/null || true
+    if [[ -n "${compose_backup}" ]]; then
+      cp -a "${compose_backup}" "${OPENLIST_DIR}/docker-compose.yml"
+      (cd "${OPENLIST_DIR}" && compose up -d) || true
+    else
+      (cd "${OPENLIST_DIR}" && compose down) || true
+      rm -f "${OPENLIST_DIR}/docker-compose.yml"
+    fi
     return 1
   fi
 
@@ -491,6 +575,7 @@ show_common_openlist_steps() {
   local mount_path="$1"
   local folder_path="${mount_path%/}/SaveAnyBot"
 
+  # shellcheck disable=SC1111  # 中文说明中的弯引号仅用于终端展示。
   cat <<EOF
 
 ${CYAN}完成网盘挂载后，还需要在 OpenList 中进行以下操作：${NC}
@@ -734,10 +819,17 @@ test_webdav() {
   local url="$1"
   local username="$2"
   local password="$3"
-  local code test_name tmpfile
+  local code test_name tmpfile propfind_output put_output
+  propfind_output="$(mktemp)"
+  put_output="$(mktemp)"
+  cleanup_webdav_test() {
+    trap - RETURN
+    rm -f -- "${tmpfile:-}" "${propfind_output:-}" "${put_output:-}"
+  }
+  trap cleanup_webdav_test RETURN
 
   info "测试 WebDAV 读取权限..."
-  code="$(curl -sS -o /tmp/saveanybot-propfind.xml -w '%{http_code}' \
+  code="$(curl -sS -o "${propfind_output}" -w '%{http_code}' \
     --user "${username}:${password}" \
     -X PROPFIND -H 'Depth: 1' "${url}" || true)"
   if [[ "${code}" != "207" ]]; then
@@ -751,7 +843,7 @@ test_webdav() {
   test_name="saveanybot-manager-test-$(date +%s).txt"
   tmpfile="$(mktemp)"
   printf 'SaveAnyBot WebDAV test\n' > "${tmpfile}"
-  code="$(curl -sS -o /tmp/saveanybot-put.txt -w '%{http_code}' \
+  code="$(curl -sS -o "${put_output}" -w '%{http_code}' \
     --user "${username}:${password}" \
     -T "${tmpfile}" "${url}${test_name}" || true)"
   rm -f "${tmpfile}"
@@ -846,7 +938,8 @@ add_generic_storage() {
 
 create_backup_archive() {
   local scope="${1:-all}"
-  local output="/root/saveany-openlist-backup-${scope}-$(date +%Y%m%d-%H%M%S).tar.gz"
+  local output
+  output="/root/saveany-openlist-backup-${scope}-$(date +%Y%m%d-%H%M%S).tar.gz"
   local items=()
 
   case "${scope}" in

@@ -4,11 +4,15 @@
 Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_prefix="\033[42;37m" && Font_color_suffix="\033[0m"
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
 Error="${Red_font_prefix}[错误]${Font_color_suffix}"
-shell_version="2.3.1" # Version updated after YAML bug fixes
-ct_new_ver="3.2.4" # GOST v3 版本
+shell_version="2.4.0" # 安全备份、最新版解析与有界日志
+ct_new_ver="" # 安装时从 GitHub latest release 动态解析，不锁定版本
 gost_conf_path="/etc/gost/config.yml" # Using YAML config file
 raw_conf_path="/etc/gost/rawconf"
 backup_path="/root/gost_backups"
+gost_log_dir="/var/log/gost"
+gost_log_path="${gost_log_dir}/gost-v3.log"
+install_backup_dir=""
+gost_state_dir="/var/lib/ai-scripts/gost-v3"
 
 # --- 辅助函数 ---
 version_gt() { test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"; }
@@ -84,19 +88,95 @@ function restart_gost_safely() {
 }
 
 function backup_config() {
-  if [[ -d /etc/gost ]]; then
-    echo -e "${Info} 检测到现有配置，正在备份..."
-    cp -r /etc/gost "/tmp/gost_backup_$(date +%Y%m%d_%H%M%S)"
-  fi
+  install -d -m 700 /var/backups/ai-scripts/gost
+  install_backup_dir=$(mktemp -d "/var/backups/ai-scripts/gost/install-$(date +%Y%m%d_%H%M%S)-XXXXXX")
+  [[ -d /etc/gost ]] && cp -a /etc/gost "$install_backup_dir/etc-gost" || touch "$install_backup_dir/no-etc-gost"
+  [[ -f /usr/bin/gost ]] && cp -a /usr/bin/gost "$install_backup_dir/gost" || touch "$install_backup_dir/no-gost-bin"
+  [[ -f /usr/lib/systemd/system/gost.service ]] && cp -a /usr/lib/systemd/system/gost.service "$install_backup_dir/gost.service" || touch "$install_backup_dir/no-gost-service"
+  systemctl is-active --quiet gost 2>/dev/null && touch "$install_backup_dir/service-active"
+  systemctl is-enabled --quiet gost 2>/dev/null && touch "$install_backup_dir/service-enabled"
+  echo -e "${Info} 安装前状态已备份到: $install_backup_dir"
 }
 
 function restore_config() {
-  latest_backup=$(ls -t /tmp/gost_backup_* 2>/dev/null | head -1)
-  if [[ -n "$latest_backup" ]]; then
+  if [[ -n "$install_backup_dir" && -d "$install_backup_dir" ]]; then
     echo -e "${Info} 安装失败，正在恢复原有配置..."
-    rm -rf /etc/gost
-    cp -r "$latest_backup" /etc/gost
+    if [[ -d "$install_backup_dir/etc-gost" ]]; then
+      rm -rf -- /etc/gost
+      cp -a "$install_backup_dir/etc-gost" /etc/gost
+    elif [[ -f "$install_backup_dir/no-etc-gost" ]]; then
+      rm -rf -- /etc/gost
+    fi
+    if [[ -f "$install_backup_dir/gost" ]]; then
+      install -m 0755 "$install_backup_dir/gost" /usr/bin/gost
+    else
+      rm -f /usr/bin/gost
+    fi
+    if [[ -f "$install_backup_dir/gost.service" ]]; then
+      cp -a "$install_backup_dir/gost.service" /usr/lib/systemd/system/gost.service
+    else
+      rm -f /usr/lib/systemd/system/gost.service
+    fi
+    systemctl daemon-reload
+    if [[ -f "$install_backup_dir/service-enabled" ]]; then systemctl enable gost 2>/dev/null || true; else systemctl disable gost 2>/dev/null || true; fi
+    if [[ -f "$install_backup_dir/service-active" ]]; then systemctl restart gost 2>/dev/null || true; else systemctl stop gost 2>/dev/null || true; fi
     echo -e "${Info} 配置已恢复"
+  fi
+}
+
+function resolve_latest_gost_version() {
+  local latest_tag
+  latest_tag=$(wget -qO- --timeout=20 --tries=2 https://api.github.com/repos/go-gost/gost/releases/latest \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)
+  if [[ -z "$latest_tag" || ! "$latest_tag" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]]; then
+    echo -e "${Error} 无法解析 GOST 最新正式版版本号。"
+    return 1
+  fi
+  ct_new_ver="$latest_tag"
+}
+
+function prepare_gost_log_directory() {
+  install -d -m 750 "${gost_log_dir}"
+  touch "${gost_log_path}"
+  chmod 640 "${gost_log_path}"
+}
+
+function write_gost_log_config() {
+  cat <<EOF
+log:
+  level: info
+  format: json
+  output: "${gost_log_path}"
+  rotation:
+    maxSize: 20
+    maxAge: 14
+    maxBackups: 5
+    localTime: true
+    compress: true
+EOF
+}
+
+function ensure_gost_log_config() {
+  prepare_gost_log_directory
+
+  if [[ ! -f "${gost_conf_path}" ]]; then
+    {
+      write_gost_log_config
+      echo 'services: []'
+    } > "${gost_conf_path}"
+    return
+  fi
+
+  # 尊重用户已有的日志配置；仅为旧版脚本生成、没有 log 段的配置补上滚动策略。
+  if ! grep -qE '^[[:space:]]*log:' "${gost_conf_path}"; then
+    local temp_config
+    temp_config=$(mktemp)
+    {
+      write_gost_log_config
+      cat "${gost_conf_path}"
+    } > "${temp_config}"
+    install -m 644 "${temp_config}" "${gost_conf_path}"
+    rm -f "${temp_config}"
   fi
 }
 
@@ -113,6 +193,8 @@ ExecStart=/usr/bin/gost -C ${gost_conf_path}
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
+StandardOutput=null
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -121,7 +203,13 @@ EOF
 }
 
 function Install_ct() {
+  local preexisting_install=no
+  check_root
+  check_sys
+  Installation_dependency
+  resolve_latest_gost_version || return 1
   if command -v gost >/dev/null 2>&1; then
+    [[ -e "$gost_state_dir/installed-by-script" ]] || preexisting_install=yes
     echo -e "\033[0;33mWARNING: 检测到Gost已安装: $(command -v gost) ($(gost -V))\033[0m"
     read -p "是否继续并覆盖现有版本为 v${ct_new_ver}? (y/N): " choice
     if [[ ! "$choice" =~ ^[yY]$ ]]; then
@@ -130,27 +218,37 @@ function Install_ct() {
     fi
   fi
 
-  check_root
   backup_config
-  Installation_dependency
-  check_sys
   
   local download_url="https://github.com/go-gost/gost/releases/download/v${ct_new_ver}/gost_${ct_new_ver}_linux_${bit}.tar.gz"
 
-  echo "正在从GitHub下载Gost v${ct_new_ver}..."
-  wget --no-check-certificate -O "gost.tar.gz" "${download_url}" || { echo -e "${Error} gost下载失败"; restore_config; return 1; }
-  tar -zxvf gost.tar.gz || { echo -e "${Error} gost解压失败"; rm -f gost.tar.gz; restore_config; return 1; }
-  
-  if [[ ! -f "gost" ]]; then
+  local download_dir archive extracted_bin
+  download_dir=$(mktemp -d) || return 1
+  archive="$download_dir/gost.tar.gz"
+  echo "正在从GitHub下载Gost最新正式版 v${ct_new_ver}..."
+  wget --https-only --timeout=30 --tries=2 -O "$archive" "${download_url}" || { echo -e "${Error} gost下载失败"; rm -rf -- "$download_dir"; restore_config; return 1; }
+  if ! tar -tzf "$archive" | awk '/^\// || /(^|\/)\.\.($|\/)/ { bad=1 } END { exit bad }'; then
+    echo -e "${Error} 下载包包含不安全路径"
+    rm -rf -- "$download_dir"
+    restore_config
+    return 1
+  fi
+  tar -xzf "$archive" -C "$download_dir" || { echo -e "${Error} gost解压失败"; rm -rf -- "$download_dir"; restore_config; return 1; }
+  extracted_bin=$(find "$download_dir" -type f -name gost -print -quit)
+  if [[ -z "$extracted_bin" ]]; then
     echo -e "${Error} 解压文件中未找到gost程序"
     restore_config
-    rm -f gost*
+    rm -rf -- "$download_dir"
     return 1
   fi
 
-  mv gost /usr/bin/gost
-  chmod +x /usr/bin/gost
-  rm -f gost.tar.gz
+  install -m 0755 "$extracted_bin" /usr/bin/gost
+  rm -rf -- "$download_dir"
+  if ! /usr/bin/gost -V >/dev/null 2>&1; then
+    echo -e "${Error} 新二进制无法运行，正在回滚"
+    restore_config
+    return 1
+  fi
 
   if [[ ! -d /etc/gost ]]; then
     mkdir /etc/gost
@@ -158,11 +256,10 @@ function Install_ct() {
   
   create_service_file
   
-  if [[ ! -f ${gost_conf_path} ]]; then
-    echo 'services: []' > "${gost_conf_path}"
-  fi
+  ensure_gost_log_config
   
-  chmod -R 755 /etc/gost
+  find /etc/gost -type d -exec chmod 750 {} \;
+  find /etc/gost -type f -exec chmod 640 {} \;
 
   systemctl daemon-reload
   systemctl enable gost
@@ -171,7 +268,13 @@ function Install_ct() {
   echo "------------------------------"
   if command -v gost >/dev/null 2>&1; then
     echo "gost v${ct_new_ver} 安装成功"
-    rm -rf /tmp/gost_backup_*
+    echo "安装前备份保留在: $install_backup_dir"
+    install -d -m 700 "$gost_state_dir"
+    if [[ $preexisting_install == yes ]]; then
+      printf '%s\n' "$install_backup_dir" > "$gost_state_dir/preexisting-backup-path"
+    else
+      touch "$gost_state_dir/installed-by-script"
+    fi
   else
     echo "gost没有安装成功"
     restore_config
@@ -195,6 +298,22 @@ function checknew() {
 }
 
 function Uninstall_ct() {
+  local preexisting_backup=''
+  if [[ -f "$gost_state_dir/preexisting-backup-path" ]]; then
+    preexisting_backup=$(cat "$gost_state_dir/preexisting-backup-path")
+  fi
+  if [[ -n "$preexisting_backup" && -d "$preexisting_backup" ]]; then
+    echo -e "${Info} 检测到安装前已有 GOST，正在恢复安装前版本和服务状态..."
+    install_backup_dir="$preexisting_backup"
+    restore_config
+    rm -f "$gost_state_dir/preexisting-backup-path"
+    echo -e "${Green_font_prefix}[成功]${Font_color_suffix} 已恢复脚本介入前的 GOST。"
+    return
+  fi
+  if [[ ! -e "$gost_state_dir/installed-by-script" ]]; then
+    read -r -p "无法确认该 GOST 是否由本脚本安装；输入 REMOVE 才继续删除: " legacy_confirm
+    [[ $legacy_confirm == REMOVE ]] || { echo "已取消。"; return; }
+  fi
   echo -e "${Info} 正在停止并禁用gost后台服务..."
   systemctl stop gost
   systemctl disable gost
@@ -202,6 +321,8 @@ function Uninstall_ct() {
   echo -e "${Info} 正在删除gost核心程序和服务文件..."
   rm -f /usr/bin/gost
   rm -f /usr/lib/systemd/system/gost.service
+  rm -f "${gost_log_path}" "${gost_log_path}".*
+  rmdir "${gost_log_dir}" 2>/dev/null || true
   systemctl daemon-reload
   
   # 检查配置目录是否存在
@@ -214,6 +335,7 @@ function Uninstall_ct() {
     echo -e "${Info} 已删除: /etc/gost/rawconf"
     echo -e "${Info} 保留 /etc/gost 目录下的其他文件。"
   fi
+  rm -f "$gost_state_dir/installed-by-script"
   
   echo -e "\n${Green_font_prefix}[成功]${Font_color_suffix} gost卸载完成。"
 }
@@ -237,12 +359,17 @@ function regenerate_yaml_config() {
     local chain_definitions=""
     local has_chains=false
 
-    echo "services:" > "$gost_conf_path"
+    prepare_gost_log_directory
+    {
+        write_gost_log_config
+        echo "services:"
+    } > "$gost_conf_path"
 
     if [[ -s "$raw_conf_path" ]]; then
         while IFS= read -r trans_conf || [[ -n "$trans_conf" ]]; do
             eachconf_retrieve
-            local service_name="service_$(echo "${is_encrypt}_${s_port}_${d_ip}_${d_port}" | md5sum | head -c 8)"
+            local service_name
+            service_name="service_$(echo "${is_encrypt}_${s_port}_${d_ip}_${d_port}" | md5sum | head -c 8)"
             
             case "$is_encrypt" in
                 nonencrypt)
@@ -686,30 +813,49 @@ function delete_rule_menu() {
 }
 
 function update_sh() {
-  ol_version=$(curl -L -s --connect-timeout 5 https://raw.githubusercontent.com/KANIKIG/Multi-EasyGost/master/gost.sh | grep "shell_version=" | head -1 | awk -F '=|"' '{print $3}' | tr -d '\r')
+  ol_version=$(curl -fsSL --connect-timeout 5 --max-time 20 https://raw.githubusercontent.com/KANIKIG/Multi-EasyGost/master/gost.sh | grep "shell_version=" | head -1 | awk -F '=|"' '{print $3}' | tr -d '\r')
   if [ -n "$ol_version" ]; then
     if version_gt "$ol_version" "$shell_version"; then
       echo -e "存在新版本 (${ol_version})，是否更新 [Y/N]?"
       read -r update_confirm
       if [[ "$update_confirm" == "y" ]] || [[ "$update_confirm" == "Y" ]]; then
-        wget --no-check-certificate -O "$0.tmp" https://raw.githubusercontent.com/KANIKIG/Multi-EasyGost/master/gost.sh && mv "$0.tmp" "$0" && chmod +x "$0" && echo -e "更新完成，正在重新启动脚本..." && exec bash "$0" "$@" || echo -e "${Error} 下载新版本失败。"
+        local update_tmp update_backup_dir
+        update_tmp=$(mktemp "${0}.new.XXXXXX") || return 1
+        update_backup_dir="/var/backups/ai-scripts/gost-script/$(date +%Y%m%d_%H%M%S)"
+        mkdir -p "$update_backup_dir"
+        if wget --https-only --timeout=20 --tries=2 -O "$update_tmp" https://raw.githubusercontent.com/KANIKIG/Multi-EasyGost/master/gost.sh \
+          && bash -n "$update_tmp"; then
+          cp -a "$0" "$update_backup_dir/gost.sh"
+          chmod --reference="$0" "$update_tmp" 2>/dev/null || chmod 0755 "$update_tmp"
+          mv -f -- "$update_tmp" "$0"
+          echo -e "更新完成；旧脚本已备份到 $update_backup_dir，正在以 root 重新执行最新脚本..."
+          exec bash "$0" "$@"
+        else
+          rm -f -- "$update_tmp"
+          echo -e "${Error} 下载或语法检查失败，原脚本未更改。"
+        fi
       fi
     fi
   fi
 }
 
 function cron_restart() {
-  sed -i "/gost/d" /etc/crontab
+  local cron_marker="# AI-Scripts-GOST-Restart"
+  sed -i "\|$cron_marker|d" /etc/crontab
   echo -e "gost定时重启任务: [1]配置 [2]删除"
   read -p "请选择: " numcron
   if [ "$numcron" == "1" ]; then
     echo -e "任务类型: [1]每?小时重启 [2]每日?点重启"
     read -p "请选择: " numcrontype
     read -p "请输入小时数或整点数: " cronhr
+    if ! [[ "$cronhr" =~ ^[0-9]+$ ]] || [ "$cronhr" -lt 1 ] || [ "$cronhr" -gt 23 ]; then
+      echo -e "${Error} 小时数必须为 1-23"
+      return 1
+    fi
     if [ "$numcrontype" == "1" ]; then
-      echo "0 */$cronhr * * * root systemctl restart gost" >>/etc/crontab
+      echo "0 */$cronhr * * * root systemctl restart gost $cron_marker" >>/etc/crontab
     elif [ "$numcrontype" == "2" ]; then
-      echo "0 $cronhr * * * root systemctl restart gost" >>/etc/crontab
+      echo "0 $cronhr * * * root systemctl restart gost $cron_marker" >>/etc/crontab
     fi
     echo -e "定时重启设置成功！"
   else
@@ -720,7 +866,8 @@ function cron_restart() {
 function backup_gost() {
     echo -e "${Info} 开始备份gost配置..."
     mkdir -p ${backup_path}
-    local backup_file="${backup_path}/gost_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
+    local backup_file
+    backup_file="${backup_path}/gost_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
     tar -zcvf "${backup_file}" -C /etc gost
     if [ $? -eq 0 ]; then
         echo -e "${Info} 备份成功！文件位于: ${Green_font_prefix}${backup_file}${Font_color_suffix}"

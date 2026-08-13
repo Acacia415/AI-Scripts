@@ -10,6 +10,10 @@ NC='\033[0m'
 
 # ======================= 系统重装 =======================
 reinstall_system() {
+    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+        echo -e "${RED}请使用 root 权限运行。${NC}"
+        return 1
+    fi
     clear
     echo -e "${RED}════════════════════════════════════${NC}"
     echo -e "${RED}         系统重装工具          ${NC}"
@@ -45,7 +49,8 @@ reinstall_system() {
     
     local index=1
     for system in "${systems[@]}"; do
-        local display_name=$(echo "$system" | cut -d'|' -f3)
+        local display_name
+        display_name=$(echo "$system" | cut -d'|' -f3)
         printf "  ${GREEN}%-3s${NC} %s\n" "$index." "$display_name"
         ((index++))
     done
@@ -69,19 +74,18 @@ reinstall_system() {
     
     # 获取选中的系统信息
     local selected_system="${systems[$((choice-1))]}"
-    local os_name=$(echo "$selected_system" | cut -d'|' -f1)
-    local os_version=$(echo "$selected_system" | cut -d'|' -f2)
-    local display_name=$(echo "$selected_system" | cut -d'|' -f3)
+    local os_name os_version display_name
+    os_name=$(echo "$selected_system" | cut -d'|' -f1)
+    os_version=$(echo "$selected_system" | cut -d'|' -f2)
+    display_name=$(echo "$selected_system" | cut -d'|' -f3)
     
     # 构建命令
-    local reinstall_cmd="bash reinstall.sh $os_name"
-    if [[ -n "$os_version" ]]; then
-        reinstall_cmd="$reinstall_cmd $os_version"
-    fi
+    local reinstall_args=("$os_name")
+    [[ -n "$os_version" ]] && reinstall_args+=("$os_version")
     
     echo
     echo -e "${YELLOW}您选择了：${NC}${GREEN}$display_name${NC}"
-    echo -e "${YELLOW}将执行命令：${NC}${CYAN}$reinstall_cmd${NC}"
+    echo -e "${YELLOW}将执行：${NC}${CYAN}bash reinstall.sh ${reinstall_args[*]}${NC}"
     echo
     echo -e "${RED}⚠️  最后警告：此操作不可逆，将清空所有数据！${NC}"
     echo -e "${YELLOW}请确认您已经备份了所有重要文件。${NC}"
@@ -96,37 +100,44 @@ reinstall_system() {
     
     echo
     echo -e "${CYAN}正在下载重装脚本...${NC}"
-    if ! curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh; then
+    local temp_script
+    temp_script=$(mktemp /tmp/ai-reinstall.XXXXXX)
+    if ! curl -fsSL --connect-timeout 10 --max-time 120 -o "$temp_script" https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh; then
         echo -e "${RED}下载脚本失败！请检查网络连接。${NC}"
         read -n 1 -s -r -p "按任意键返回..."
+        return 1
+    fi
+    if ! bash -n "$temp_script"; then
+        echo -e "${RED}下载的重装脚本未通过 Shell 语法检查，已停止。${NC}"
+        rm -f "$temp_script"
         return 1
     fi
     
     echo -e "${GREEN}脚本下载成功！${NC}"
     echo -e "${YELLOW}开始执行重装命令...${NC}"
-    echo -e "${CYAN}$reinstall_cmd${NC}"
+    echo -e "${CYAN}bash $temp_script ${reinstall_args[*]}${NC}"
     echo
     sleep 2
     
     # 执行重装命令
+    local command_status
     echo -e "${YELLOW}正在执行重装脚本...${NC}"
-    $reinstall_cmd
+    if bash "$temp_script" "${reinstall_args[@]}"; then
+        command_status=0
+    else
+        command_status=$?
+    fi
+    rm -f "$temp_script"
     
     # 检查命令执行结果
-    if [ $? -eq 0 ]; then
+    if [ "$command_status" -eq 0 ]; then
         echo
         echo -e "${GREEN}重装脚本执行完成！${NC}"
-        echo -e "${YELLOW}系统将在 5 秒后自动重启以完成重装...${NC}"
+        echo -e "${YELLOW}重装环境已经准备完成。${NC}"
         echo -e "${RED}请注意：重启后系统将开始重装过程！${NC}"
         
-        # 倒计时
-        for i in {5..1}; do
-            echo -e "${CYAN}$i 秒后重启...${NC}"
-            sleep 1
-        done
-        
-        echo -e "${RED}正在重启系统...${NC}"
-        reboot
+        read -r -p '现在立即重启？输入 REBOOT 确认: ' reboot_confirm
+        [[ $reboot_confirm == REBOOT ]] && reboot
     else
         echo
         echo -e "${RED}重装脚本执行失败！请检查错误信息。${NC}"

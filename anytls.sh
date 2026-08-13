@@ -9,7 +9,7 @@ export PATH
 #=================================================
 
 # 当前脚本版本号
-sh_ver="1.0.0"
+sh_ver="1.0.1"
 
 # AnyTLS 相关路径
 ANYTLS_Folder="/etc/anytls"
@@ -17,12 +17,9 @@ ANYTLS_File="/usr/local/bin/anytls-server"
 ANYTLS_Conf="/etc/anytls/config.json"
 ANYTLS_Now_ver_File="/etc/anytls/ver.txt"
 
-# BBR 配置文件
-BBR_Local="/etc/sysctl.d/local.conf"
-
 Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_prefix="\033[42;37m" && Red_background_prefix="\033[41;37m" && Font_color_suffix="\033[0m" && Yellow_font_prefix="\033[0;33m"
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
-错误="${Red_font_prefix}[错误]${Font_color_suffix}"
+Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Tip="${Yellow_font_prefix}[注意]${Font_color_suffix}"
 
 check_root(){
@@ -52,15 +49,11 @@ check_sys(){
 
 sys_arch() {
     uname=$(uname -m)
-    if [[ "$uname" == "i686" ]] || [[ "$uname" == "i386" ]]; then
-        arch="amd64"
-    elif [[ "$uname" == *"armv7"* ]] || [[ "$uname" == "armv6l" ]]; then
-        arch="arm64"
-    elif [[ "$uname" == *"armv8"* ]] || [[ "$uname" == "aarch64" ]]; then
-        arch="arm64"
-    else
-        arch="amd64"
-    fi    
+    case "$uname" in
+        x86_64|amd64) arch="amd64" ;;
+        aarch64|arm64|armv8*) arch="arm64" ;;
+        *) echo -e "${Error} 当前架构 ${uname} 没有对应的 AnyTLS 官方构建。"; exit 1 ;;
+    esac
 }
 
 check_installed_status(){
@@ -72,24 +65,28 @@ check_status(){
 }
 
 check_new_ver(){
-	new_ver=$(wget -qO- https://api.github.com/repos/anytls/anytls-go/releases/latest | jq -r '.tag_name')
-	[[ -z ${new_ver} ]] && echo -e "${Error} AnyTLS 最新版本获取失败！" && exit 1
+	new_ver=$(wget -qO- -T 20 -t 2 https://api.github.com/repos/anytls/anytls-go/releases/latest | jq -r '.tag_name')
+	if [[ -z ${new_ver} || ${new_ver} == "null" ]]; then
+		echo -e "${Error} AnyTLS 最新版本获取失败！"
+		return 1
+	fi
 	echo -e "${Info} 检测到 AnyTLS 最新版本为 [ ${new_ver} ]"
 }
 
 check_ver_comparison(){
-	now_ver=$(cat ${ANYTLS_Now_ver_File})
+	now_ver=$(cat "${ANYTLS_Now_ver_File}")
 	if [[ "${now_ver}" != "${new_ver}" ]]; then
 		echo -e "${Info} 发现 AnyTLS 已有新版本 [ ${new_ver} ]，旧版本 [ ${now_ver} ]"
 		read -e -p "是否更新 ？ [Y/n]：" yn
 		[[ -z "${yn}" ]] && yn="y"
 		if [[ $yn == [Yy] ]]; then
-			check_status
-			[[ "$status" == "running" ]] && systemctl stop anytls
-			\cp "${ANYTLS_Conf}" "/tmp/anytls_config.json"
-			download
-			mv -f "/tmp/anytls_config.json" "${ANYTLS_Conf}"
-			restart
+			backup_anytls_state
+			if ! download || ! systemctl restart anytls; then
+				echo -e "${Error} AnyTLS 更新失败，正在恢复旧版本。"
+				restore_anytls_state "$ANYTLS_LAST_BACKUP"
+				return 1
+			fi
+			echo -e "${Info} AnyTLS 已更新并成功重启。"
 		fi
 	else
 		echo -e "${Info} 当前 AnyTLS 已是最新版本 [ ${new_ver} ] ！" && exit 1
@@ -103,26 +100,37 @@ download() {
 	# 去掉版本号前面的 v
 	local ver_num="${new_ver#v}"
 	local filename="anytls_${ver_num}_linux_${arch}.zip"
+	local tmpdir archive
+	tmpdir=$(mktemp -d /tmp/ai-anytls.XXXXXX)
+	archive="${tmpdir}/${filename}"
+	cleanup_anytls_download() { trap - RETURN; rm -rf -- "$tmpdir"; }
+	trap cleanup_anytls_download RETURN
 	
 	echo -e "${Info} 开始下载 AnyTLS ${new_ver} ……"
-	wget --no-check-certificate -N "https://github.com/anytls/anytls-go/releases/download/${new_ver}/${filename}"
-	if [[ ! -e "${filename}" ]]; then
+	wget -q --show-progress -T 30 -t 2 -O "$archive" "https://github.com/anytls/anytls-go/releases/download/${new_ver}/${filename}"
+	if [[ ! -s "$archive" ]]; then
 		echo -e "${Error} AnyTLS 下载失败！"
-		exit 1
+		return 1
 	fi
-	
-	unzip -o "${filename}"
-	if [[ ! -e "anytls-server" ]]; then
+
+	if ! unzip -Z1 "$archive" | awk '/^\// || /(^|\/)\.\.($|\/)/ { bad=1 } END { exit bad }'; then
+		echo -e "${Error} AnyTLS 压缩包包含不安全路径！"
+		return 1
+	fi
+	unzip -q "$archive" -d "$tmpdir" || return 1
+	if [[ ! -e "$tmpdir/anytls-server" ]]; then
 		echo -e "${Error} AnyTLS 解压失败！"
 		rm -f "${filename}"
-		exit 1
+		return 1
 	fi
 	
-	chmod +x anytls-server
-	mv -f anytls-server "${ANYTLS_File}"
-	rm -f anytls-client 2>/dev/null
-	rm -f "${filename}"
-	echo "${new_ver}" > ${ANYTLS_Now_ver_File}
+	if [[ -f $ANYTLS_File ]]; then
+		install -d -m 700 /var/backups/ai-scripts/anytls
+		cp -a "$ANYTLS_File" "/var/backups/ai-scripts/anytls/anytls-server.$(date +%Y%m%d-%H%M%S)"
+	fi
+	install -m 755 "$tmpdir/anytls-server" "${ANYTLS_File}.new"
+	mv -f "${ANYTLS_File}.new" "${ANYTLS_File}"
+	printf '%s\n' "${new_ver}" > "${ANYTLS_Now_ver_File}"
 	echo -e "${Info} AnyTLS 主程序下载安装完毕！"
 }
 
@@ -134,7 +142,6 @@ installation_dependency(){
 		apt-get update
 		apt-get install jq gzip wget curl unzip -y
 	fi
-	\cp -f /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 }
 
 # ================ 配置相关函数 ================
@@ -146,8 +153,7 @@ set_port(){
 		echo -e "请输入 AnyTLS 端口 [1-65535]"
 		read -e -p "(默认：8443)：" port
 		[[ -z "${port}" ]] && port="8443"
-		echo $((${port}+0)) &>/dev/null
-		if [[ $? -eq 0 ]]; then
+		if [[ ${port} =~ ^[0-9]+$ ]]; then
 			if [[ ${port} -ge 1 ]] && [[ ${port} -le 65535 ]]; then
 				echo && echo "========================================"
 				echo -e "端口：${Red_background_prefix} ${port} ${Font_color_suffix}"
@@ -166,6 +172,11 @@ set_password(){
 	echo "请输入 AnyTLS 密码 [0-9][a-z][A-Z]"
 	read -e -p "(默认：随机生成)：" password
 	[[ -z "${password}" ]] && password=$(< /dev/urandom tr -dc 'a-zA-Z0-9' | head -c 16)
+	if ! [[ ${password} =~ ^[A-Za-z0-9._~!@%+=,:^-]{8,128}$ ]]; then
+		echo -e "${Error} 密码需为 8–128 位，且只能包含字母、数字及 ._~!@%+=,:^-"
+		set_password
+		return
+	fi
 	echo && echo "========================================"
 	echo -e "密码：${Red_background_prefix} ${password} ${Font_color_suffix}"
 	echo "========================================" && echo
@@ -176,6 +187,11 @@ set_sni(){
 	echo -e "${Tip} 留空则客户端默认使用服务器 IP 作为 SNI"
 	read -e -p "(默认：留空不设置)：" sni
 	[[ -z "${sni}" ]] && sni=""
+	if [[ -n ${sni} ]] && ! [[ ${sni} =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+		echo -e "${Error} SNI 域名格式无效。"
+		set_sni
+		return
+	fi
 	if [[ -n "${sni}" ]]; then
 		echo && echo "========================================"
 		echo -e "SNI：${Red_background_prefix} ${sni} ${Font_color_suffix}"
@@ -190,10 +206,10 @@ set_sni(){
 set_skip_cert_verify(){
 	echo -e "是否跳过证书验证（skip-cert-verify）？
 ========================================
-${Green_font_prefix} 1.${Font_color_suffix} 是（跳过，默认）  ${Green_font_prefix} 2.${Font_color_suffix} 否（严格验证）
+	${Green_font_prefix} 1.${Font_color_suffix} 是（跳过）  ${Green_font_prefix} 2.${Font_color_suffix} 否（严格验证，默认）
 ========================================"
-	read -e -p "(默认：1.跳过)：" skip_cert_choice
-	[[ -z "${skip_cert_choice}" ]] && skip_cert_choice="1"
+	read -e -p "(默认：2.严格验证)：" skip_cert_choice
+	[[ -z "${skip_cert_choice}" ]] && skip_cert_choice="2"
 	if [[ ${skip_cert_choice} == "1" ]]; then
 		skip_cert_verify="true"
 	else
@@ -207,14 +223,11 @@ ${Green_font_prefix} 1.${Font_color_suffix} 是（跳过，默认）  ${Green_fo
 # ================ 配置文件读写 ================
 
 write_config(){
-	cat > ${ANYTLS_Conf}<<-EOF
-{
-    "port": ${port},
-    "password": "${password}",
-    "sni": "${sni}",
-    "skip_cert_verify": ${skip_cert_verify}
-}
-EOF
+	jq -n --argjson port "$port" --arg password "$password" --arg sni "$sni" \
+		--argjson skip "$skip_cert_verify" \
+		'{port:$port,password:$password,sni:$sni,skip_cert_verify:$skip}' > "${ANYTLS_Conf}.new"
+	chmod 600 "${ANYTLS_Conf}.new"
+	mv -f "${ANYTLS_Conf}.new" "${ANYTLS_Conf}"
 }
 
 read_config(){
@@ -235,20 +248,24 @@ After=network-online.target
 Wants=network-online.target systemd-networkd-wait-online.service
 
 [Service]
-LimitNOFILE=32767
+LimitNOFILE=51200
 Type=simple
 User=root
 Restart=on-failure
 RestartSec=5s
-ExecStartPre=/bin/sh -c 'ulimit -n 51200'
 ExecStart=${ANYTLS_File} -l 0.0.0.0:\${PORT} -p \${PASSWORD}
 EnvironmentFile=${ANYTLS_Folder}/env
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=${ANYTLS_Folder}
 
 [Install]
 WantedBy=multi-user.target
 EOF
-	systemctl daemon-reload
-	systemctl enable anytls
+	systemctl daemon-reload || return 1
+	systemctl enable anytls || return 1
 	echo -e "${Info} AnyTLS 服务配置完成！"
 }
 
@@ -257,16 +274,17 @@ write_env(){
 PORT=${port}
 PASSWORD=${password}
 EOF
+	chmod 600 "${ANYTLS_Folder}/env"
 }
 
 # ================ IP 获取 ================
 
 getipv4(){
-	ipv4=$(wget -qO- -4 -t1 -T2 ipinfo.io/ip)
+	ipv4=$(wget -qO- -4 -t1 -T2 https://ipinfo.io/ip)
 	if [[ -z "${ipv4}" ]]; then
-		ipv4=$(wget -qO- -4 -t1 -T2 api.ip.sb/ip)
+		ipv4=$(wget -qO- -4 -t1 -T2 https://api.ip.sb/ip)
 		if [[ -z "${ipv4}" ]]; then
-			ipv4=$(wget -qO- -4 -t1 -T2 members.3322.org/dyndns/getip)
+			ipv4=$(wget -qO- -4 -t1 -T2 https://members.3322.org/dyndns/getip)
 			if [[ -z "${ipv4}" ]]; then
 				ipv4="IPv4_Error"
 			fi
@@ -275,7 +293,7 @@ getipv4(){
 }
 
 getipv6(){
-	ipv6=$(wget -qO- -6 -t1 -T2 ifconfig.co)
+	ipv6=$(wget -qO- -6 -t1 -T2 https://ifconfig.co)
 	if [[ -z "${ipv6}" ]]; then
 		ipv6="IPv6_Error"
 	fi
@@ -283,25 +301,66 @@ getipv6(){
 
 # ================ 安装/卸载/启停 ================
 
+backup_anytls_state(){
+	local dir
+	dir="/var/backups/ai-scripts/anytls/state-$(date +%Y%m%d-%H%M%S)"
+	install -d -m 700 "$dir"
+	[[ -d $ANYTLS_Folder ]] && cp -a "$ANYTLS_Folder" "$dir/anytls" || touch "$dir/no-anytls-folder"
+	[[ -f $ANYTLS_File ]] && cp -a "$ANYTLS_File" "$dir/anytls-server" || touch "$dir/no-anytls-binary"
+	[[ -f /etc/systemd/system/anytls.service ]] && cp -a /etc/systemd/system/anytls.service "$dir/anytls.service" || touch "$dir/no-anytls-service"
+	systemctl is-active --quiet anytls 2>/dev/null && touch "$dir/service-active"
+	systemctl is-enabled --quiet anytls 2>/dev/null && touch "$dir/service-enabled"
+	ANYTLS_LAST_BACKUP="$dir"
+	echo -e "${Info} 已备份当前状态：$dir"
+}
+
+restore_anytls_state(){
+	local dir=$1
+	if [[ -d $dir/anytls ]]; then rm -rf -- "$ANYTLS_Folder"; cp -a "$dir/anytls" "$ANYTLS_Folder"; else rm -rf -- "$ANYTLS_Folder"; fi
+	if [[ -f $dir/anytls-server ]]; then cp -a "$dir/anytls-server" "$ANYTLS_File"; else rm -f "$ANYTLS_File"; fi
+	if [[ -f $dir/anytls.service ]]; then cp -a "$dir/anytls.service" /etc/systemd/system/anytls.service; else rm -f /etc/systemd/system/anytls.service; fi
+	systemctl daemon-reload
+	if [[ -f $dir/service-enabled ]]; then systemctl enable anytls 2>/dev/null || true; else systemctl disable anytls 2>/dev/null || true; fi
+	if [[ -f $dir/service-active ]]; then systemctl restart anytls 2>/dev/null || true; else systemctl stop anytls 2>/dev/null || true; fi
+}
+
 install(){
 	[[ -e ${ANYTLS_File} ]] && echo -e "${Error} 检测到 AnyTLS 已安装！" && exit 1
+	backup_anytls_state
 	echo -e "${Info} 开始设置 配置..."
 	set_port
 	set_password
 	set_sni
 	set_skip_cert_verify
 	echo -e "${Info} 开始安装/配置 依赖..."
-	installation_dependency
+	if ! installation_dependency; then
+		echo -e "${Error} 依赖安装失败，未继续修改 AnyTLS 配置。"
+		return 1
+	fi
 	echo -e "${Info} 开始下载/安装..."
-	check_new_ver
-	download
+	if ! check_new_ver || ! download; then
+		echo -e "${Error} 下载或安装失败，正在恢复安装前状态。"
+		restore_anytls_state "$ANYTLS_LAST_BACKUP"
+		return 1
+	fi
 	echo -e "${Info} 开始写入 配置文件..."
-	write_config
-	write_env
+	if ! write_config || ! write_env; then
+		echo -e "${Error} 配置写入失败，正在恢复安装前状态。"
+		restore_anytls_state "$ANYTLS_LAST_BACKUP"
+		return 1
+	fi
 	echo -e "${Info} 开始安装系统服务脚本..."
-	service
+	if ! service; then
+		echo -e "${Error} 服务安装失败，正在恢复安装前状态。"
+		restore_anytls_state "$ANYTLS_LAST_BACKUP"
+		return 1
+	fi
 	echo -e "${Info} 所有步骤 安装完毕，开始启动..."
-	start
+	if ! start; then
+		echo -e "${Error} 服务启动失败，正在恢复安装前状态。"
+		restore_anytls_state "$ANYTLS_LAST_BACKUP"
+		return 1
+	fi
 	echo -e "${Info} AnyTLS 安装完成！"
 	view
 }
@@ -313,6 +372,7 @@ uninstall(){
 	read -e -p "(默认：n)：" unyn
 	[[ -z ${unyn} ]] && unyn="n"
 	if [[ ${unyn} == [Yy] ]]; then
+		backup_anytls_state
 		check_status
 		[[ "$status" == "running" ]] && systemctl stop anytls
 		systemctl disable anytls
@@ -340,7 +400,7 @@ start(){
 			echo -e "${Info} AnyTLS 启动成功！"
 		else
 			echo -e "${Error} AnyTLS 启动失败！"
-			exit 1
+			return 1
 		fi
 	fi
 	sleep 3s
@@ -349,7 +409,7 @@ start(){
 stop(){
 	check_installed_status
 	check_status
-	[[ !"$status" == "running" ]] && echo -e "${Error} AnyTLS 没有运行，请检查！" && exit 1
+	[[ "$status" != "running" ]] && echo -e "${Error} AnyTLS 没有运行，请检查！" && exit 1
 	systemctl stop anytls
 	sleep 3s
 	start_menu
@@ -357,7 +417,14 @@ stop(){
 
 restart(){
 	check_installed_status
-	systemctl restart anytls
+	if ! systemctl restart anytls; then
+		echo -e "${Error} AnyTLS 重启失败。"
+		if [[ -n ${ANYTLS_LAST_BACKUP:-} ]]; then
+			echo -e "${Tip} 正在恢复修改前状态……"
+			restore_anytls_state "$ANYTLS_LAST_BACKUP"
+		fi
+		return 1
+	fi
 	echo -e "${Info} AnyTLS 重启完毕！"
 	sleep 3s
 	start_menu
@@ -376,6 +443,7 @@ update(){
 
 set_config(){
 	check_installed_status
+	backup_anytls_state
 	echo && echo -e "你要做什么？
 ========================================
  ${Green_font_prefix}1.${Font_color_suffix}  修改 端口配置
@@ -455,7 +523,8 @@ view(){
 		surge_ip="${ipv6}"
 	fi
 	
-	local surge_line="$(uname -n) = anytls, ${surge_ip}, ${port}, password=${password}"
+	local surge_line
+	surge_line="$(uname -n) = anytls, ${surge_ip}, ${port}, password=${password}"
 	if [[ -n "${sni}" && "${sni}" != "null" && "${sni}" != "" ]]; then
 		surge_line="${surge_line}, sni=${sni}"
 	fi
@@ -466,7 +535,8 @@ view(){
 	
 	# 如果有 IPv6 且 IPv4 也有效，额外输出 IPv6 版本
 	if [[ "${ipv4}" != "IPv4_Error" && "${ipv6}" != "IPv6_Error" ]]; then
-		local surge_line_v6="$(uname -n)-v6 = anytls, ${ipv6}, ${port}, password=${password}"
+		local surge_line_v6
+		surge_line_v6="$(uname -n)-v6 = anytls, ${ipv6}, ${port}, password=${password}"
 		if [[ -n "${sni}" && "${sni}" != "null" && "${sni}" != "" ]]; then
 			surge_line_v6="${surge_line_v6}, sni=${sni}"
 		fi
@@ -527,18 +597,27 @@ view_status(){
 
 update_sh(){
 	echo -e "当前版本为 [ ${sh_ver} ]，开始检测最新版本..."
-	sh_new_ver=$(wget --no-check-certificate -qO- "https://raw.githubusercontent.com/xOS/Scripts/master/anytls.sh" | grep 'sh_ver="' | awk -F "=" '{print $NF}' | sed 's/\"//g' | head -1)
+	sh_new_ver=$(wget -qO- -T 20 -t 2 "https://raw.githubusercontent.com/xOS/Scripts/master/anytls.sh" | grep 'sh_ver="' | awk -F "=" '{print $NF}' | sed 's/\"//g' | head -1)
 	[[ -z ${sh_new_ver} ]] && echo -e "${Error} 检测最新版本失败 !" && start_menu
-	if [[ ${sh_new_ver} != ${sh_ver} ]]; then
+	if [[ ${sh_new_ver} != "${sh_ver}" ]]; then
 		echo -e "发现新版本[ ${sh_new_ver} ]，是否更新？[Y/n]"
 		read -p "(默认：y)：" yn
 		[[ -z "${yn}" ]] && yn="y"
 		if [[ ${yn} == [Yy] ]]; then
-			wget -O anytls.sh --no-check-certificate https://raw.githubusercontent.com/xOS/Scripts/master/anytls.sh && chmod +x anytls.sh
+			local script_path temp_script backup_script
+			script_path=$(readlink -f "$0")
+			temp_script=$(mktemp /tmp/ai-anytls-script.XXXXXX)
+			backup_script="${script_path}.bak-$(date +%Y%m%d-%H%M%S)"
+			wget -qO "$temp_script" -T 20 -t 2 https://raw.githubusercontent.com/xOS/Scripts/master/anytls.sh || { rm -f "$temp_script"; echo -e "${Error} 下载失败"; return 1; }
+			bash -n "$temp_script" || { rm -f "$temp_script"; echo -e "${Error} 新脚本语法校验失败"; return 1; }
+			cp -a "$script_path" "$backup_script"
+			install -m 755 "$temp_script" "${script_path}.new"
+			mv -f "${script_path}.new" "$script_path"
+			rm -f "$temp_script"
 			echo -e "脚本已更新为最新版本[ ${sh_new_ver} ]！"
 			echo -e "3s后执行新脚本"
 			sleep 3s
-			bash anytls.sh
+			bash "$script_path"
 		else
 			echo && echo "	已取消..." && echo
 			sleep 3s
@@ -550,7 +629,7 @@ update_sh(){
 		start_menu
 	fi
 	sleep 3s
-	bash anytls.sh
+	bash "$(readlink -f "$0")"
 }
 
 # ================ 主菜单 ================

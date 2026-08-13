@@ -8,6 +8,8 @@ RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; BLUE='\033[34m'; CYAN='\033
 
 CONFIG_DIR="/etc/traffic_monitor"
 SERVICE_FILE="/etc/systemd/system/ip_blacklist.service"
+INSTALLED_SCRIPT="/usr/local/lib/ai-scripts/traffic_monitor.sh"
+IPSET_CONFIG="$CONFIG_DIR/ipset.conf"
 LOG_FILE="/var/log/iptables_ban.log"
 PORTS_CONFIG="$CONFIG_DIR/monitored_ports.conf"
 DURATION_CONFIG="$CONFIG_DIR/duration.conf"
@@ -72,6 +74,22 @@ validate_ip_any() {
 validate_port() { [[ $1 =~ ^[0-9]+$ ]] && [ $1 -ge 1 ] && [ $1 -le 65535 ]; }
 pause() { echo ""; read -n 1 -s -r -p "按任意键继续..."; echo ""; }
 
+save_managed_ipsets() {
+    local tmp set_name
+    tmp=$(mktemp "$CONFIG_DIR/.ipset.XXXXXX") || return 1
+    : > "$tmp"
+    for set_name in whitelist whitelist_v6 banlist banlist_v6; do
+        ipset list "$set_name" &>/dev/null && ipset save "$set_name" >> "$tmp"
+    done
+    if [[ -e "$CONFIG_DIR/.owns-cf-ipsets" ]]; then
+        for set_name in cf_block cf_block_v6; do
+            ipset list "$set_name" &>/dev/null && ipset save "$set_name" >> "$tmp"
+        done
+    fi
+    chmod 600 "$tmp"
+    mv -f -- "$tmp" "$IPSET_CONFIG"
+}
+
 is_reserved_ip() {
     local ip="$1"
     [[ "$ip" =~ ^127\. ]] && return 0
@@ -89,7 +107,7 @@ is_reserved_ip() {
 # ============================================
 
 run_monitor() {
-    [ -f /etc/ipset.conf ] && ipset restore -! < /etc/ipset.conf
+    [ -f "$IPSET_CONFIG" ] && ipset restore -! < "$IPSET_CONFIG"
     
     ipset create whitelist hash:net timeout 0 2>/dev/null || true
     ipset create whitelist_v6 hash:net family inet6 timeout 0 2>/dev/null || true
@@ -98,13 +116,22 @@ run_monitor() {
     iptables -N TRAFFIC_BLOCK 2>/dev/null
     iptables -F TRAFFIC_BLOCK 2>/dev/null
     iptables -C INPUT -j TRAFFIC_BLOCK 2>/dev/null || iptables -I INPUT -j TRAFFIC_BLOCK
-    iptables -A TRAFFIC_BLOCK -m set --match-set whitelist src -j ACCEPT
+    iptables -A TRAFFIC_BLOCK -m set --match-set whitelist src -j RETURN
     iptables -A TRAFFIC_BLOCK -m set --match-set banlist src -j DROP
     ip6tables -N TRAFFIC_BLOCK 2>/dev/null
     ip6tables -F TRAFFIC_BLOCK 2>/dev/null
     ip6tables -C INPUT -j TRAFFIC_BLOCK 2>/dev/null || ip6tables -I INPUT -j TRAFFIC_BLOCK
-    ip6tables -A TRAFFIC_BLOCK -m set --match-set whitelist_v6 src -j ACCEPT
+    ip6tables -A TRAFFIC_BLOCK -m set --match-set whitelist_v6 src -j RETURN
     ip6tables -A TRAFFIC_BLOCK -m set --match-set banlist_v6 src -j DROP
+
+    if [[ -e "$CONFIG_DIR/.owns-cf-ipsets" ]]; then
+        iptables -C INPUT -m conntrack --ctstate NEW -m set --match-set cf_block src -j DROP 2>/dev/null ||
+            iptables -I INPUT -m conntrack --ctstate NEW -m set --match-set cf_block src -j DROP
+        if ipset list cf_block_v6 &>/dev/null; then
+            ip6tables -C INPUT -m conntrack --ctstate NEW -m set --match-set cf_block_v6 src -j DROP 2>/dev/null ||
+                ip6tables -I INPUT -m conntrack --ctstate NEW -m set --match-set cf_block_v6 src -j DROP
+        fi
+    fi
     
     # 创建流量统计链
     iptables -N TRAFFIC_MONITOR 2>/dev/null
@@ -118,6 +145,12 @@ run_monitor() {
     [ -f "$PORTS_CONFIG" ] && FILTER_PORTS=$(cat "$PORTS_CONFIG") && echo -e "端口过滤: ${CYAN}$FILTER_PORTS${NC}" || FILTER_PORTS=""
     [ -f "$THRESHOLD_CONFIG" ] && LIMIT=$(cat "$THRESHOLD_CONFIG") || LIMIT=20
     [ -f "$DURATION_CONFIG" ] && DURATION=$(cat "$DURATION_CONFIG") || DURATION=60
+    if ! [[ "$LIMIT" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v value="$LIMIT" 'BEGIN { exit !(value > 0) }'; then LIMIT=20; fi
+    [[ "$DURATION" =~ ^[0-9]+$ ]] && [ "$DURATION" -ge 1 ] || DURATION=60
+    if [[ -n "$FILTER_PORTS" && ! "$FILTER_PORTS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        echo -e "${YELLOW}端口配置格式无效，已忽略。${NC}"
+        FILTER_PORTS=""
+    fi
     
     echo -e "流量阈值: ${YELLOW}${LIMIT}MB/s${NC}"
     echo -e "持续时间: ${YELLOW}${DURATION}秒${NC}"
@@ -136,7 +169,8 @@ run_monitor() {
         TX_RATE=$(echo "scale=2; ($TX2 - $TX1) / 1048576" | bc)
         echo -e "[$(date +%H:%M:%S)] RX: ${BLUE}${RX_RATE}MB/s${NC} TX: ${CYAN}${TX_RATE}MB/s${NC}"
         
-        if (( $(echo "$RX_RATE > $LIMIT || $TX_RATE > $LIMIT" | bc -l) )); then
+        # 当前按 INPUT 源地址计数，只能可靠归因 RX；TX 仍显示但不触发误封。
+        if (( $(echo "$RX_RATE > $LIMIT" | bc -l) )); then
             echo -e "${YELLOW}⚠️  流量超限${NC}"
             
             # 获取活跃连接的远端IP列表
@@ -166,28 +200,28 @@ run_monitor() {
             for ip in $ACTIVE_IPS; do
                 # 去除IPv6映射前缀
                 clean_ip="${ip#::ffff:}"
+                [[ $(validate_ip "$clean_ip") == v4 ]] || continue
                 # 跳过保留地址
                 is_reserved_ip "$clean_ip" && continue
                 # 跳过白名单
                 ipset test whitelist "$clean_ip" 2>/dev/null && continue
                 ipset test whitelist_v6 "$clean_ip" 2>/dev/null && continue
                 
-                if [[ -z "${tracked_ips[$clean_ip]}" ]]; then
-                    iptables -A TRAFFIC_MONITOR -s "$clean_ip" -j ACCEPT 2>/dev/null || \
-                    iptables -A TRAFFIC_MONITOR -s "${ip}" -j ACCEPT 2>/dev/null
+                if [[ -z "${tracked_ips[$clean_ip]}" ]] &&
+                   iptables -A TRAFFIC_MONITOR -s "$clean_ip" -j RETURN 2>/dev/null; then
                     tracked_ips[$clean_ip]=1
                     ip_prev_bytes[$clean_ip]=0
                 fi
             done
             
             # 读取每个IP的字节计数，计算带宽
-            declare -A ip_bandwidth
             local max_bw=0
             local max_bw_ip=""
             
             while IFS= read -r line; do
-                local bytes=$(echo "$line" | awk '{print $2}')
-                local src_ip=$(echo "$line" | awk '{print $8}')
+                local bytes src_ip
+                bytes=$(awk '{print $2}' <<< "$line")
+                src_ip=$(awk '{print $8}' <<< "$line")
                 [ -z "$src_ip" ] || [ "$src_ip" == "0.0.0.0/0" ] && continue
                 src_ip="${src_ip%/32}"
                 
@@ -199,8 +233,8 @@ run_monitor() {
                 [ "$prev" -eq 0 ] && continue
                 [ "$diff" -lt 0 ] && diff=0
                 
-                local bw=$(echo "scale=2; $diff / 1048576" | bc)
-                ip_bandwidth[$src_ip]=$bw
+                local bw
+                bw=$(echo "scale=2; $diff / 1048576" | bc)
                 
                 if (( $(echo "$bw > $max_bw" | bc -l) )); then
                     max_bw=$bw
@@ -210,12 +244,14 @@ run_monitor() {
             
             # 只对带宽最高且超过阈值的IP进行封禁判定
             if [[ -n "$max_bw_ip" ]] && (( $(echo "$max_bw > $LIMIT" | bc -l) )); then
-                local ct=$(date +%s)
+                local ct
+                ct=$(date +%s)
                 if [[ -z "${ip_first_seen[$max_bw_ip]}" ]]; then
                     ip_first_seen[$max_bw_ip]=$ct
                     echo -e "检测 ${RED}$max_bw_ip${NC} 超速 (${max_bw}MB/s)"
                 else
-                    local dur=$(( ct - ip_first_seen[$max_bw_ip] ))
+                    local dur
+                    dur=$(( ct - ip_first_seen[$max_bw_ip] ))
                     if (( dur >= DURATION )); then
                         echo -e "${RED}🚫 封禁 $max_bw_ip (${dur}秒, ${max_bw}MB/s)${NC}"
                         if validate_ipv6 "$max_bw_ip"; then
@@ -225,26 +261,22 @@ run_monitor() {
                         fi
                         echo "[BAN]|$(date '+%Y-%m-%d %H:%M:%S')|$max_bw_ip|IP带宽:${max_bw}MB/s|总RX:${RX_RATE}MB/s|总TX:${TX_RATE}MB/s|持续:${dur}秒" >> "$LOG_FILE"
                         # 清理该IP的统计规则
-                        iptables -D TRAFFIC_MONITOR -s "$max_bw_ip" -j ACCEPT 2>/dev/null
-                        iptables -D TRAFFIC_MONITOR -s "${max_bw_ip}/32" -j ACCEPT 2>/dev/null
-                        unset ip_first_seen[$max_bw_ip]
-                        unset tracked_ips[$max_bw_ip]
-                        unset ip_prev_bytes[$max_bw_ip]
+                        iptables -D TRAFFIC_MONITOR -s "$max_bw_ip" -j RETURN 2>/dev/null
+                        iptables -D TRAFFIC_MONITOR -s "${max_bw_ip}/32" -j RETURN 2>/dev/null
+                        unset 'ip_first_seen[$max_bw_ip]'
+                        unset 'tracked_ips[$max_bw_ip]'
+                        unset 'ip_prev_bytes[$max_bw_ip]'
                     else
                         echo -e "${YELLOW}$max_bw_ip 超速 ${dur}秒/${DURATION}秒 (${max_bw}MB/s)${NC}"
                     fi
                 fi
             else
                 # 没有单个IP超限，清除所有计时
-                for k in "${!ip_first_seen[@]}"; do
-                    unset ip_first_seen[$k]
-                done
+                ip_first_seen=()
             fi
         else
             # 总带宽正常，重置状态
-            for k in "${!ip_first_seen[@]}"; do
-                unset ip_first_seen[$k]
-            done
+            ip_first_seen=()
             # 定期清理不活跃的统计规则（每次总带宽正常时）
             iptables -F TRAFFIC_MONITOR 2>/dev/null
             tracked_ips=()
@@ -283,7 +315,7 @@ install_monitor() {
             validate_port "$p" && valid_ports+=("$p") || echo -e "${RED}✗ 无效: $p${NC}"
         done
         [ ${#valid_ports[@]} -gt 0 ] && {
-            echo $(IFS=,; echo "${valid_ports[*]}") > "$PORTS_CONFIG"
+            (IFS=,; printf '%s\n' "${valid_ports[*]}") > "$PORTS_CONFIG"
             echo -e "${GREEN}✓ 端口: ${valid_ports[*]}${NC}"
         }
     else
@@ -293,6 +325,10 @@ install_monitor() {
     echo -e "\n${CYAN}[2/5] 流量阈值${NC}"
     read -p "阈值(MB/s) [默认20]: " th
     th=${th:-20}
+    if ! [[ $th =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v value="$th" 'BEGIN { exit !(value > 0) }'; then
+        echo -e "${RED}阈值必须是大于 0 的数字。${NC}"
+        return 1
+    fi
     echo "$th" > "$THRESHOLD_CONFIG"
     echo -e "${GREEN}✓ 阈值: ${th}MB/s${NC}"
     
@@ -300,10 +336,20 @@ install_monitor() {
     echo -e "${YELLOW}超速持续多少秒后触发封禁${NC}"
     read -p "持续时间(秒) [默认60]: " dur
     dur=${dur:-60}
+    if ! [[ $dur =~ ^[0-9]+$ ]] || (( 10#$dur < 1 || 10#$dur > 86400 )); then
+        echo -e "${RED}持续时间必须是 1–86400 秒的整数。${NC}"
+        return 1
+    fi
     echo "$dur" > "$DURATION_CONFIG"
     echo -e "${GREEN}✓ 持续时间: ${dur}秒${NC}"
     
     echo -e "\n${CYAN}[4/5] 白名单${NC}"
+    if [[ ! -e "$CONFIG_DIR/.owns-ipsets" ]] &&
+       { ipset list whitelist &>/dev/null || ipset list whitelist_v6 &>/dev/null || ipset list banlist &>/dev/null || ipset list banlist_v6 &>/dev/null; }; then
+        echo -e "${RED}检测到同名 ipset，但它们不是由本脚本创建；为避免破坏其他服务，安装已取消。${NC}"
+        return 1
+    fi
+    touch "$CONFIG_DIR/.owns-ipsets"
     ipset create whitelist hash:net 2>/dev/null || true
     ipset create whitelist_v6 hash:net family inet6 2>/dev/null || true
     ipset create banlist hash:net timeout 86400 2>/dev/null || true
@@ -315,13 +361,14 @@ install_monitor() {
     echo -e "${GREEN}✓ 已自动添加 127.0.0.1 和 ::1${NC}"
     
     # 检测当前SSH连接IP
-    local ssh_ip=$(echo "$SSH_CLIENT" | awk '{print $1}')
+    local ssh_ip
+    ssh_ip=$(awk '{print $1}' <<< "$SSH_CLIENT")
     if [ -n "$ssh_ip" ]; then
         echo -e "${YELLOW}检测到当前SSH连接IP: ${NC}${GREEN}$ssh_ip${NC}"
         read -p "添加到白名单? [Y/n] " add_ssh
         if [[ ! "${add_ssh,,}" == "n" ]]; then
-            local ver=$(validate_ip_any "$ssh_ip")
-            if [ $? -eq 0 ] && [ "$ver" == "v6" ]; then
+            local ver
+            if ver=$(validate_ip_any "$ssh_ip") && [ "$ver" == "v6" ]; then
                 ipset add whitelist_v6 "$ssh_ip" 2>/dev/null
             else
                 ipset add whitelist "$ssh_ip" 2>/dev/null
@@ -334,17 +381,36 @@ install_monitor() {
     [[ "${aw,,}" == "y" ]] && add_whitelist_batch
     
     mkdir -p /etc/ipset
-    ipset save > /etc/ipset.conf
+    save_managed_ipsets
     
     echo -e "\n${CYAN}[5/5] 创建服务${NC}"
+    if [[ ! -e "$CONFIG_DIR/.service-snapshot" ]]; then
+        [[ ! -f "$SERVICE_FILE" ]] || cp -a "$SERVICE_FILE" "$CONFIG_DIR/ip_blacklist.service.before"
+        [[ ! -f /etc/logrotate.d/iptables_ban ]] || cp -a /etc/logrotate.d/iptables_ban "$CONFIG_DIR/iptables_ban.logrotate.before"
+        systemctl is-active --quiet ip_blacklist.service 2>/dev/null && touch "$CONFIG_DIR/service-was-active"
+        systemctl is-enabled --quiet ip_blacklist.service 2>/dev/null && touch "$CONFIG_DIR/service-was-enabled"
+        touch "$CONFIG_DIR/.service-snapshot"
+    fi
+    install -d -m 755 "$(dirname "$INSTALLED_SCRIPT")"
+    if [[ "$SCRIPT_PATH" != "$INSTALLED_SCRIPT" ]]; then
+        install -m 755 "$SCRIPT_PATH" "$INSTALLED_SCRIPT"
+    fi
+
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=IP流量监控服务
 After=network-online.target
 [Service]
-ExecStart=$SCRIPT_PATH monitor
+ExecStart=$INSTALLED_SCRIPT monitor
 Restart=always
 RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=$CONFIG_DIR $LOG_FILE -/run/xtables.lock
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -360,7 +426,14 @@ EOF
 LR
     
     systemctl daemon-reload
-    systemctl enable --now ip_blacklist.service
+    if ! systemctl enable --now ip_blacklist.service; then
+        echo -e "${RED}服务启动失败，正在恢复原 systemd/logrotate 配置。${NC}"
+        if [[ -f "$CONFIG_DIR/ip_blacklist.service.before" ]]; then cp -a "$CONFIG_DIR/ip_blacklist.service.before" "$SERVICE_FILE"; else rm -f "$SERVICE_FILE"; fi
+        if [[ -f "$CONFIG_DIR/iptables_ban.logrotate.before" ]]; then cp -a "$CONFIG_DIR/iptables_ban.logrotate.before" /etc/logrotate.d/iptables_ban; else rm -f /etc/logrotate.d/iptables_ban; fi
+        systemctl daemon-reload
+        [[ ! -e "$CONFIG_DIR/service-was-active" ]] || systemctl start ip_blacklist.service 2>/dev/null || true
+        return 1
+    fi
     echo -e "\n${GREEN}✅ 安装完成${NC}"
     pause
 }
@@ -378,7 +451,7 @@ uninstall_monitor() {
     [[ ! "$c" =~ [yY] ]] && return
     
     systemctl disable --now ip_blacklist.service 2>/dev/null || true
-    rm -f "$SERVICE_FILE"
+    if [[ -f "$CONFIG_DIR/ip_blacklist.service.before" ]]; then cp -a "$CONFIG_DIR/ip_blacklist.service.before" "$SERVICE_FILE"; else rm -f "$SERVICE_FILE"; fi
     iptables -D INPUT -j TRAFFIC_BLOCK 2>/dev/null || true
     iptables -F TRAFFIC_BLOCK 2>/dev/null || true
     iptables -X TRAFFIC_BLOCK 2>/dev/null || true
@@ -388,13 +461,26 @@ uninstall_monitor() {
     ip6tables -D INPUT -j TRAFFIC_BLOCK 2>/dev/null || true
     ip6tables -F TRAFFIC_BLOCK 2>/dev/null || true
     ip6tables -X TRAFFIC_BLOCK 2>/dev/null || true
-    ipset flush whitelist 2>/dev/null && ipset destroy whitelist 2>/dev/null || true
-    ipset flush whitelist_v6 2>/dev/null && ipset destroy whitelist_v6 2>/dev/null || true
-    ipset flush banlist 2>/dev/null && ipset destroy banlist 2>/dev/null || true
-    ipset flush banlist_v6 2>/dev/null && ipset destroy banlist_v6 2>/dev/null || true
-    rm -rf "$CONFIG_DIR"
-    rm -f /etc/ipset.conf /etc/logrotate.d/iptables_ban
+    if [[ -e "$CONFIG_DIR/.owns-ipsets" ]]; then
+        ipset flush whitelist 2>/dev/null && ipset destroy whitelist 2>/dev/null || true
+        ipset flush whitelist_v6 2>/dev/null && ipset destroy whitelist_v6 2>/dev/null || true
+        ipset flush banlist 2>/dev/null && ipset destroy banlist 2>/dev/null || true
+        ipset flush banlist_v6 2>/dev/null && ipset destroy banlist_v6 2>/dev/null || true
+    fi
+    if [[ -e "$CONFIG_DIR/.owns-cf-ipsets" ]]; then
+        iptables -D INPUT -m conntrack --ctstate NEW -m set --match-set cf_block src -j DROP 2>/dev/null || true
+        ip6tables -D INPUT -m conntrack --ctstate NEW -m set --match-set cf_block_v6 src -j DROP 2>/dev/null || true
+        ipset flush cf_block 2>/dev/null && ipset destroy cf_block 2>/dev/null || true
+        ipset flush cf_block_v6 2>/dev/null && ipset destroy cf_block_v6 2>/dev/null || true
+    fi
+    if [[ -f "$CONFIG_DIR/iptables_ban.logrotate.before" ]]; then cp -a "$CONFIG_DIR/iptables_ban.logrotate.before" /etc/logrotate.d/iptables_ban; else rm -f /etc/logrotate.d/iptables_ban; fi
+    rm -f "$IPSET_CONFIG" "$INSTALLED_SCRIPT"
     systemctl daemon-reload
+    if [[ -f "$CONFIG_DIR/ip_blacklist.service.before" ]]; then
+        if [[ -e "$CONFIG_DIR/service-was-enabled" ]]; then systemctl enable ip_blacklist.service 2>/dev/null || true; else systemctl disable ip_blacklist.service 2>/dev/null || true; fi
+        if [[ -e "$CONFIG_DIR/service-was-active" ]]; then systemctl start ip_blacklist.service 2>/dev/null || true; fi
+    fi
+    rm -rf "$CONFIG_DIR"
     echo -e "${GREEN}✅ 卸载完成${NC}"
     pause
 }
@@ -429,7 +515,7 @@ manage_ports() {
                 done
                 [ ${#valid[@]} -gt 0 ] && {
                     mkdir -p "$CONFIG_DIR"
-                    echo $(IFS=,; echo "${valid[*]}") > "$PORTS_CONFIG"
+                    (IFS=,; printf '%s\n' "${valid[*]}") > "$PORTS_CONFIG"
                     echo -e "${GREEN}✓ 已设置${NC}"
                     systemctl is-active --quiet ip_blacklist.service && systemctl restart ip_blacklist.service
                 }
@@ -439,13 +525,13 @@ manage_ports() {
                 [ ! -f "$PORTS_CONFIG" ] && { echo -e "${RED}请先设置端口${NC}"; pause; continue; }
                 echo -e "\n${YELLOW}添加端口: ${NC}"
                 read -p "端口: " ports
-                curr=$(cat "$PORTS_CONFIG" | tr ',' ' ')
+                curr=$(tr ',' ' ' < "$PORTS_CONFIG")
                 for p in $ports; do
                     validate_port "$p" && {
-                        [[ ! " $curr " =~ " $p " ]] && curr="$curr $p" && echo -e "${GREEN}✓ $p${NC}"
+                        [[ " $curr " != *" $p "* ]] && curr="$curr $p" && echo -e "${GREEN}✓ $p${NC}"
                     }
                 done
-                echo $(echo $curr | tr ' ' ',') | sed 's/^,//' > "$PORTS_CONFIG"
+                printf '%s\n' "$curr" | tr ' ' ',' | sed -E 's/^,+//; s/,+/,/g' > "$PORTS_CONFIG"
                 systemctl is-active --quiet ip_blacklist.service && systemctl restart ip_blacklist.service
                 pause
                 ;;
@@ -453,11 +539,16 @@ manage_ports() {
                 [ ! -f "$PORTS_CONFIG" ] && { echo -e "${RED}未启用${NC}"; pause; continue; }
                 echo -e "\n${YELLOW}删除端口: ${NC}"
                 read -p "端口: " ports
-                curr=$(cat "$PORTS_CONFIG" | tr ',' ' ')
+                curr=$(tr ',' ' ' < "$PORTS_CONFIG")
                 for p in $ports; do
-                    curr=$(echo $curr | sed "s/\b$p\b//g" | tr -s ' ')
+                    validate_port "$p" || continue
+                    curr=$(sed -E "s/(^|[[:space:]])${p}([[:space:]]|$)/ /g" <<< "$curr" | tr -s ' ')
                 done
-                [ -n "$curr" ] && echo $(echo $curr | tr ' ' ',') | sed 's/^,//' > "$PORTS_CONFIG" || rm -f "$PORTS_CONFIG"
+                if [[ -n ${curr//[[:space:]]/} ]]; then
+                    printf '%s\n' "$curr" | tr ' ' ',' | sed -E 's/^,+//; s/,+/,/g' > "$PORTS_CONFIG"
+                else
+                    rm -f "$PORTS_CONFIG"
+                fi
                 systemctl is-active --quiet ip_blacklist.service && systemctl restart ip_blacklist.service
                 echo -e "${GREEN}✓ 完成${NC}"
                 pause
@@ -482,8 +573,8 @@ add_whitelist_batch() {
     while read -p "IP: " ips; do
         [ "$ips" == "0" ] && break
         for ip in $ips; do
-            local ver=$(validate_ip_any "$ip")
-            if [ $? -eq 0 ]; then
+            local ver
+            if ver=$(validate_ip_any "$ip"); then
                 if [ "$ver" == "v6" ]; then
                     ipset add whitelist_v6 "$ip" 2>/dev/null && echo -e "${GREEN}✓ $ip (IPv6)${NC}" || echo -e "${YELLOW}已存在: $ip${NC}"
                 else
@@ -494,7 +585,7 @@ add_whitelist_batch() {
             fi
         done
     done
-    ipset save > /etc/ipset.conf
+    save_managed_ipsets
 }
 
 manage_whitelist() {
@@ -511,32 +602,36 @@ manage_whitelist() {
             1) add_whitelist_batch; pause ;;
             2)
                 echo -e "\n${YELLOW}白名单 (IPv4):${NC}"
-                local v4_list=$(ipset list whitelist | grep -E '^[0-9]')
+                local v4_list
+                v4_list=$(ipset list whitelist | grep -E '^[0-9]')
                 [ -n "$v4_list" ] && echo "$v4_list" | nl || echo -e "  ${YELLOW}(空)${NC}"
                 echo -e "\n${YELLOW}白名单 (IPv6):${NC}"
-                local v6_list=$(ipset list whitelist_v6 | grep -E '^[0-9a-fA-F]')
+                local v6_list
+                v6_list=$(ipset list whitelist_v6 | grep -E '^[0-9a-fA-F]')
                 [ -n "$v6_list" ] && echo "$v6_list" | nl || echo -e "  ${YELLOW}(空)${NC}"
                 pause
                 ;;
             3)
                 echo -e "\n${YELLOW}IPv4:${NC}"
-                local v4=$(ipset list whitelist | grep -E '^[0-9]')
+                local v4
+                v4=$(ipset list whitelist | grep -E '^[0-9]')
                 [ -n "$v4" ] && echo "$v4" | nl || echo -e "  (空)"
                 echo -e "\n${YELLOW}IPv6:${NC}"
-                local v6=$(ipset list whitelist_v6 | grep -E '^[0-9a-fA-F]')
+                local v6
+                v6=$(ipset list whitelist_v6 | grep -E '^[0-9a-fA-F]')
                 [ -n "$v6" ] && echo "$v6" | nl || echo -e "  (空)"
                 [ -z "$v4" ] && [ -z "$v6" ] && { echo -e "${YELLOW}白名单为空${NC}"; pause; continue; }
                 echo -e "\n${YELLOW}输入IP地址(空格分隔): ${NC}"
                 read -p "IP: " inputs
                 for input in $inputs; do
-                    local ver=$(validate_ip_any "$input")
-                    if [ $? -eq 0 ] && [ "$ver" == "v6" ]; then
+                    local ver
+                    if ver=$(validate_ip_any "$input") && [ "$ver" == "v6" ]; then
                         ipset del whitelist_v6 "$input" 2>/dev/null && echo -e "${GREEN}✓ $input${NC}" || echo -e "${RED}✗ $input${NC}"
                     else
                         ipset del whitelist "$input" 2>/dev/null && echo -e "${GREEN}✓ $input${NC}" || echo -e "${RED}✗ $input${NC}"
                     fi
                 done
-                ipset save > /etc/ipset.conf
+                save_managed_ipsets
                 pause
                 ;;
             0) return ;;
@@ -560,8 +655,8 @@ manage_blacklist() {
                 while read -p "IP: " ips; do
                     [ "$ips" == "0" ] && break
                     for ip in $ips; do
-                        local ver=$(validate_ip_any "$ip")
-                        if [ $? -eq 0 ]; then
+                        local ver
+                        if ver=$(validate_ip_any "$ip"); then
                             if [ "$ver" == "v6" ]; then
                                 ipset add banlist_v6 "$ip" timeout 86400 2>/dev/null && echo -e "${GREEN}✓ $ip (IPv6)${NC}" || echo -e "${RED}✗ $ip${NC}"
                             else
@@ -572,37 +667,41 @@ manage_blacklist() {
                         fi
                     done
                 done
-                ipset save > /etc/ipset.conf
+                save_managed_ipsets
                 pause
                 ;;
             2)
                 echo -e "\n${YELLOW}黑名单 (IPv4):${NC}"
-                local v4_list=$(ipset list banlist | grep -E '^[0-9]')
+                local v4_list
+                v4_list=$(ipset list banlist | grep -E '^[0-9]')
                 [ -n "$v4_list" ] && echo "$v4_list" | nl || echo -e "  ${YELLOW}(空)${NC}"
                 echo -e "\n${YELLOW}黑名单 (IPv6):${NC}"
-                local v6_list=$(ipset list banlist_v6 | grep -E '^[0-9a-fA-F]')
+                local v6_list
+                v6_list=$(ipset list banlist_v6 | grep -E '^[0-9a-fA-F]')
                 [ -n "$v6_list" ] && echo "$v6_list" | nl || echo -e "  ${YELLOW}(空)${NC}"
                 pause
                 ;;
             3)
                 echo -e "\n${YELLOW}IPv4:${NC}"
-                local v4=$(ipset list banlist | grep -E '^[0-9]')
+                local v4
+                v4=$(ipset list banlist | grep -E '^[0-9]')
                 [ -n "$v4" ] && echo "$v4" | nl || echo -e "  (空)"
                 echo -e "\n${YELLOW}IPv6:${NC}"
-                local v6=$(ipset list banlist_v6 | grep -E '^[0-9a-fA-F]')
+                local v6
+                v6=$(ipset list banlist_v6 | grep -E '^[0-9a-fA-F]')
                 [ -n "$v6" ] && echo "$v6" | nl || echo -e "  (空)"
                 [ -z "$v4" ] && [ -z "$v6" ] && { echo -e "${YELLOW}黑名单为空${NC}"; pause; continue; }
                 echo -e "\n${YELLOW}输入IP地址(空格分隔): ${NC}"
                 read -p "IP: " inputs
                 for input in $inputs; do
-                    local ver=$(validate_ip_any "$input")
-                    if [ $? -eq 0 ] && [ "$ver" == "v6" ]; then
+                    local ver
+                    if ver=$(validate_ip_any "$input") && [ "$ver" == "v6" ]; then
                         ipset del banlist_v6 "$input" 2>/dev/null && echo -e "${GREEN}✓ $input${NC}" || echo -e "${RED}✗ $input${NC}"
                     else
                         ipset del banlist "$input" 2>/dev/null && echo -e "${GREEN}✓ $input${NC}" || echo -e "${RED}✗ $input${NC}"
                     fi
                 done
-                ipset save > /etc/ipset.conf
+                save_managed_ipsets
                 pause
                 ;;
             0) return ;;
@@ -626,8 +725,9 @@ manage_cloudflare() {
            (iptables -C INPUT -m conntrack --ctstate NEW -m set --match-set cf_block src -j DROP &>/dev/null || \
             iptables -C INPUT -m set --match-set cf_block src -j DROP &>/dev/null); then
             echo -e "${GREEN}● 状态: 已启用${NC}"
-            local cf_v4=$(ipset list cf_block 2>/dev/null | grep -E '^[0-9]' | wc -l)
-            local cf_v6=$(ipset list cf_block_v6 2>/dev/null | grep -E '^[0-9a-fA-F:]+/' | wc -l)
+            local cf_v4 cf_v6
+            cf_v4=$(ipset list cf_block 2>/dev/null | grep -E '^[0-9]' | wc -l)
+            cf_v6=$(ipset list cf_block_v6 2>/dev/null | grep -E '^[0-9a-fA-F:]+/' | wc -l)
             local cf_count=$((cf_v4 + cf_v6))
             echo -e "${YELLOW}已封禁 $cf_count 个 Cloudflare IP 段${NC}\n"
         else
@@ -648,12 +748,19 @@ manage_cloudflare() {
                 echo -e "\n${CYAN}正在启用 Cloudflare 防护（标准CDN）...${NC}"
                 
                 # 创建 ipset（分别IPv4和IPv6）
+                if [[ ! -e "$CONFIG_DIR/.owns-cf-ipsets" ]] && { ipset list cf_block &>/dev/null || ipset list cf_block_v6 &>/dev/null; }; then
+                    echo -e "${RED}检测到非本脚本创建的同名 Cloudflare ipset，操作已取消。${NC}"
+                    pause
+                    continue
+                fi
+                touch "$CONFIG_DIR/.owns-cf-ipsets"
                 ipset create cf_block hash:net family inet 2>/dev/null || true
                 ipset create cf_block_v6 hash:net family inet6 2>/dev/null || true
                 
                 # 下载并添加 CF IPv4 段
                 echo -e "${YELLOW}下载 CF IPv4 段...${NC}"
-                local tmp_v4="/tmp/cf_ipv4.txt"
+                local tmp_v4
+                tmp_v4=$(mktemp /tmp/ai-cf-ipv4.XXXXXX)
                 local success_v4=0
                 
                 # 尝试多个数据源
@@ -680,7 +787,8 @@ manage_cloudflare() {
                 
                 # 下载并添加 CF IPv6 段
                 echo -e "${YELLOW}下载 CF IPv6 段...${NC}"
-                local tmp_v6="/tmp/cf_ipv6.txt"
+                local tmp_v6
+                tmp_v6=$(mktemp /tmp/ai-cf-ipv6.XXXXXX)
                 local success_v6=0
                 
                 # 尝试多个IPv6数据源
@@ -696,7 +804,8 @@ manage_cloudflare() {
                                 echo "  ✗ 返回HTML（被拦截）"
                             else
                                 # 检查内容
-                                local line_count=$(wc -l < "$tmp_v6" 2>/dev/null || echo 0)
+                                local line_count
+                                line_count=$(wc -l < "$tmp_v6" 2>/dev/null || echo 0)
                                 echo "  ✓ 成功（$line_count 行）"
                                 success_v6=1
                                 break
@@ -762,13 +871,19 @@ manage_cloudflare() {
                 fi
                 
                 # 持久化
-                ipset save > /etc/ipset.conf
+                save_managed_ipsets
                 
                 echo -e "\n${GREEN}✅ Cloudflare 防护已启用${NC}"
                 echo -e "${YELLOW}用户套 CF 后将无法连接${NC}"
                 pause
                 ;;
             2)
+                if [[ ! -e "$CONFIG_DIR/.owns-cf-ipsets" ]] && { ipset list cf_block &>/dev/null || ipset list cf_block_v6 &>/dev/null; }; then
+                    echo -e "${RED}检测到非本脚本创建的同名 Cloudflare ipset，操作已取消。${NC}"
+                    pause
+                    continue
+                fi
+                touch "$CONFIG_DIR/.owns-cf-ipsets"
                 echo -e "\n${CYAN}正在启用 Cloudflare 防护（完整ASN）...${NC}"
                 echo -e "${YELLOW}包含 WARP、Zero Trust 等所有 CF 服务${NC}\n"
                 
@@ -778,8 +893,8 @@ manage_cloudflare() {
                 
                 # 从 BGP 数据库获取 AS13335 的所有 IP 段
                 echo -e "${YELLOW}查询 AS13335 (Cloudflare) 的所有 IP 段...${NC}"
-                local asn_data="/tmp/cf_asn.json"
-                local count_added=0
+                local asn_data
+                asn_data=$(mktemp /tmp/ai-cf-asn.XXXXXX)
                 local api_success=0
                 
                 # 尝试多个ASN数据源
@@ -788,7 +903,8 @@ manage_cloudflare() {
                     "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS13335"
                 do
                     echo "  尝试连接: $asn_api"
-                    local http_code=$(curl -sL -w "%{http_code}" -m 15 -A "Mozilla/5.0" "$asn_api" -o "$asn_data" 2>&1 | tail -n1)
+                    local http_code
+                    http_code=$(curl -sL -w "%{http_code}" -m 15 -A "Mozilla/5.0" "$asn_api" -o "$asn_data" 2>&1 | tail -n1)
                     echo "  HTTP状态码: $http_code"
                     
                     if [ -f "$asn_data" ] && [ -s "$asn_data" ] && [ "$http_code" = "200" ]; then
@@ -889,7 +1005,8 @@ manage_cloudflare() {
                     echo -e "${YELLOW}回退到标准列表...${NC}\n"
                     
                     # 回退方案：使用标准列表
-                    local tmp_v4="/tmp/cf_ipv4.txt"
+                    local tmp_v4
+                    tmp_v4=$(mktemp /tmp/ai-cf-ipv4.XXXXXX)
                     for source in \
                         "https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv4.txt" \
                         "https://www.cloudflare.com/ips-v4"
@@ -903,7 +1020,8 @@ manage_cloudflare() {
                         fi
                     done
                     
-                    local tmp_v6="/tmp/cf_ipv6.txt"
+                    local tmp_v6
+                    tmp_v6=$(mktemp /tmp/ai-cf-ipv6.XXXXXX)
                     for v6_source in \
                         "https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv6.txt" \
                         "https://www.cloudflare.com/ips-v6"
@@ -938,10 +1056,11 @@ manage_cloudflare() {
                 fi
                 
                 # 持久化
-                ipset save > /etc/ipset.conf
+                save_managed_ipsets
                 
-                local total_v4=$(ipset list cf_block 2>/dev/null | grep -E '^[0-9]' | wc -l)
-                local total_v6=$(ipset list cf_block_v6 2>/dev/null | grep -E '^[0-9a-fA-F:]+/' | wc -l)
+                local total_v4 total_v6
+                total_v4=$(ipset list cf_block 2>/dev/null | grep -E '^[0-9]' | wc -l)
+                total_v6=$(ipset list cf_block_v6 2>/dev/null | grep -E '^[0-9a-fA-F:]+/' | wc -l)
                 local total=$((total_v4 + total_v6))
                 echo -e "\n${GREEN}✅ Cloudflare ASN 防护已启用${NC}"
                 echo -e "${YELLOW}共封禁 $total 个 IP 段（IPv4: $total_v4, IPv6: $total_v6）${NC}"
@@ -951,10 +1070,15 @@ manage_cloudflare() {
                 echo -e "\n${YELLOW}正在禁用 Cloudflare 防护...${NC}"
                 
                 # 删除 iptables 规则
-                iptables -D INPUT -m set --match-set cf_block src -j DROP 2>/dev/null && \
+                if [[ ! -e "$CONFIG_DIR/.owns-cf-ipsets" ]]; then
+                    echo -e "${RED}这些 Cloudflare ipset 不是由本脚本创建，拒绝删除。${NC}"
+                    pause
+                    continue
+                fi
+                iptables -D INPUT -m conntrack --ctstate NEW -m set --match-set cf_block src -j DROP 2>/dev/null && \
                     echo -e "${GREEN}✓ 已移除IPv4防火墙规则${NC}" || \
                     echo -e "${YELLOW}⚠ IPv4规则不存在${NC}"
-                ip6tables -D INPUT -m set --match-set cf_block_v6 src -j DROP 2>/dev/null && \
+                ip6tables -D INPUT -m conntrack --ctstate NEW -m set --match-set cf_block_v6 src -j DROP 2>/dev/null && \
                     echo -e "${GREEN}✓ 已移除IPv6防火墙规则${NC}" || \
                     echo -e "${YELLOW}⚠ IPv6规则不存在${NC}"
                 
@@ -965,7 +1089,7 @@ manage_cloudflare() {
                 ipset destroy cf_block_v6 2>/dev/null && echo -e "${GREEN}✓ 已删除IPv6封禁集合${NC}"
                 
                 # 更新持久化配置
-                ipset save > /etc/ipset.conf
+                save_managed_ipsets
                 
                 echo -e "\n${GREEN}✅ Cloudflare 防护已禁用${NC}"
                 pause
@@ -977,20 +1101,22 @@ manage_cloudflare() {
                 if ipset list cf_block &>/dev/null; then
                     echo -e "\n${CYAN}IPv4:${NC}"
                     ipset list cf_block | grep -E '^[0-9]' | nl | head -20
-                    local total_v4=$(ipset list cf_block | grep -E '^[0-9]' | wc -l)
-                    [ $total_v4 -gt 20 ] && echo -e "${YELLOW}... 共 $total_v4 条记录（仅显示前20条）${NC}"
+                    local total_v4
+                    total_v4=$(ipset list cf_block | grep -E '^[0-9]' | wc -l)
+                    [ "$total_v4" -gt 20 ] && echo -e "${YELLOW}... 共 $total_v4 条记录（仅显示前20条）${NC}"
                     has_data=1
                 fi
                 
                 if ipset list cf_block_v6 &>/dev/null; then
                     echo -e "\n${CYAN}IPv6:${NC}"
                     ipset list cf_block_v6 | grep -E '^[0-9a-fA-F:]+/' | nl | head -20
-                    local total_v6=$(ipset list cf_block_v6 | grep -E '^[0-9a-fA-F:]+/' | wc -l)
-                    [ $total_v6 -gt 20 ] && echo -e "${YELLOW}... 共 $total_v6 条记录（仅显示前20条）${NC}"
+                    local total_v6
+                    total_v6=$(ipset list cf_block_v6 | grep -E '^[0-9a-fA-F:]+/' | wc -l)
+                    [ "$total_v6" -gt 20 ] && echo -e "${YELLOW}... 共 $total_v6 条记录（仅显示前20条）${NC}"
                     has_data=1
                 fi
                 
-                [ $has_data -eq 0 ] && echo -e "\n${YELLOW}CF 封禁列表为空${NC}"
+                [ "$has_data" -eq 0 ] && echo -e "\n${YELLOW}CF 封禁列表为空${NC}"
                 pause
                 ;;
             5)
@@ -1001,80 +1127,83 @@ manage_cloudflare() {
                 fi
                 
                 echo -e "\n${CYAN}正在更新 Cloudflare IP 列表...${NC}"
-                
-                # 确俜IPv6 ipset存在
-                ipset create cf_block_v6 hash:net family inet6 2>/dev/null || true
-                
-                # 清空旧列表
-                ipset flush cf_block
-                ipset flush cf_block_v6 2>/dev/null
-                
-                # 重新下载 IPv4
+                local tmp_v4 tmp_v6 new_v4 new_v6 success_v4=0 success_v6=0 v4_count=0 v6_count=0
+                tmp_v4=$(mktemp /tmp/ai-cf-ipv4.XXXXXX)
+                tmp_v6=$(mktemp /tmp/ai-cf-ipv6.XXXXXX)
+                new_v4="cf4_new_$$"
+                new_v6="cf6_new_$$"
+
+                # 先下载并装入临时集合，全部准备好后再 swap，更新失败不会清空旧规则。
                 echo -e "${YELLOW}下载 IPv4...${NC}"
-                local tmp_v4="/tmp/cf_ipv4.txt"
                 for source in \
                     "https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv4.txt" \
                     "https://www.cloudflare.com/ips-v4"
                 do
-                    if curl -sL -m 10 "$source" -o "$tmp_v4" 2>/dev/null && [ -s "$tmp_v4" ] && grep -qE '^[0-9]+\.' "$tmp_v4"; then
-                        while read ip; do
-                            [ -n "$ip" ] && [[ "$ip" =~ ^[0-9]+\. ]] && ipset add cf_block "$ip" 2>/dev/null && echo "  ✓ $ip"
-                        done < "$tmp_v4"
-                        rm -f "$tmp_v4"
+                    if curl -fsSL -m 15 "$source" -o "$tmp_v4" 2>/dev/null && [ -s "$tmp_v4" ] && grep -qE '^[0-9]+\.' "$tmp_v4"; then
+                        success_v4=1
                         break
                     fi
                 done
-                
-                # 重新下载 IPv6
+                if [ "$success_v4" -ne 1 ]; then
+                    echo -e "${RED}IPv4 列表下载失败，保留原 Cloudflare 集合。${NC}"
+                    rm -f "$tmp_v4" "$tmp_v6"
+                    pause
+                    continue
+                fi
+
+                ipset destroy "$new_v4" 2>/dev/null || true
+                ipset create "$new_v4" hash:net family inet
+                while IFS= read -r ip; do
+                    ip=$(printf '%s' "$ip" | tr -d '\r' | xargs)
+                    [[ -n "$ip" && "$ip" =~ ^[0-9]+\. ]] || continue
+                    ipset add "$new_v4" "$ip" 2>/dev/null && ((v4_count++))
+                done < "$tmp_v4"
+                if [ "$v4_count" -eq 0 ]; then
+                    echo -e "${RED}IPv4 列表没有有效网段，保留原集合。${NC}"
+                    ipset destroy "$new_v4" 2>/dev/null || true
+                    rm -f "$tmp_v4" "$tmp_v6"
+                    pause
+                    continue
+                fi
+
                 echo -e "${YELLOW}下载 IPv6...${NC}"
-                local tmp_v6="/tmp/cf_ipv6.txt"
-                local success_v6=0
-                
                 for v6_source in \
                     "https://raw.githubusercontent.com/lord-alfred/ipranges/main/cloudflare/ipv6.txt" \
                     "https://www.cloudflare.com/ips-v6"
                 do
-                    echo "  尝试: $v6_source"
-                    if curl -sL -m 10 "$v6_source" -o "$tmp_v6" 2>/dev/null; then
-                        if [ -f "$tmp_v6" ] && [ -s "$tmp_v6" ]; then
-                            if grep -qi "<!DOCTYPE\|<html" "$tmp_v6" 2>/dev/null; then
-                                echo "  ✗ 返回HTML（被拦截）"
-                            else
-                                local line_count=$(wc -l < "$tmp_v6" 2>/dev/null || echo 0)
-                                echo "  ✓ 成功（$line_count 行）"
-                                success_v6=1
-                                break
-                            fi
-                        else
-                            echo "  ✗ 文件为空"
-                        fi
-                    else
-                        echo "  ✗ 下载失败"
+                    if curl -fsSL -m 15 "$v6_source" -o "$tmp_v6" 2>/dev/null \
+                        && [ -s "$tmp_v6" ] && ! grep -qi "<!DOCTYPE\|<html" "$tmp_v6"; then
+                        success_v6=1
+                        break
                     fi
                 done
-                
-                if [ $success_v6 -eq 1 ]; then
-                    local v6_count=0
+                if [ "$success_v6" -eq 1 ]; then
+                    ipset destroy "$new_v6" 2>/dev/null || true
+                    ipset create "$new_v6" hash:net family inet6
                     while IFS= read -r ip; do
-                        ip=$(echo "$ip" | tr -d '\r' | xargs)
-                        [ -z "$ip" ] && continue
-                        if echo "$ip" | grep -q ':' && echo "$ip" | grep -q '/'; then
-                            if ipset add cf_block_v6 "$ip" 2>/dev/null; then
-                                echo "  ✓ $ip"
-                                ((v6_count++))
-                            fi
-                        fi
+                        ip=$(printf '%s' "$ip" | tr -d '\r' | xargs)
+                        [[ "$ip" == *:*/* ]] || continue
+                        ipset add "$new_v6" "$ip" 2>/dev/null && ((v6_count++))
                     done < "$tmp_v6"
-                    [ $v6_count -gt 0 ] && echo -e "${GREEN}✓ IPv6 更新完成 ($v6_count 条)${NC}"
-                else
-                    echo -e "${YELLOW}⚠ IPv6 下载失败${NC}"
+                    if [ "$v6_count" -eq 0 ]; then
+                        ipset destroy "$new_v6" 2>/dev/null || true
+                        success_v6=0
+                    fi
                 fi
-                rm -f "$tmp_v6"
-                
-                ipset save > /etc/ipset.conf
-                
-                local count=$(ipset list cf_block | grep -E '^[0-9]' | wc -l)
-                echo -e "\n${GREEN}✅ 更新完成，共 $count 条记录${NC}"
+
+                ipset swap "$new_v4" cf_block
+                ipset destroy "$new_v4"
+                if [ "$success_v6" -eq 1 ]; then
+                    ipset create cf_block_v6 hash:net family inet6 2>/dev/null || true
+                    ipset swap "$new_v6" cf_block_v6
+                    ipset destroy "$new_v6"
+                else
+                    echo -e "${YELLOW}IPv6 列表更新失败或为空，已保留原 IPv6 集合。${NC}"
+                fi
+                rm -f "$tmp_v4" "$tmp_v6"
+                save_managed_ipsets
+
+                echo -e "\n${GREEN}✅ 更新完成，IPv4 $v4_count 条，IPv6 $v6_count 条${NC}"
                 pause
                 ;;
             6)
@@ -1090,7 +1219,7 @@ manage_cloudflare() {
                 
                 if [ -n "$manual_ip" ]; then
                     if ipset add cf_block "$manual_ip" 2>/dev/null; then
-                        ipset save > /etc/ipset.conf
+                save_managed_ipsets
                         echo -e "${GREEN}✓ 已添加: $manual_ip${NC}"
                     else
                         echo -e "${RED}✗ 添加失败，请检查格式${NC}"
@@ -1142,7 +1271,7 @@ manage_logs() {
                 fi
                 pause
                 ;;
-            3) read -p "确认清空? [y/N] " cf; [[ "$cf" =~ [yY] ]] && > "$LOG_FILE" && echo -e "${GREEN}✓ 已清空${NC}"; pause ;;
+            3) read -p "确认清空? [y/N] " cf; [[ "$cf" =~ [yY] ]] && : > "$LOG_FILE" && echo -e "${GREEN}✓ 已清空${NC}"; pause ;;
             0) return ;;
         esac
     done

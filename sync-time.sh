@@ -4,7 +4,7 @@
 # 一键校准系统时间脚本
 # 用于修复 ss-rust + shadowtls 时间戳不匹配问题
 
-set -e
+set -Eeuo pipefail
 
 # 颜色定义
 RED='\033[0;31m'
@@ -47,7 +47,8 @@ show_current_time() {
 
 # 设置时区（如果需要）
 set_timezone() {
-    local current_tz=$(timedatectl show -p Timezone --value 2>/dev/null || echo "")
+    local current_tz
+    current_tz=$(timedatectl show -p Timezone --value 2>/dev/null || echo "")
     
     if [[ "$current_tz" != "Asia/Shanghai" ]] && [[ "$current_tz" != "Asia/Hong_Kong" ]]; then
         print_warning "检测到时区不是 Asia/Shanghai 或 Asia/Hong_Kong"
@@ -92,14 +93,17 @@ sync_with_timesyncd() {
         
         # 重启 timesyncd 服务
         systemctl restart systemd-timesyncd 2>/dev/null || true
-        sleep 3
+        for _ in {1..10}; do
+            [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null || true) == yes ]] && break
+            sleep 1
+        done
         
         # 检查同步状态
-        if timedatectl status | grep -q "System clock synchronized: yes"; then
+        if [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null || true) == yes ]]; then
             print_success "systemd-timesyncd 时间同步完成"
             timedatectl status | grep -E "synchronized|NTP service"
             return 0
-        elif timedatectl timesync-status &>/dev/null; then
+        elif [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null || true) == yes ]]; then
             print_success "systemd-timesyncd 时间同步完成"
             timedatectl timesync-status
             return 0
@@ -114,9 +118,27 @@ sync_with_ntpdate() {
         print_info "使用 ntpdate 同步时间..."
         
         # 停止可能冲突的服务
+        local previously_active=() service_name
+        for service_name in systemd-timesyncd chronyd chrony ntpd ntp; do
+            if systemctl is-active --quiet "$service_name" 2>/dev/null; then
+                previously_active+=("$service_name")
+            fi
+        done
+
+        restore_ntp_services() {
+            trap - RETURN
+            local saved_service
+            for saved_service in "${previously_active[@]}"; do
+                systemctl start "$saved_service" 2>/dev/null || true
+            done
+        }
+        trap restore_ntp_services RETURN
+
         systemctl stop systemd-timesyncd 2>/dev/null || true
         systemctl stop chronyd 2>/dev/null || true
+        systemctl stop chrony 2>/dev/null || true
         systemctl stop ntpd 2>/dev/null || true
+        systemctl stop ntp 2>/dev/null || true
         
         # NTP 服务器列表（优先使用国内和亚洲服务器）
         local ntp_servers=(
@@ -166,16 +188,19 @@ sync_manual() {
     
     # 尝试从多个来源获取时间
     local time_sources=(
-        "http://worldtimeapi.org/api/timezone/Asia/Shanghai"
-        "http://worldtimeapi.org/api/timezone/Asia/Hong_Kong"
+        "https://worldtimeapi.org/api/timezone/Asia/Shanghai"
+        "https://worldtimeapi.org/api/timezone/Asia/Hong_Kong"
     )
     
     for source in "${time_sources[@]}"; do
         if command -v curl &> /dev/null; then
-            local timestamp=$(curl -s "$source" | grep -oP '"datetime":"\K[^"]+' | head -1)
+            local response timestamp
+            response=$(curl -fsS --connect-timeout 5 --max-time 10 "$source" 2>/dev/null || true)
+            timestamp=$(grep -oP '"datetime":"\K[^"]+' <<< "$response" | head -1 || true)
             if [[ -n "$timestamp" ]]; then
                 # 转换为 date 命令可用的格式
-                local formatted_time=$(echo "$timestamp" | sed 's/T/ /' | cut -d'.' -f1)
+                local formatted_time
+                formatted_time=$(sed 's/T/ /' <<< "$timestamp" | cut -d'.' -f1)
                 if date -s "$formatted_time" 2>/dev/null; then
                     print_success "手动时间同步成功"
                     hwclock --systohc 2>/dev/null || true
@@ -241,10 +266,10 @@ verify_sync() {
     
     # 检查与网络时间的差异
     if command -v ntpdate &> /dev/null; then
-        local time_diff=$(ntpdate -q ntp.aliyun.com 2>/dev/null | grep -oP 'offset \K[0-9.-]+' | head -1)
+        local time_diff
+        time_diff=$(ntpdate -q ntp.aliyun.com 2>/dev/null | grep -oP 'offset \K[0-9.-]+' | head -1 || true)
         if [[ -n "$time_diff" ]]; then
-            local abs_diff=$(echo "$time_diff" | tr -d '-')
-            if (( $(echo "$abs_diff < 1.0" | bc -l 2>/dev/null || echo 0) )); then
+            if awk -v value="$time_diff" 'BEGIN { if (value < 0) value = -value; exit !(value < 1.0) }'; then
                 print_success "时间同步验证通过，偏差: ${time_diff}秒"
             else
                 print_warning "时间偏差较大: ${time_diff}秒，可能需要再次同步"
@@ -299,9 +324,7 @@ main() {
     
     echo
     print_success "时间同步完成！"
-    print_info "建议设置定时任务定期同步时间，运行: crontab -e"
-    print_info "添加以下行以每小时同步一次:"
-    echo "  0 * * * * /usr/bin/bash $(realpath $0) > /dev/null 2>&1"
+    print_info "已启用系统时间同步服务；无需为这个交互式脚本添加 cron。"
 }
 
 # 运行主函数

@@ -1,4 +1,5 @@
 #!/bin/bash
+set -uo pipefail
 # Fail2Ban 交互式管理脚本（启用 SSH 防护 + 自定义参数 + 白名单 + 启动检测）
 # 适用系统：Debian / Ubuntu
 
@@ -8,6 +9,16 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+F2B_CONFIG=/etc/fail2ban/jail.d/ai-scripts-sshd.local
+F2B_STATE=/var/lib/ai-scripts/fail2ban
+
+validate_positive_integer() { [[ $1 =~ ^[0-9]+$ ]] && (( 10#$1 > 0 )); }
+validate_ip_list() {
+    local value
+    for value in $1; do
+        [[ $value =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ ]] || return 1
+    done
+}
 
 # 显示主菜单
 show_menu() {
@@ -53,6 +64,14 @@ install_fail2ban() {
     FINDTIME=${FINDTIME:-600}
     MAXRETRY=${MAXRETRY:-5}
     IGNOREIPS=${IGNOREIPS:-127.0.0.1/8}
+    if ! validate_positive_integer "$BANTIME" || ! validate_positive_integer "$FINDTIME" || ! validate_positive_integer "$MAXRETRY"; then
+        echo -e "${RED}时间和重试次数必须是大于 0 的整数。${NC}"
+        return 1
+    fi
+    if ! validate_ip_list "$IGNOREIPS"; then
+        echo -e "${RED}白名单只能包含 IP 或 CIDR，并用空格分隔。${NC}"
+        return 1
+    fi
     
     echo ""
     echo -e "${GREEN}使用配置: 封禁时间=${BANTIME}s, 检测窗口=${FINDTIME}s, 最大失败次数=${MAXRETRY}, 白名单IP=${IGNOREIPS}${NC}"
@@ -63,15 +82,23 @@ install_fail2ban() {
         read -p "按回车键返回主菜单..."
         return
     fi
-    
+
     echo ""
     echo -e "${GREEN}==== 更新系统并安装 Fail2Ban ====${NC}"
     sudo apt update -y
+    sudo install -d -m 700 "$F2B_STATE"
+    if ! command -v fail2ban-client &>/dev/null; then sudo touch "$F2B_STATE/installed-by-script"; fi
     sudo apt install fail2ban python3-systemd -y
     
     echo ""
     echo -e "${GREEN}==== 生成 jail.local 配置文件 ====${NC}"
-    cat << EOF | sudo tee /etc/fail2ban/jail.local > /dev/null
+    sudo install -d -m 755 /etc/fail2ban/jail.d
+    local config_backup=""
+    if [[ -f $F2B_CONFIG ]]; then
+        config_backup="$F2B_STATE/ai-scripts-sshd.local.$(date +%Y%m%d-%H%M%S)"
+        sudo cp -a "$F2B_CONFIG" "$config_backup"
+    fi
+    cat << EOF | sudo tee "$F2B_CONFIG" > /dev/null
 [DEFAULT]
 # 封禁时间
 bantime = ${BANTIME}
@@ -86,7 +113,6 @@ ignoreip = ${IGNOREIPS}
 enabled = true
 mode = extra
 backend = systemd
-journalmatch = _SYSTEMD_UNIT=ssh.service
 EOF
     
     echo "配置已生成（使用 systemd backend）"
@@ -94,10 +120,16 @@ EOF
     echo -e "${GREEN}配置文件已生成${NC}"
     echo ""
     echo "生成的配置内容："
-    cat /etc/fail2ban/jail.local
+    cat "$F2B_CONFIG"
     echo ""
     echo -e "${GREEN}==== 启动并设置开机自启 Fail2Ban ====${NC}"
     
+    if ! sudo fail2ban-client -t; then
+        echo -e "${RED}配置校验失败，正在恢复修改前配置。${NC}"
+        if [[ -n $config_backup ]]; then sudo cp -a "$config_backup" "$F2B_CONFIG"; else sudo rm -f "$F2B_CONFIG"; fi
+        return 1
+    fi
+
     # 停止旧服务
     sudo systemctl stop fail2ban 2>/dev/null || true
     sleep 1
@@ -145,6 +177,18 @@ uninstall_fail2ban() {
         read -p "按回车键返回主菜单..."
         return
     fi
+
+    if [[ ! -e "$F2B_STATE/installed-by-script" ]]; then
+        sudo rm -f "$F2B_CONFIG"
+        if sudo fail2ban-client -t; then
+            sudo systemctl restart fail2ban
+            echo -e "${GREEN}已移除本脚本配置；保留原有 Fail2Ban 软件和其他 jail。${NC}"
+        else
+            echo -e "${RED}移除后其余 Fail2Ban 配置校验失败，请检查现有配置。${NC}"
+        fi
+        read -r -p "按回车键返回主菜单..."
+        return
+    fi
     
     echo ""
     echo -e "${GREEN}正在停止 Fail2Ban 服务...${NC}"
@@ -152,14 +196,8 @@ uninstall_fail2ban() {
     sudo systemctl disable fail2ban 2>/dev/null || true
     
     echo -e "${GREEN}正在卸载 Fail2Ban...${NC}"
+    sudo rm -f "$F2B_CONFIG"
     sudo apt remove --purge fail2ban -y
-    sudo apt autoremove -y
-    
-    # 删除配置文件
-    if [ -d "/etc/fail2ban" ]; then
-        echo -e "${GREEN}正在删除配置文件...${NC}"
-        sudo rm -rf /etc/fail2ban
-    fi
     
     echo ""
     echo -e "${GREEN}==== 卸载完成 ====${NC}"
@@ -219,7 +257,8 @@ manage_bans() {
                 echo ""
                 read -p "请输入要解封的 IP 地址: " unban_ip
                 if [ -n "$unban_ip" ]; then
-                    sudo fail2ban-client set sshd unbanip $unban_ip
+                    if ! validate_ip_list "$unban_ip"; then echo -e "${RED}IP 格式无效。${NC}"; continue; fi
+                    sudo fail2ban-client set sshd unbanip "$unban_ip"
                     echo -e "${GREEN}IP $unban_ip 已解封${NC}"
                 else
                     echo -e "${RED}IP 地址不能为空${NC}"
@@ -233,7 +272,8 @@ manage_bans() {
                 echo ""
                 read -p "请输入要封禁的 IP 地址: " ban_ip
                 if [ -n "$ban_ip" ]; then
-                    sudo fail2ban-client set sshd banip $ban_ip
+                    if ! validate_ip_list "$ban_ip"; then echo -e "${RED}IP 格式无效。${NC}"; continue; fi
+                    sudo fail2ban-client set sshd banip "$ban_ip"
                     echo -e "${GREEN}IP $ban_ip 已被封禁${NC}"
                 else
                     echo -e "${RED}IP 地址不能为空${NC}"
@@ -245,9 +285,9 @@ manage_bans() {
                 clear
                 echo -e "${GREEN}==== 查看白名单 ====${NC}"
                 echo ""
-                if [ -f "/etc/fail2ban/jail.local" ]; then
+                if [ -f "$F2B_CONFIG" ]; then
                     echo "当前白名单配置："
-                    grep "ignoreip" /etc/fail2ban/jail.local
+                    grep "ignoreip" "$F2B_CONFIG"
                 else
                     echo -e "${RED}配置文件不存在${NC}"
                 fi
@@ -259,15 +299,23 @@ manage_bans() {
                 echo -e "${GREEN}==== 添加白名单 IP ====${NC}"
                 echo ""
                 echo "当前白名单配置："
-                grep "ignoreip" /etc/fail2ban/jail.local 2>/dev/null || echo "无"
+                grep "ignoreip" "$F2B_CONFIG" 2>/dev/null || echo "无"
                 echo ""
                 read -p "请输入要添加的白名单 IP (多个用空格分隔): " whitelist_ip
                 if [ -n "$whitelist_ip" ]; then
+                    if ! validate_ip_list "$whitelist_ip"; then echo -e "${RED}IP/CIDR 格式无效。${NC}"; continue; fi
                     # 读取当前白名单
-                    current_ips=$(grep "ignoreip" /etc/fail2ban/jail.local | cut -d'=' -f2 | xargs)
+                    current_ips=$(grep '^ignoreip[[:space:]]*=' "$F2B_CONFIG" | cut -d'=' -f2 | xargs)
                     new_ips="$current_ips $whitelist_ip"
                     # 更新配置文件
-                    sudo sed -i "s/ignoreip = .*/ignoreip = $new_ips/" /etc/fail2ban/jail.local
+                    whitelist_backup="$F2B_STATE/ai-scripts-sshd.local.$(date +%Y%m%d-%H%M%S)"
+                    sudo cp -a "$F2B_CONFIG" "$whitelist_backup"
+                    sudo sed -i "s|^ignoreip[[:space:]]*=.*|ignoreip = $new_ips|" "$F2B_CONFIG"
+                    if ! sudo fail2ban-client -t; then
+                        sudo cp -a "$whitelist_backup" "$F2B_CONFIG"
+                        echo -e "${RED}配置校验失败，已自动恢复 $whitelist_backup。${NC}"
+                        continue
+                    fi
                     echo -e "${GREEN}白名单已更新，正在重启 Fail2Ban...${NC}"
                     sudo systemctl restart fail2ban
                     sleep 2
@@ -299,6 +347,7 @@ manage_bans() {
 
 # 主循环
 main() {
+    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then echo -e "${RED}请使用 root 权限运行。${NC}"; exit 1; fi
     while true; do
         show_menu
         read -p "请选择操作 [0-3]: " choice

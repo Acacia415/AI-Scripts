@@ -3,6 +3,7 @@
 DNS_GOST_CONFIG_PATH="/etc/gost/dns-unlock-config.yml"
 DNS_GOST_SERVICE_NAME="gost-dns.service"
 DNS_GOST_SERVICE_PATH="/etc/systemd/system/${DNS_GOST_SERVICE_NAME}"
+DNS_STATE_DIR="/var/lib/ai-scripts/dns-unlock"
 
 # --- 颜色定义 ---
 RED='\033[0;31m'
@@ -39,9 +40,10 @@ check_and_install_iptables() {
 
 check_port_53() {
     if ! command -v lsof &> /dev/null; then apt-get update >/dev/null 2>&1 && apt-get install -y lsof >/dev/null; fi
-    if lsof -i :53 -sTCP:LISTEN -P -n >/dev/null; then
-        local process_name
-        process_name=$(ps -p "$(lsof -i :53 -sTCP:LISTEN -P -n -t)" -o comm=)
+    local port_pids process_name
+    port_pids=$( { lsof -nP -iTCP:53 -sTCP:LISTEN -t 2>/dev/null; lsof -nP -iUDP:53 -t 2>/dev/null; } | sort -u)
+    if [[ -n $port_pids ]]; then
+        process_name=$(ps -p "$(head -n1 <<< "$port_pids")" -o comm=)
 
         if [[ "$process_name" == "systemd-resolve" ]]; then
             echo -e "${YELLOW}警告: 端口 53 (DNS) 已被系统服务 'systemd-resolved' 占用。${NC}"
@@ -61,7 +63,7 @@ check_port_53() {
                 fi
 
                 # 再次检查端口是否已释放
-                if lsof -i :53 -sTCP:LISTEN -P -n >/dev/null; then
+                if lsof -nP -iTCP:53 -sTCP:LISTEN >/dev/null 2>&1 || lsof -nP -iUDP:53 >/dev/null 2>&1; then
                     echo -e "${RED}错误: 端口 53 仍然被占用，请手动检查。${NC}"
                     return 1
                 fi
@@ -91,9 +93,8 @@ check_ports_80_443() {
             if [[ "$process_name" != "gost" ]]; then
                 echo -e "${YELLOW}警告: 端口 ${port} 已被进程 '${process_name}' 占用。${NC}"
                 echo -e "${RED}这可能与 Nginx, Apache 或 Caddy 等常用Web服务冲突。请确保您已了解此情况。${NC}"
-                read -p "是否仍然继续安装? (y/N): " choice
-                if [[ ! "$choice" =~ ^[yY]$ ]]; then echo "安装已取消。"; return 1; fi
-                return 0
+                echo -e "${RED}继续安装也无法绑定端口；请先调整该服务后重试。${NC}"
+                return 1
             fi
         fi
     done
@@ -121,20 +122,37 @@ disable_systemd_resolved_if_running() {
     fi
 }
 
+backup_dns_client_state() {
+    install -d -m 700 "$DNS_STATE_DIR/client"
+    if [[ ! -e "$DNS_STATE_DIR/client/state-recorded" ]]; then
+        if [[ -e /etc/resolv.conf || -L /etc/resolv.conf ]]; then
+            cp -a /etc/resolv.conf "$DNS_STATE_DIR/client/resolv.conf"
+        else
+            touch "$DNS_STATE_DIR/client/resolv-was-absent"
+        fi
+        systemctl is-enabled --quiet systemd-resolved 2>/dev/null && touch "$DNS_STATE_DIR/client/resolved-enabled"
+        systemctl is-active --quiet systemd-resolved 2>/dev/null && touch "$DNS_STATE_DIR/client/resolved-active"
+        if [[ -e /etc/gai.conf ]]; then
+            cp -a /etc/gai.conf "$DNS_STATE_DIR/client/gai.conf"
+        else
+            touch "$DNS_STATE_DIR/client/gai-was-absent"
+        fi
+        touch "$DNS_STATE_DIR/client/state-recorded"
+    fi
+}
+
 set_resolv_conf() {
     local server_ip="$1"
     echo -e "${BLUE}信息: 正在备份当前的 DNS 配置...${NC}"
+    backup_dns_client_state
     if [ -f /etc/resolv.conf ]; then
         chattr -i /etc/resolv.conf 2>/dev/null
-        cp /etc/resolv.conf "/etc/resolv.conf.bak_$(date +%Y%m%d_%H%M%S)"
     fi
     echo -e "${BLUE}信息: 正在写入新的 DNS 配置 (nameserver ${server_ip})...${NC}"
     printf "nameserver %s\n" "$server_ip" > /etc/resolv.conf
-    if chattr +i /etc/resolv.conf; then
-        echo -e "${GREEN}成功: /etc/resolv.conf 已锁定，防止被覆盖。${NC}"
-    else
-        echo -e "${YELLOW}警告: 无法锁定 /etc/resolv.conf（缺少 chattr 或不支持），继续。${NC}"
-    fi
+    chmod 644 /etc/resolv.conf
+    printf '%s\n' "$server_ip" > "$DNS_STATE_DIR/client/server-ip"
+    echo -e "${GREEN}成功: /etc/resolv.conf 已更新；未设置不可变属性，方便 DHCP/VPN 管理和回滚。${NC}"
 }
 
 ensure_ipv4_preference() {
@@ -167,20 +185,14 @@ block_ipv6_ports() {
         return 1
     fi
     
-    # 阻断IPv6的DNS(53)、HTTP(80)、HTTPS(443)出站
-    for port in 53 80 443; do
-        for proto in tcp udp; do
-            # 跳过80/443的UDP（不存在）
-            if [[ "$port" != "53" ]] && [[ "$proto" == "udp" ]]; then
-                continue
-            fi
-            
-            # 检查规则是否已存在
-            if ! ip6tables -C OUTPUT -p "${proto}" --dport "${port}" -m comment --comment "dns-unlock-block-ipv6" -j REJECT &>/dev/null; then
-                ip6tables -I OUTPUT -p "${proto}" --dport "${port}" -m comment --comment "dns-unlock-block-ipv6" -j REJECT
-                echo -e "${GREEN}已阻断IPv6 ${proto^^}/${port}端口${NC}"
-            fi
-        done
+    # 仅阻断 IPv6 DNS，避免影响服务器的 IPv6 HTTP/HTTPS/QUIC 流量。
+    local port=53
+    for proto in tcp udp; do
+        # 检查规则是否已存在
+        if ! ip6tables -C OUTPUT -p "${proto}" --dport "${port}" -m comment --comment "dns-unlock-block-ipv6" -j REJECT &>/dev/null; then
+            ip6tables -I OUTPUT -p "${proto}" --dport "${port}" -m comment --comment "dns-unlock-block-ipv6" -j REJECT
+            echo -e "${GREEN}已阻断IPv6 ${proto^^}/${port}端口${NC}"
+        fi
     done
     
     # 持久化规则
@@ -203,7 +215,8 @@ unblock_ipv6_ports() {
     
     # 移除所有带dns-unlock-block-ipv6标记的规则
     while ip6tables -L OUTPUT -n --line-numbers | grep -q "dns-unlock-block-ipv6"; do
-        local line_num=$(ip6tables -L OUTPUT -n --line-numbers | grep "dns-unlock-block-ipv6" | head -1 | awk '{print $1}')
+        local line_num
+        line_num=$(ip6tables -L OUTPUT -n --line-numbers | grep "dns-unlock-block-ipv6" | head -1 | awk '{print $1}')
         if [[ -n "$line_num" ]]; then
             ip6tables -D OUTPUT "$line_num"
         else
@@ -232,9 +245,11 @@ enforce_dns_only_to_server() {
         if ! iptables -C OUTPUT -p "${proto}" --dport 53 -d "${server_ip}" -m comment --comment "dns-unlock-enforce-dns" -j ACCEPT &>/dev/null; then
             iptables -I OUTPUT -p "${proto}" --dport 53 -d "${server_ip}" -m comment --comment "dns-unlock-enforce-dns" -j ACCEPT
         fi
-        # 注意：不再添加REJECT规则，避免干扰代理服务器的UDP转发功能
-        # 依靠 /etc/resolv.conf 锁定配置来确保DNS使用指定服务器
+        if ! iptables -C OUTPUT -p "${proto}" --dport 53 -m comment --comment "dns-unlock-enforce-dns" -j REJECT &>/dev/null; then
+            iptables -A OUTPUT -p "${proto}" --dport 53 -m comment --comment "dns-unlock-enforce-dns" -j REJECT
+        fi
     done
+    printf '%s\n' "$server_ip" > "$DNS_STATE_DIR/client/enforced-server-ip"
     if command -v netfilter-persistent &>/dev/null; then
         netfilter-persistent save >/dev/null 2>&1 && echo -e "${GREEN}成功: 防火墙规则已持久化。${NC}"
     fi
@@ -248,9 +263,7 @@ revert_dns_enforcement_rules() {
         return 0
     fi
     local server_ip=""
-    if [ -f /etc/resolv.conf ]; then
-        server_ip=$(awk '/^nameserver[ \t]+([0-9]{1,3}\.){3}[0-9]{1,3}/{print $2; exit}' /etc/resolv.conf)
-    fi
+    [[ -f "$DNS_STATE_DIR/client/enforced-server-ip" ]] && server_ip=$(<"$DNS_STATE_DIR/client/enforced-server-ip")
     for proto in udp tcp; do
         if [[ -n "$server_ip" ]] && iptables -C OUTPUT -p "${proto}" --dport 53 -d "${server_ip}" -m comment --comment "dns-unlock-enforce-dns" -j ACCEPT &>/dev/null; then
             iptables -D OUTPUT -p "${proto}" --dport 53 -d "${server_ip}" -m comment --comment "dns-unlock-enforce-dns" -j ACCEPT
@@ -260,6 +273,7 @@ revert_dns_enforcement_rules() {
             iptables -D OUTPUT -p "${proto}" --dport 53 -m comment --comment "dns-unlock-enforce-dns" -j REJECT || break
         done
     done
+    rm -f "$DNS_STATE_DIR/client/enforced-server-ip"
     if command -v netfilter-persistent &>/dev/null; then
         netfilter-persistent save >/dev/null 2>&1 && echo -e "${GREEN}成功: 防火墙规则变更已持久化。${NC}"
     fi
@@ -267,6 +281,66 @@ revert_dns_enforcement_rules() {
 
 
 # ======================= 核心功能函数 =======================
+
+validate_ipv4_or_cidr() {
+    local value=$1 ip prefix part
+    ip=${value%/*}
+    prefix=${value#*/}
+    [[ $value == */* ]] || prefix=32
+    [[ $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    [[ $prefix =~ ^[0-9]+$ ]] && (( 10#$prefix <= 32 )) || return 1
+    IFS=. read -r -a octets <<< "$ip"
+    for part in "${octets[@]}"; do (( 10#$part <= 255 )) || return 1; done
+}
+
+configure_dns_unlock_access() {
+    check_and_install_iptables || return 1
+    install -d -m 700 "$DNS_STATE_DIR/server"
+    [[ -f "$DNS_STATE_DIR/server/iptables.before" ]] || iptables-save > "$DNS_STATE_DIR/server/iptables.before"
+
+    local chain=AI_DNS_UNLOCK_ACCESS allowed item
+    iptables -N "$chain" 2>/dev/null || true
+    iptables -F "$chain"
+    iptables -C INPUT -j "$chain" 2>/dev/null || iptables -I INPUT -m comment --comment dns-unlock-access -j "$chain"
+    iptables -A "$chain" -s 127.0.0.0/8 -j RETURN
+    iptables -A "$chain" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+
+    echo -e "${YELLOW}请输入允许访问 DNS 解锁服务的客户端 IPv4/CIDR（空格分隔）。${NC}"
+    echo -e "${YELLOW}留空将只允许本机，防止服务成为公网开放 DNS/转发器。${NC}"
+    read -r -p '允许列表: ' allowed
+    for item in $allowed; do
+        if validate_ipv4_or_cidr "$item"; then
+            iptables -A "$chain" -s "$item" -p tcp -m multiport --dports 53,80,443 -j RETURN
+            iptables -A "$chain" -s "$item" -p udp --dport 53 -j RETURN
+        else
+            echo -e "${YELLOW}跳过无效地址：$item${NC}"
+        fi
+    done
+    iptables -A "$chain" -p tcp -m multiport --dports 53,80,443 -j DROP
+    iptables -A "$chain" -p udp --dport 53 -j DROP
+    iptables -A "$chain" -j RETURN
+    command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
+}
+
+restore_dns_server_snapshot() {
+    local state="$DNS_STATE_DIR/server"
+    if [[ -f "$state/gost-config.before" ]]; then cp -a "$state/gost-config.before" "$DNS_GOST_CONFIG_PATH"; else rm -f "$DNS_GOST_CONFIG_PATH"; fi
+    if [[ -f "$state/gost-service.before" ]]; then cp -a "$state/gost-service.before" "$DNS_GOST_SERVICE_PATH"; else rm -f "$DNS_GOST_SERVICE_PATH"; fi
+    if [[ -f "$state/dnsmasq.conf.before" ]]; then cp -a "$state/dnsmasq.conf.before" /etc/dnsmasq.conf; fi
+    if [[ -f "$state/custom-unlock.before" ]]; then cp -a "$state/custom-unlock.before" /etc/dnsmasq.d/custom_unlock.conf; else rm -f /etc/dnsmasq.d/custom_unlock.conf; fi
+    if [[ -e "$state/resolv.conf.before" || -L "$state/resolv.conf.before" ]]; then
+        rm -f /etc/resolv.conf
+        cp -a "$state/resolv.conf.before" /etc/resolv.conf
+    elif [[ -e "$state/no-resolv-conf" ]]; then
+        rm -f /etc/resolv.conf
+    fi
+    systemctl daemon-reload
+    if [[ -e "$state/gost-service-enabled" ]]; then systemctl enable "$DNS_GOST_SERVICE_NAME" 2>/dev/null || true; else systemctl disable "$DNS_GOST_SERVICE_NAME" 2>/dev/null || true; fi
+    if [[ -e "$state/gost-service-active" ]]; then systemctl restart "$DNS_GOST_SERVICE_NAME" 2>/dev/null || true; else systemctl stop "$DNS_GOST_SERVICE_NAME" 2>/dev/null || true; fi
+    if [[ -e "$state/resolved-enabled" ]]; then systemctl enable systemd-resolved 2>/dev/null || true; else systemctl disable systemd-resolved 2>/dev/null || true; fi
+    if [[ -e "$state/resolved-active" ]]; then systemctl start systemd-resolved 2>/dev/null || true; else systemctl stop systemd-resolved 2>/dev/null || true; fi
+    dnsmasq --test >/dev/null 2>&1 && systemctl restart dnsmasq 2>/dev/null || true
+}
 
 dns_unlock_menu() {
     while true; do
@@ -307,16 +381,30 @@ install_dns_unlock_server() {
 
     echo -e "${BLUE}信息: 正在安装/检查核心依赖...${NC}"
     apt-get update >/dev/null 2>&1
+    install -d -m 700 "$DNS_STATE_DIR/server"
+    # 首次安装时建立基线快照；重复更新不能覆盖真正的安装前状态。
+    if [[ ! -e "$DNS_STATE_DIR/server/snapshot-complete" ]]; then
+        local dnsmasq_preexisting=no
+        dpkg-query -W -f='${Status}' dnsmasq 2>/dev/null | grep -q 'install ok installed' && dnsmasq_preexisting=yes
+        [[ $dnsmasq_preexisting == yes ]] && touch "$DNS_STATE_DIR/server/dnsmasq-preexisting"
+        [[ -f /etc/dnsmasq.conf ]] && cp -a /etc/dnsmasq.conf "$DNS_STATE_DIR/server/dnsmasq.conf.before" 2>/dev/null || touch "$DNS_STATE_DIR/server/no-dnsmasq-conf"
+        [[ -f /etc/dnsmasq.d/custom_unlock.conf ]] && cp -a /etc/dnsmasq.d/custom_unlock.conf "$DNS_STATE_DIR/server/custom-unlock.before" || touch "$DNS_STATE_DIR/server/no-custom-unlock"
+        [[ -f "$DNS_GOST_CONFIG_PATH" ]] && cp -a "$DNS_GOST_CONFIG_PATH" "$DNS_STATE_DIR/server/gost-config.before" || touch "$DNS_STATE_DIR/server/no-gost-config"
+        [[ -f "$DNS_GOST_SERVICE_PATH" ]] && cp -a "$DNS_GOST_SERVICE_PATH" "$DNS_STATE_DIR/server/gost-service.before" || touch "$DNS_STATE_DIR/server/no-gost-service"
+        [[ -e /etc/resolv.conf || -L /etc/resolv.conf ]] && cp -a /etc/resolv.conf "$DNS_STATE_DIR/server/resolv.conf.before" || touch "$DNS_STATE_DIR/server/no-resolv-conf"
+        systemctl is-active --quiet systemd-resolved 2>/dev/null && touch "$DNS_STATE_DIR/server/resolved-active"
+        systemctl is-enabled --quiet systemd-resolved 2>/dev/null && touch "$DNS_STATE_DIR/server/resolved-enabled"
+        systemctl is-active --quiet "$DNS_GOST_SERVICE_NAME" 2>/dev/null && touch "$DNS_STATE_DIR/server/gost-service-active"
+        systemctl is-enabled --quiet "$DNS_GOST_SERVICE_NAME" 2>/dev/null && touch "$DNS_STATE_DIR/server/gost-service-enabled"
+        touch "$DNS_STATE_DIR/server/snapshot-complete"
+    fi
     apt-get install -y dnsmasq curl wget lsof tar file >/dev/null 2>&1
     if ! check_port_53; then return 1; fi
     if ! check_ports_80_443; then return 1; fi
 
     echo -e "${BLUE}信息: 正在清理旧环境...${NC}"
-    systemctl stop sniproxy 2>/dev/null
     systemctl stop "${DNS_GOST_SERVICE_NAME}" 2>/dev/null
-    apt-get purge -y sniproxy >/dev/null 2>&1
-    rm -f /etc/dnsmasq.d/custom_netflix.conf
-    # 清理动作不应删除gost主程序，智能检查会处理
+    # 不卸载 sniproxy，也不删除其他脚本的 dnsmasq 配置。
     echo
 
     # --- 智能检查Gost是否已安装 ---
@@ -328,34 +416,46 @@ install_dns_unlock_server() {
         echo -e "${BLUE}信息: 将使用现有版本，跳过安装步骤。${NC}"
     else
         echo -e "${BLUE}信息: 正在安装最新版 Gost ...${NC}"
-        LATEST_GOST_VERSION=$(curl -s "https://api.github.com/repos/go-gost/gost/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | cut -c 2-)
-        local gost_version=${LATEST_GOST_VERSION:-"3.2.4"} # 如果API失败则回退到指定版本
+        LATEST_GOST_VERSION=$(curl -fsSL --connect-timeout 10 --max-time 20 "https://api.github.com/repos/go-gost/gost/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/^v//' | head -1)
+        local gost_version=$LATEST_GOST_VERSION
+        if [[ ! "$gost_version" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]]; then
+            echo -e "${RED}错误: 无法解析 Gost 最新正式版，不使用固定版本回退。${NC}"
+            return 1
+        fi
         local bit
         bit=$(uname -m)
-        if [[ "$bit" == "x86_64" ]]; then bit="amd64"; elif [[ "$bit" == "aarch64" ]]; then bit="armv8"; fi
+        case "$bit" in
+            x86_64|amd64) bit="amd64" ;;
+            aarch64|arm64) bit="arm64" ;;
+            *) echo -e "${RED}错误: 不支持的架构 $bit（仅支持 amd64/arm64）。${NC}"; return 1 ;;
+        esac
         local FILENAME="gost_${gost_version}_linux_${bit}.tar.gz"
         local GOST_URL="https://github.com/go-gost/gost/releases/download/v${gost_version}/${FILENAME}"
+        local gost_tmp archive extracted_gost
+        gost_tmp=$(mktemp -d /tmp/ai-dns-gost.XXXXXX) || return 1
+        archive="$gost_tmp/$FILENAME"
 
         echo "信息: 正在从以下地址下载Gost (v${gost_version}):"
         echo "${GOST_URL}"
-        if ! curl -L -o "${FILENAME}" "${GOST_URL}"; then
-            echo -e "${RED}错误: Gost 下载失败！ (curl 退出码: $?)${NC}"
-            rm -f "${FILENAME}"
+        if ! curl -fL --connect-timeout 10 --max-time 120 -o "$archive" "${GOST_URL}"; then
+            echo -e "${RED}错误: Gost 下载失败！${NC}"
+            rm -rf -- "$gost_tmp"
             return 1
         fi
 
-        if ! file "${FILENAME}" | grep -q 'gzip compressed data'; then
-            echo -e "${RED}错误: 下载的文件不是有效的压缩包。请手动检查上述URL。${NC}"
-            rm -f "${FILENAME}"
+        if ! file "$archive" | grep -q 'gzip compressed data' \
+            || ! tar -tzf "$archive" | awk '/^\// || /(^|\/)\.\.($|\/)/ { bad=1 } END { exit bad }'; then
+            echo -e "${RED}错误: 下载文件不是安全、有效的压缩包。${NC}"
+            rm -rf -- "$gost_tmp"
             return 1
         fi
 
-        tar -xzf "${FILENAME}" || { echo -e "${RED}错误: Gost解压失败！${NC}"; rm -f "${FILENAME}"; return 1; }
-        
-        chmod +x "gost"
-        mv "gost" /usr/local/bin/gost || { echo -e "${RED}错误: 移动gost文件失败，请检查权限。${NC}"; return 1; }
-        
-        rm -f "${FILENAME}"
+        tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$gost_tmp" || { echo -e "${RED}错误: Gost解压失败！${NC}"; rm -rf -- "$gost_tmp"; return 1; }
+        extracted_gost=$(find "$gost_tmp" -type f -name gost -print -quit)
+        [[ -n "$extracted_gost" ]] || { echo -e "${RED}错误: 压缩包内没有 gost。${NC}"; rm -rf -- "$gost_tmp"; return 1; }
+        install -m 0755 "$extracted_gost" /usr/local/bin/gost || { echo -e "${RED}错误: 安装 gost 失败。${NC}"; rm -rf -- "$gost_tmp"; return 1; }
+        rm -rf -- "$gost_tmp"
+        touch "$DNS_STATE_DIR/server/gost-installed-by-script"
         GOST_EXEC_PATH="/usr/local/bin/gost" # 更新路径变量
         
         if ! command -v gost &> /dev/null; then 
@@ -414,6 +514,8 @@ Type=simple
 ExecStart=${GOST_EXEC_PATH} -C ${DNS_GOST_CONFIG_PATH}
 Restart=always
 User=root
+StandardOutput=journal
+StandardError=journal
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
@@ -423,11 +525,17 @@ WantedBy=multi-user.target
 EOT
 
     systemctl daemon-reload && systemctl enable "${DNS_GOST_SERVICE_NAME}" && systemctl restart "${DNS_GOST_SERVICE_NAME}"
-    if systemctl is-active --quiet "${DNS_GOST_SERVICE_NAME}"; then echo -e "${GREEN}成功: Gost DNS解锁服务 (${DNS_GOST_SERVICE_NAME}) 已成功启动。${NC}"; else echo -e "${RED}错误: Gost DNS解锁服务启动失败，请使用 'systemctl status ${DNS_GOST_SERVICE_NAME}' 查看日志。${NC}"; return 1; fi
+    if systemctl is-active --quiet "${DNS_GOST_SERVICE_NAME}"; then
+        echo -e "${GREEN}成功: Gost DNS解锁服务 (${DNS_GOST_SERVICE_NAME}) 已成功启动。${NC}"
+    else
+        echo -e "${RED}错误: Gost DNS解锁服务启动失败，正在恢复安装前配置。${NC}"
+        restore_dns_server_snapshot
+        return 1
+    fi
     echo
 
     echo -e "${BLUE}信息: 正在创建 Dnsmasq 子配置文件...${NC}"
-    PUBLIC_IP=$(curl -4s ip.sb || curl -4s ifconfig.me)
+    PUBLIC_IP=$(curl -4fsS --connect-timeout 5 --max-time 10 https://api.ipify.org || curl -4fsS --connect-timeout 5 --max-time 10 https://ifconfig.me/ip)
     if [[ -z "$PUBLIC_IP" ]]; then echo -e "${RED}错误: 无法获取公网IP地址。${NC}"; return 1; fi
     
     DNSMASQ_CONFIG_FILE="/etc/dnsmasq.d/custom_unlock.conf"
@@ -447,7 +555,8 @@ all-servers
 $FILTER_AAAA_LINE
 cache-size=2048
 local-ttl=60
-interface=* # Listen on all network interfaces to accept queries from non-local IPs
+# Listen on all interfaces; restrict public access with the whitelist menu below.
+interface=*
 # Upstream DNS Servers
 server=8.8.8.8
 server=1.1.1.1
@@ -623,12 +732,20 @@ EOF
     fi
     
     echo -e "${BLUE}信息: 正在重启Dnsmasq服务以加载新配置...${NC}"
+    if ! dnsmasq --test; then
+        echo -e "${RED}错误: Dnsmasq 配置校验失败，正在恢复原配置。${NC}"
+        restore_dns_server_snapshot
+        return 1
+    fi
     systemctl restart dnsmasq
     if systemctl is-active --quiet dnsmasq; then
         echo -e "${GREEN}成功: Dnsmasq配置完成并已重启。${NC}"
     else
-        echo -e "${RED}错误: Dnsmasq服务重启失败。${NC}"; return 1;
+        echo -e "${RED}错误: Dnsmasq服务重启失败，正在恢复安装前配置。${NC}"
+        restore_dns_server_snapshot
+        return 1
     fi
+    configure_dns_unlock_access || return 1
     echo
     echo -e "${GREEN}🎉 恭喜！全新的 DNS 解锁服务已成功安装！它现在独立于您其他的Gost转发服务运行。${NC}"
 }
@@ -640,38 +757,79 @@ uninstall_dns_unlock_server() {
     echo -e "${BLUE}信息: 正在停止并卸载 Gost DNS解锁服务 (${DNS_GOST_SERVICE_NAME})...${NC}"
     systemctl stop "${DNS_GOST_SERVICE_NAME}" 2>/dev/null
     systemctl disable "${DNS_GOST_SERVICE_NAME}" 2>/dev/null
-    rm -f "${DNS_GOST_SERVICE_PATH}"
-    rm -f "${DNS_GOST_CONFIG_PATH}"
+    if [[ -f "$DNS_STATE_DIR/server/gost-service.before" ]]; then
+        cp -a "$DNS_STATE_DIR/server/gost-service.before" "$DNS_GOST_SERVICE_PATH"
+    else
+        rm -f "${DNS_GOST_SERVICE_PATH}"
+    fi
+    if [[ -f "$DNS_STATE_DIR/server/gost-config.before" ]]; then
+        cp -a "$DNS_STATE_DIR/server/gost-config.before" "$DNS_GOST_CONFIG_PATH"
+    else
+        rm -f "${DNS_GOST_CONFIG_PATH}"
+    fi
     systemctl daemon-reload
+    while iptables -C INPUT -j AI_DNS_UNLOCK_ACCESS 2>/dev/null; do iptables -D INPUT -j AI_DNS_UNLOCK_ACCESS; done
+    iptables -F AI_DNS_UNLOCK_ACCESS 2>/dev/null || true
+    iptables -X AI_DNS_UNLOCK_ACCESS 2>/dev/null || true
+    command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
     
-    # --- 智能卸载检查 ---
-    # 定义常见的主Gost服务路径
-    MAIN_GOST_SERVICE_PATH="/usr/lib/systemd/system/gost.service" 
-    if [[ -f "${MAIN_GOST_SERVICE_PATH}" ]] || systemctl list-units --type=service | grep -q 'gost.service'; then
+    # 仅在确认没有其他 Gost systemd 服务引用二进制时删除它。
+    if [[ ! -e "$DNS_STATE_DIR/server/gost-installed-by-script" ]]; then
+        echo -e "${BLUE}信息: Gost 原本已存在，保留程序本体。${NC}"
+    elif grep -Rqs --include='*.service' -E 'ExecStart=.*(/|[[:space:]])gost([[:space:]]|$)' /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system 2>/dev/null; then
         echo -e "${YELLOW}警告: 检测到可能存在的主Gost转发服务。${NC}"
         echo -e "${BLUE}信息: 为避免破坏主服务，将不会删除 'gost' 程序本体。${NC}"
     else
         echo -e "${BLUE}信息: 未检测到其他Gost服务，将一并删除 'gost' 程序本体。${NC}"
-        rm -f "$(command -v gost)"
+        rm -f /usr/local/bin/gost
     fi
     echo
-    
-    echo -e "${BLUE}信息: 正在卸载 Dnsmasq 服务及相关配置...${NC}"
-    systemctl stop dnsmasq 2>/dev/null
-    rm -f /etc/dnsmasq.d/custom_unlock.conf
-    sed -i '/^# Load configurations from \/etc\/dnsmasq.d/d' /etc/dnsmasq.conf 2>/dev/null
-    sed -i '/^conf-dir=\/etc\/dnsmasq.d/d' /etc/dnsmasq.conf 2>/dev/null
-    apt-get purge -y dnsmasq >/dev/null 2>&1
-    echo -e "${GREEN}成功: Dnsmasq 及相关配置已卸载。${NC}"
+
+    echo -e "${BLUE}信息: 正在移除本脚本的 Dnsmasq 配置...${NC}"
+    if [[ -f "$DNS_STATE_DIR/server/custom-unlock.before" ]]; then
+        cp -a "$DNS_STATE_DIR/server/custom-unlock.before" /etc/dnsmasq.d/custom_unlock.conf
+    else
+        rm -f /etc/dnsmasq.d/custom_unlock.conf
+    fi
+    if [[ -f "$DNS_STATE_DIR/server/dnsmasq.conf.before" ]]; then
+        cp -a "$DNS_STATE_DIR/server/dnsmasq.conf.before" /etc/dnsmasq.conf
+    fi
+    if [[ -e "$DNS_STATE_DIR/server/resolv.conf.before" || -L "$DNS_STATE_DIR/server/resolv.conf.before" ]]; then
+        rm -f /etc/resolv.conf
+        cp -a "$DNS_STATE_DIR/server/resolv.conf.before" /etc/resolv.conf
+    elif [[ -e "$DNS_STATE_DIR/server/no-resolv-conf" ]]; then
+        rm -f /etc/resolv.conf
+    fi
+    if [[ -e "$DNS_STATE_DIR/server/dnsmasq-preexisting" ]]; then
+        dnsmasq --test >/dev/null 2>&1 && systemctl restart dnsmasq 2>/dev/null || true
+        echo -e "${GREEN}成功: 已恢复安装前的 Dnsmasq 配置，保留原软件。${NC}"
+    else
+        systemctl stop dnsmasq 2>/dev/null || true
+        apt-get purge -y dnsmasq >/dev/null 2>&1 || true
+        echo -e "${GREEN}成功: 已移除由本脚本安装的 Dnsmasq。${NC}"
+    fi
+    if [[ -f "$DNS_STATE_DIR/server/gost-service.before" ]]; then
+        if [[ -e "$DNS_STATE_DIR/server/gost-service-enabled" ]]; then systemctl enable "$DNS_GOST_SERVICE_NAME" 2>/dev/null || true; else systemctl disable "$DNS_GOST_SERVICE_NAME" 2>/dev/null || true; fi
+        if [[ -e "$DNS_STATE_DIR/server/gost-service-active" ]]; then systemctl restart "$DNS_GOST_SERVICE_NAME" 2>/dev/null || true; fi
+    fi
+    if [[ -e "$DNS_STATE_DIR/server/resolved-enabled" ]]; then systemctl enable systemd-resolved 2>/dev/null || true; else systemctl disable systemd-resolved 2>/dev/null || true; fi
+    if [[ -e "$DNS_STATE_DIR/server/resolved-active" ]]; then systemctl start systemd-resolved 2>/dev/null || true; else systemctl stop systemd-resolved 2>/dev/null || true; fi
+    local state_archive
+    state_archive="/var/backups/ai-scripts/dns-unlock/uninstall-$(date +%Y%m%d-%H%M%S)"
+    install -d -m 700 "$state_archive"
+    cp -a "$DNS_STATE_DIR/server" "$state_archive/server-state"
+    rm -rf -- "$DNS_STATE_DIR/server"
+    echo -e "${BLUE}信息: 卸载前状态已归档到 $state_archive${NC}"
     echo
     echo -e "${GREEN}✅ 所有 DNS 解锁服务组件均已卸载完毕。${NC}"
 }
 
 setup_dns_client() {
     clear
+    backup_dns_client_state
     echo -e "${YELLOW}--- 设置 DNS 客户端 ---${NC}"
     read -p "请输入您的 DNS 解锁服务器的 IP 地址: " server_ip
-    if ! [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo -e "${RED}错误: 您输入的不是一个有效的 IP 地址。${NC}"; return 1; fi
+    if [[ "$server_ip" == */* ]] || ! validate_ipv4_or_cidr "$server_ip"; then echo -e "${RED}错误: 您输入的不是一个有效的 IPv4 地址。${NC}"; return 1; fi
 
     # 1) （推荐）禁用 systemd-resolved，避免 stub 劫持；解除 resolv.conf 软链
     disable_systemd_resolved_if_running
@@ -731,27 +889,30 @@ uninstall_dns_client() {
     revert_dns_enforcement_rules
     echo -e "${BLUE}信息: 正在解锁 DNS 配置文件...${NC}"
     chattr -i /etc/resolv.conf 2>/dev/null
-    local latest_backup
-    latest_backup=$(ls -t /etc/resolv.conf.bak_* 2>/dev/null | head -n 1)
-    if [[ -f "$latest_backup" ]]; then
-        echo -e "${BLUE}信息: 正在从备份文件 $latest_backup 还原...${NC}"
-        mv "$latest_backup" /etc/resolv.conf
-        echo -e "${GREEN}成功: DNS 配置已成功从备份还原。${NC}"
-    else
-        echo -e "${YELLOW}警告: 未找到备份文件。正在设置为通用 DNS (8.8.8.8)...${NC}"
-        echo "nameserver 8.8.8.8" > /etc/resolv.conf
-        echo -e "${GREEN}成功: DNS 已设置为通用公共服务器。${NC}"
-    fi
-    # 可选：恢复 systemd-resolved
-    if systemctl list-unit-files | grep -q '^systemd-resolved.service'; then
-        read -p "是否重新启用并启动 systemd-resolved? (y/N): " reenable_sr
-        if [[ "$reenable_sr" =~ ^[yY]$ ]]; then
-            if [ -f /run/systemd/resolve/stub-resolv.conf ]; then
-                rm -f /etc/resolv.conf
-                ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-            fi
-            systemctl enable --now systemd-resolved && echo -e "${GREEN}已重新启用 systemd-resolved。${NC}"
+    if [[ -e "$DNS_STATE_DIR/client/state-recorded" ]]; then
+        rm -f /etc/resolv.conf
+        if [[ -e "$DNS_STATE_DIR/client/resolv.conf" || -L "$DNS_STATE_DIR/client/resolv.conf" ]]; then
+            cp -a "$DNS_STATE_DIR/client/resolv.conf" /etc/resolv.conf
         fi
+        if [[ -e "$DNS_STATE_DIR/client/gai.conf" ]]; then
+            cp -a "$DNS_STATE_DIR/client/gai.conf" /etc/gai.conf
+        elif [[ -e "$DNS_STATE_DIR/client/gai-was-absent" ]]; then
+            rm -f /etc/gai.conf
+        fi
+        if [[ -e "$DNS_STATE_DIR/client/resolved-enabled" ]]; then
+            systemctl enable systemd-resolved 2>/dev/null || true
+        else
+            systemctl disable systemd-resolved 2>/dev/null || true
+        fi
+        if [[ -e "$DNS_STATE_DIR/client/resolved-active" ]]; then
+            systemctl start systemd-resolved 2>/dev/null || true
+        else
+            systemctl stop systemd-resolved 2>/dev/null || true
+        fi
+        echo -e "${GREEN}已恢复首次修改前的 resolv.conf、gai.conf 和 systemd-resolved 状态。${NC}"
+        rm -rf -- "$DNS_STATE_DIR/client"
+    else
+        echo -e "${YELLOW}没有本脚本记录的原始 DNS 状态，拒绝猜测或覆盖当前配置。${NC}"
     fi
 }
 
@@ -859,8 +1020,8 @@ manage_iptables_rules() {
                 fi
 
                 for port in 53 80 443; do
-                    iptables -I INPUT -s "$ip" -p tcp --dport "$port" -j ACCEPT
-                    if [[ "$port" == "53" ]]; then iptables -I INPUT -s "$ip" -p udp --dport "$port" -j ACCEPT; fi
+                    iptables -I INPUT -s "$ip" -p tcp --dport "$port" -m comment --comment dns-unlock-whitelist -j ACCEPT
+                    if [[ "$port" == "53" ]]; then iptables -I INPUT -s "$ip" -p udp --dport "$port" -m comment --comment dns-unlock-whitelist -j ACCEPT; fi
                 done
                 echo -e "${GREEN}IP $ip 已添加至端口 53, 80, 443 白名单。${NC}"
                 ((added_count++))
@@ -894,6 +1055,11 @@ manage_iptables_rules() {
                     invalid_input=true
                     continue
                 fi
+                if ! iptables -L INPUT -n --line-numbers | awk -v number="$num" '$1 == number' | grep -q 'dns-unlock'; then
+                    echo -e "${RED}规则 ${num} 不是由本脚本管理，拒绝删除。${NC}"
+                    invalid_input=true
+                    continue
+                fi
                 # 执行删除
                 if iptables -D INPUT "$num"; then
                     echo -e "${GREEN}规则 ${num} 已删除。${NC}"
@@ -918,8 +1084,8 @@ manage_iptables_rules() {
         3)
             echo -e "${BLUE}信息: 这将确保所有不在白名单的IP无法访问相关端口。${NC}"
             for port in 53 80 443; do
-                if ! iptables -C INPUT -p tcp --dport "$port" -j DROP &>/dev/null; then iptables -A INPUT -p tcp --dport "$port" -j DROP; fi
-                if [[ "$port" == "53" ]]; then if ! iptables -C INPUT -p udp --dport "$port" -j DROP &>/dev/null; then iptables -A INPUT -p udp --dport "$port" -j DROP; fi; fi
+                if ! iptables -C INPUT -p tcp --dport "$port" -m comment --comment dns-unlock-default-deny -j DROP &>/dev/null; then iptables -A INPUT -p tcp --dport "$port" -m comment --comment dns-unlock-default-deny -j DROP; fi
+                if [[ "$port" == "53" ]]; then if ! iptables -C INPUT -p udp --dport "$port" -m comment --comment dns-unlock-default-deny -j DROP &>/dev/null; then iptables -A INPUT -p udp --dport "$port" -m comment --comment dns-unlock-default-deny -j DROP; fi; fi
             done
             echo -e "${GREEN}'默认拒绝' 规则已应用/确认存在。${NC}"
             netfilter-persistent save && echo -e "${GREEN}防火墙规则已保存。${NC}" || echo -e "${RED}防火墙规则保存失败。${NC}"
