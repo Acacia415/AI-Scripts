@@ -434,7 +434,7 @@ EOT
     # 可选：启用 AAAA 过滤，防止 IPv6 泄漏（默认启用）
     read -p "是否在服务端启用 AAAA 过滤（filter-AAAA）以防 IPv6 泄漏？(Y/n): " enable_filter_aaaa
     local FILTER_AAAA_LINE=""
-    if [[ "$enable_filter_aaaa" =~ ^[yY]$ ]] || [[ -z "$enable_filter_AAAA" ]]; then FILTER_AAAA_LINE="filter-aaaa"; fi
+    if [[ "$enable_filter_aaaa" =~ ^[yY]$ ]] || [[ -z "$enable_filter_aaaa" ]]; then FILTER_AAAA_LINE="filter-AAAA"; fi
     
     tee "$DNSMASQ_CONFIG_FILE" > /dev/null <<EOF
 # --- DNSMASQ CONFIG MODULE MANAGED BY SCRIPT ---
