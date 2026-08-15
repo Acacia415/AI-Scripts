@@ -4,7 +4,7 @@
 Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_prefix="\033[42;37m" && Font_color_suffix="\033[0m"
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
 Error="${Red_font_prefix}[错误]${Font_color_suffix}"
-shell_version="2.3.1" # Version updated after YAML bug fixes
+shell_version="2.4.0" # Version updated: add journald log rotation
 ct_new_ver="3.2.4" # GOST v3 版本
 gost_conf_path="/etc/gost/config.yml" # Using YAML config file
 raw_conf_path="/etc/gost/rawconf"
@@ -57,6 +57,20 @@ function Installation_dependency() {
       apt-get update && apt-get install -y gzip wget
     fi
   fi
+}
+
+function setup_journald_log_rotation() {
+  echo -e "${Info} 正在配置 journald 日志轮换..."
+  mkdir -p /etc/systemd/journald.conf.d
+  cat >/etc/systemd/journald.conf.d/99-gost-limits.conf <<EOF
+# Managed by gost_v3.sh - 防止日志无限堆积
+[Journal]
+SystemMaxUse=200M
+SystemMaxFileSize=50M
+MaxRetentionSec=7day
+EOF
+  systemctl restart systemd-journald 2>/dev/null
+  echo -e "${Info} journald 日志轮换已配置 (最大200M / 保留7天)"
 }
 
 # --- GOST 服务管理 ---
@@ -113,6 +127,9 @@ ExecStart=/usr/bin/gost -C ${gost_conf_path}
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gost
 
 [Install]
 WantedBy=multi-user.target
@@ -164,6 +181,7 @@ function Install_ct() {
   
   chmod -R 755 /etc/gost
 
+  setup_journald_log_rotation
   systemctl daemon-reload
   systemctl enable gost
   restart_gost_safely
