@@ -8,7 +8,6 @@ PYTHON_SCRIPT_PATH="/opt/imghub_bot/imghub_bot.py"
 PYTHON_SCRIPT_DIR=$(dirname "${PYTHON_SCRIPT_PATH}")
 CONFIG_FILE_PATH="/root/imghub_config.ini"
 DATA_DIR="/var/lib/imghub"
-LOG_FILE="/var/log/imghub.log" # Python脚本内指定的日志文件
 SERVICE_NAME="imghub_bot"
 
 # --- 颜色定义 ---
@@ -43,10 +42,7 @@ from pathlib import Path # <--- 确保导入 pathlib
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/var/log/imghub.log'), # Ensure this path is writable by the user running the script
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
@@ -607,8 +603,8 @@ WorkingDirectory=${PYTHON_SCRIPT_DIR}
 ExecStart=/usr/bin/python3 ${PYTHON_SCRIPT_PATH}
 Restart=always
 RestartSec=5
-StandardOutput=append:${LOG_FILE} # 将标准输出追加到日志文件
-StandardError=append:${LOG_FILE}  # 将标准错误追加到日志文件
+StandardOutput=journal
+StandardError=journal
 # 考虑增加 TimeoutStopSec=30 来给与程序足够的时间来优雅关闭
 # Environment="PYTHONUNBUFFERED=1" # 可选，用于无缓冲输出
 
@@ -742,7 +738,9 @@ main() {
             # 备份现有数据
             if [ -f "/var/lib/imghub/records.json" ]; then
                 echo -e "${YELLOW}正在备份现有记录...${NC}"
-                cp /var/lib/imghub/records.json /var/lib/imghub/records.json.bak.$(date +%Y%m%d_%H%M%S)
+                local records_backup
+                records_backup="/var/lib/imghub/records.json.bak.$(date +%Y%m%d_%H%M%S)"
+                cp /var/lib/imghub/records.json "$records_backup"
             fi
         else
             echo -e "${RED}安装已取消。${NC}"
