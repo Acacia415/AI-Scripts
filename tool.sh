@@ -631,6 +631,30 @@ optimize_tcp_bbr() {
     fi
 }
 
+# ======================= BBRv3内核管理 =======================
+manage_bbr3() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+
+    local manager_script="/tmp/bbr3_manager.sh"
+    local manager_ref="${AI_SCRIPTS_REF:-main}"
+    local manager_url="https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/${manager_ref}/bbr3_manager.sh"
+    local manager_status=0
+
+    if curl -fLsS -o "$manager_script" "$manager_url"; then
+        chmod +x "$manager_script"
+        "$manager_script" menu || manager_status=$?
+        rm -f "$manager_script"
+        return "$manager_status"
+    fi
+
+    rm -f "$manager_script"
+    echo -e "${RED}下载 BBRv3 管理脚本失败！${NC}"
+    return 1
+}
+
 # ======================= 恢复TCP原始配置 =======================
 restore_tcp_config() {
     clear
@@ -879,23 +903,24 @@ main_menu() {
 
     # 菜单部分（双列显示）
     echo -e "${YELLOW}==========================================================================${NC}"
-    echo "1. 系统信息查询                        18. IP优先级设置"
-    echo "2. 开启root用户登录                    19. TCP性能优化"
-    echo "3. 智能流量监控                        20. 命令行美化"
-    echo "4. 安装 Snell 协议服务                 21. DNS解锁服务"
-    echo "5. 安装 Hysteria2 协议服务             22. 安装Sub-Store"
-    echo "6. 安装 SS-Rust 协议服务               23. 搭建TG图床"
-    echo "7. 安装 ShadowTLS                      24. TCP性能优化 (BBR+fq)"
-    echo "8. 一键IPTables转发                    25. 恢复TCP原始配置"
-    echo "9. 一键GOST转发                        26. 安装Fail2Ban"
-    echo "10. 安装 3X-UI 管理面板                27. 安装 acme.sh"
-    echo "11. 流媒体解锁检测                     28. 安装 Gost v3"
-    echo "12. Speedtest网络测速                  29. 修改主机名"
-    echo "13. BestTrace回程测试                  30. 重装系统"
-    echo "14. 开放所有端口                       31. 部署Hexo博客"
-    echo "15. 时间同步                           32. 安装Hexo_butterfly主题"
-    echo "16. Caddy反代管理                      33. 安装 AnyTLS"
-    echo "17. Nginx管理                          34. SaveAnyBot管理"
+    echo "1. 系统信息查询                        19. IP优先级设置"
+    echo "2. 开启root用户登录                    20. TCP性能优化"
+    echo "3. 智能流量监控                        21. 命令行美化"
+    echo "4. 安装 Snell 协议服务                 22. DNS解锁服务"
+    echo "5. 安装 Hysteria2 协议服务             23. 安装Sub-Store"
+    echo "6. 安装 SS-Rust 协议服务               24. 搭建TG图床"
+    echo "7. 安装 ShadowTLS                      25. TCP性能优化 (BBR+fq)"
+    echo "8. 一键IPTables转发                    26. 恢复TCP原始配置"
+    echo "9. 一键GOST转发                        27. 安装Fail2Ban"
+    echo "10. 安装 3X-UI 管理面板                28. 安装 acme.sh"
+    echo "11. 流媒体解锁检测                     29. 安装 Gost v3"
+    echo "12. Speedtest网络测速                  30. 修改主机名"
+    echo "13. BestTrace回程测试                  31. 重装系统"
+    echo "14. 开放所有端口                       32. 部署Hexo博客"
+    echo "15. 时间同步                           33. 安装Hexo_butterfly主题"
+    echo "16. Caddy反代管理                      34. 安装 AnyTLS"
+    echo "17. Nginx管理                          35. SaveAnyBot管理"
+    echo "18. BBRv3内核管理"
     echo -e "${YELLOW}==========================================================================${NC}"
     echo "0. 退出脚本"
     echo -e "${YELLOW}-------------------------------------------------------------------------${NC}"
@@ -973,70 +998,74 @@ main_menu() {
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       18)
-        modify_ip_preference
+        manage_bbr3
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       19)
-        install_magic_tcp 
+        modify_ip_preference
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       20)
+        install_magic_tcp
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      21)
         install_shell_beautify
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      21)  
+      22)
         install_dns_unlock
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      22)
+      23)
         install_substore
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      23)  
+      24)
         install_tg_image_host 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      24)
+      25)
         optimize_tcp_bbr
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      25)
+      26)
         restore_tcp_config
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      26)
+      27)
         install_fail2ban 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      27)
+      28)
         install_acme 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      28)
+      29)
         install_gost_v3 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      29)
+      30)
         change_hostname 
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      30)
+      31)
         reinstall_system
         # 重装系统后会自动重启，不需要返回主菜单
         ;;
-      31)
+      32)
         deploy_hexo_blog
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      32)
+      33)
         install_hexo_butterfly
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      33)
+      34)
         install_anytls
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
-      34)
+      35)
         saveanybot_manager
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
