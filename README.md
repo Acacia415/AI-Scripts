@@ -35,8 +35,13 @@ AI-Scripts/
 ### 安装使用
 
 ```bash
-# 下载主脚本
-curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/tool.sh -o tool.sh
+# 下载主脚本（失败状态不会保存为脚本）
+curl -fL --retry 3 -H 'Cache-Control: no-cache' \
+  "https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/tool.sh?cachebust=$(date +%s)" \
+  -o tool.sh
+
+# 执行前检查脚本语法
+bash -n tool.sh
 
 # 添加执行权限
 chmod +x tool.sh
@@ -109,10 +114,16 @@ sudo ./tool.sh
 
 ```bash
 # 示例：单独运行系统信息查询
-curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/display_system_info.sh | bash
+curl -fL --retry 3 \
+  https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/display_system_info.sh \
+  -o display_system_info.sh
+bash -n display_system_info.sh && bash display_system_info.sh
 
 # 示例：单独运行TCP优化
-curl -sSL https://raw.githubusercontent.com/Acacia415/AI-Scripts/main/optimize_tcp_bbr.sh | bash
+curl -fL --retry 3 \
+  https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs/heads/main/optimize_tcp_bbr.sh \
+  -o optimize_tcp_bbr.sh
+bash -n optimize_tcp_bbr.sh && bash optimize_tcp_bbr.sh
 ```
 
 ### 脚本特点
