@@ -19,6 +19,7 @@ AI_SCRIPTS_RAW_BASE="https://raw.githubusercontent.com/Acacia415/AI-Scripts/refs
 TOOLBOX_LOCAL_SCRIPT="${AI_SCRIPTS_LOCAL_SCRIPT:-$HOME/tool.sh}"
 TOOLBOX_COMMAND_PATH="${AI_SCRIPTS_COMMAND_PATH:-/usr/local/bin/p}"
 TOOLBOX_BACKUP_ROOT="${AI_SCRIPTS_BACKUP_ROOT:-/var/backups/ai-scripts/toolbox}"
+TOOLBOX_BACKUP_KEEP="${AI_SCRIPTS_BACKUP_KEEP:-5}"
 
 download_shell_script() {
     local url=$1
@@ -108,24 +109,108 @@ atomic_install_file() {
     fi
 }
 
+is_complete_toolbox_backup() {
+    local backup_dir=$1
+    [[ -d $backup_dir && ! -L $backup_dir ]] \
+        && [[ -f $backup_dir/tool.sh || -f $backup_dir/tool.sh.missing ]] \
+        && [[ -f $backup_dir/p || -f $backup_dir/p.missing ]]
+}
+
+prune_toolbox_backups() {
+    local protected_backup=${1:-}
+    local keep_count=$TOOLBOX_BACKUP_KEEP
+    local backup_dir backup_name keep_other retained=0 status=0
+    local -a candidates=() sorted=()
+
+    if [[ ! $keep_count =~ ^[1-9][0-9]*$ ]]; then
+        echo -e "${RED}工具箱备份保留数量无效：${keep_count}${NC}" >&2
+        return 1
+    fi
+    [[ -d $TOOLBOX_BACKUP_ROOT ]] || return 0
+
+    shopt -s nullglob
+    for backup_dir in "$TOOLBOX_BACKUP_ROOT"/*; do
+        backup_name=${backup_dir##*/}
+        [[ $backup_name =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+[.][A-Za-z0-9]{6}$ ]] || continue
+        is_complete_toolbox_backup "$backup_dir" || continue
+        candidates+=("$backup_dir")
+    done
+    shopt -u nullglob
+
+    ((${#candidates[@]} > keep_count)) || return 0
+    mapfile -t sorted < <(printf '%s\n' "${candidates[@]}" | LC_ALL=C sort -r)
+
+    keep_other=$keep_count
+    if [[ -n $protected_backup ]] && is_complete_toolbox_backup "$protected_backup"; then
+        keep_other=$((keep_count - 1))
+    else
+        protected_backup=''
+    fi
+
+    for backup_dir in "${sorted[@]}"; do
+        [[ $backup_dir == "$protected_backup" ]] && continue
+        if ((retained < keep_other)); then
+            retained=$((retained + 1))
+            continue
+        fi
+
+        backup_name=${backup_dir##*/}
+        if [[ ${backup_dir%/*} != "$TOOLBOX_BACKUP_ROOT" ]] \
+            || [[ ! $backup_name =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+[.][A-Za-z0-9]{6}$ ]] \
+            || [[ -L $backup_dir ]]; then
+            echo -e "${RED}拒绝清理未经验证的备份路径：${backup_dir}${NC}" >&2
+            status=1
+            continue
+        fi
+        rm -rf -- "$backup_dir" || status=1
+    done
+    return "$status"
+}
+
+cleanup_incomplete_toolbox_backup() {
+    local backup_dir=$1
+    [[ ${backup_dir%/*} == "$TOOLBOX_BACKUP_ROOT" ]] || return 1
+    rm -f -- "$backup_dir/tool.sh" "$backup_dir/tool.sh.missing" \
+        "$backup_dir/p" "$backup_dir/p.missing"
+    rmdir -- "$backup_dir" 2>/dev/null || true
+}
+
 create_toolbox_backup() {
     local backup_prefix backup_dir
     backup_prefix="$(date -u +%Y%m%dT%H%M%SZ)-$$"
     install -d -m 700 "$TOOLBOX_BACKUP_ROOT" || return 1
     backup_dir=$(mktemp -d "${TOOLBOX_BACKUP_ROOT}/${backup_prefix}.XXXXXX") || return 1
-    chmod 700 "$backup_dir" || return 1
+    chmod 700 "$backup_dir" || {
+        cleanup_incomplete_toolbox_backup "$backup_dir"
+        return 1
+    }
 
     if [[ -e $TOOLBOX_LOCAL_SCRIPT ]]; then
-        cp -a -- "$TOOLBOX_LOCAL_SCRIPT" "$backup_dir/tool.sh" || return 1
+        cp -a -- "$TOOLBOX_LOCAL_SCRIPT" "$backup_dir/tool.sh" || {
+            cleanup_incomplete_toolbox_backup "$backup_dir"
+            return 1
+        }
     else
-        : > "$backup_dir/tool.sh.missing"
+        : > "$backup_dir/tool.sh.missing" || {
+            cleanup_incomplete_toolbox_backup "$backup_dir"
+            return 1
+        }
     fi
     if [[ -e $TOOLBOX_COMMAND_PATH ]]; then
-        cp -a -- "$TOOLBOX_COMMAND_PATH" "$backup_dir/p" || return 1
+        cp -a -- "$TOOLBOX_COMMAND_PATH" "$backup_dir/p" || {
+            cleanup_incomplete_toolbox_backup "$backup_dir"
+            return 1
+        }
     else
-        : > "$backup_dir/p.missing"
+        : > "$backup_dir/p.missing" || {
+            cleanup_incomplete_toolbox_backup "$backup_dir"
+            return 1
+        }
     fi
     chmod 600 "$backup_dir"/* 2>/dev/null || true
+    if ! prune_toolbox_backups "$backup_dir"; then
+        echo -e "${YELLOW}旧工具箱备份清理未完全成功，已保留本次备份：${backup_dir}${NC}" >&2
+    fi
     printf '%s\n' "$backup_dir"
 }
 

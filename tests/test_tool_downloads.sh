@@ -172,4 +172,24 @@ fi
 assert_file_contains "$AI_SCRIPTS_LOCAL_SCRIPT" 'echo old-local'
 assert_file_contains "$AI_SCRIPTS_COMMAND_PATH" 'echo old-command'
 
+# 工具箱备份只保留最近 5 份；非脚本格式目录不得被误删。
+TOOLBOX_BACKUP_ROOT="$TEST_ROOT/retention-backups"
+export TOOLBOX_BACKUP_KEEP=5
+mkdir -p "$TOOLBOX_BACKUP_ROOT/not-managed"
+printf 'keep\n' > "$TOOLBOX_BACKUP_ROOT/not-managed/sentinel"
+for number in 1 2 3 4 5 6; do
+    backup_name=$(printf '20000101T00000%sZ-1.ABC00%s' "$number" "$number")
+    mkdir -p "$TOOLBOX_BACKUP_ROOT/$backup_name"
+    : > "$TOOLBOX_BACKUP_ROOT/$backup_name/tool.sh.missing"
+    : > "$TOOLBOX_BACKUP_ROOT/$backup_name/p.missing"
+done
+new_retained_backup=$(create_toolbox_backup)
+[[ -d $new_retained_backup ]] || fail '本次新备份被保留机制误删'
+managed_backup_count=$(find "$TOOLBOX_BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+    | grep -Ec '^[0-9]{8}T[0-9]{6}Z-[0-9]+[.][A-Za-z0-9]{6}$')
+[[ $managed_backup_count == 5 ]] || fail "备份保留数量不是 5：$managed_backup_count"
+[[ ! -e $TOOLBOX_BACKUP_ROOT/20000101T000001Z-1.ABC001 ]] || fail '最旧备份一未清理'
+[[ ! -e $TOOLBOX_BACKUP_ROOT/20000101T000002Z-1.ABC002 ]] || fail '最旧备份二未清理'
+assert_file_contains "$TOOLBOX_BACKUP_ROOT/not-managed/sentinel" 'keep'
+
 printf 'PASS: tool download and update tests\n'
