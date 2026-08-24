@@ -93,6 +93,17 @@ systemctl() {
 }
 
 sleep() { :; }
+
+menu_exit_status=0
+(
+	check_root() { :; }
+	check_sys() { :; }
+	sys_arch() { arch="amd64"; }
+	clear() { :; }
+	start_menu <<< "00" >/dev/null
+) || menu_exit_status=$?
+assert_eq "0" "${menu_exit_status}" "menu option 00 exit status"
+
 start_menu() { :; }
 
 [[ -n "${Error:-}" ]] || fail "Error color prefix is not initialized"
