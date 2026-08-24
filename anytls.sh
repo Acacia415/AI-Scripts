@@ -902,7 +902,7 @@ start_menu(){
 			update_sh
 			;;
 		00)
-			exit 1
+			exit 0
 			;;
 		*)
 			echo -e "${Error} 请输入正确数字 [0-9] (退出输入00)"
