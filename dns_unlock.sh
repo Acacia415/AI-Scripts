@@ -220,7 +220,7 @@ check_supported_system() {
 install_dependencies() {
     echo -e "${BLUE}信息: 正在安装/检查核心依赖...${NC}"
     apt-get update >/dev/null 2>&1 &&
-        apt-get install -y ca-certificates coreutils curl dnsmasq file iptables jq lsof tar >/dev/null 2>&1
+        apt-get install -y ca-certificates coreutils curl dnsmasq dnsutils file iptables jq lsof tar >/dev/null 2>&1
 }
 
 wait_for_service_active() {
@@ -661,6 +661,63 @@ install_dns_unlock_server() {
     return "$result"
 }
 
+write_gost_dns_unlock_config() {
+    local output_path="$1" http_addr="${2:-:80}" https_addr="${3:-:443}"
+    cat > "$output_path" <<EOF
+# Managed by AI-Scripts dns_unlock.sh
+services:
+- name: "dns-unlock-http-80"
+  addr: "${http_addr}"
+  resolver: "dns-unlock-upstream"
+  listener:
+    type: "tcp"
+  handler:
+    type: "sni"
+- name: "dns-unlock-https-443"
+  addr: "${https_addr}"
+  resolver: "dns-unlock-upstream"
+  listener:
+    type: "tcp"
+  handler:
+    type: "sni"
+resolvers:
+- name: "dns-unlock-upstream"
+  nameservers:
+  - addr: "https://1.1.1.1/dns-query"
+    hostname: "cloudflare-dns.com"
+    prefer: "ipv4"
+    timeout: 5s
+  - addr: "https://1.0.0.1/dns-query"
+    hostname: "cloudflare-dns.com"
+    prefer: "ipv4"
+    timeout: 5s
+EOF
+}
+
+validate_running_dns_unlock() {
+    local public_ip="$1" dns_answers
+
+    dns_answers=$(dig +time=3 +tries=1 +short @127.0.0.1 netflix.com A 2>/dev/null) || {
+        echo -e "${RED}错误: 无法通过本机 dnsmasq 查询解锁域名。${NC}"
+        return 1
+    }
+    if ! grep -Fxq "$public_ip" <<< "$dns_answers"; then
+        echo -e "${RED}错误: dnsmasq 未将 netflix.com 解析到本机公网 IPv4 (${public_ip})。${NC}"
+        return 1
+    fi
+
+    if ! curl --fail --silent --show-error --noproxy '*' --connect-timeout 10 --max-time 20 \
+        -H 'Host: example.com' http://127.0.0.1/ -o /dev/null; then
+        echo -e "${RED}错误: GOST HTTP Host 转发自检失败。${NC}"
+        return 1
+    fi
+    if ! curl --fail --silent --show-error --noproxy '*' --connect-timeout 10 --max-time 20 \
+        --resolve 'www.example.com:443:127.0.0.1' https://www.example.com/ -o /dev/null; then
+        echo -e "${RED}错误: GOST HTTPS SNI 转发自检失败。${NC}"
+        return 1
+    fi
+}
+
 perform_dns_unlock_server_install() {
     local stage_dir="$1" PUBLIC_IP enable_filter_aaaa FILTER_AAAA_LINE=""
     local gost_config_temp service_temp dnsmasq_temp dnsmasq_main_temp final_gost_binary
@@ -694,38 +751,9 @@ perform_dns_unlock_server_install() {
 
     echo -e "${BLUE}信息: 正在为DNS解锁服务创建 Gost 配置文件 (YAML)...${NC}"
 
-    # --- Gost 配置说明 ---
-    # 本脚本中，Gost 的角色是 HTTP (80) 和 HTTPS (443) 的透明流量转发器。
-    # 它不处理 DNS (53) 请求，该任务由 Dnsmasq 完成。
-    # 因此，配置文件中只有 80 和 443 端口的监听服务。
-    cat > "${gost_config_temp}" <<'EOT'
-# Managed by AI-Scripts dns_unlock.sh
-services:
-- name: "dns-unlock-http-80"
-  addr: ":80"
-  listener:
-    type: "tcp"
-  handler:
-    type: "forward"
-  forwarder:
-    nodes:
-    - name: "forwarder-80"
-      addr: "{host}:80"
-- name: "dns-unlock-https-443"
-  addr: ":443"
-  listener:
-    type: "tcp"
-  handler:
-    type: "sni" # 使用SNI模式来解析TLS流量的目标域名
-  forwarder:
-    nodes:
-    - name: "forwarder-443"
-      addr: "{host}:{port}"
-resolvers:
-- name: "google-dns"
-  addr: "8.8.8.8:53"
-  protocol: "udp"
-EOT
+    # GOST v3 的 SNI handler 同时根据 HTTP Host 和 TLS SNI 转发流量。
+    # 服务显式绑定独立 DoH 解析器，避免本机也作为 DNS 客户端时解析回本机而形成循环。
+    write_gost_dns_unlock_config "$gost_config_temp" || return 1
 
     echo -e "${BLUE}信息: 正在创建Systemd服务 (${DNS_GOST_SERVICE_NAME})...${NC}"
     # 使用检测到的或新安装的gost路径，确保兼容性
@@ -910,6 +938,10 @@ address=/primevideo.org/${PUBLIC_IP}
 address=/primevideo.tv/${PUBLIC_IP}
 address=/pv-cdn.net/${PUBLIC_IP}
 address=/chatgpt.com/${PUBLIC_IP}
+address=/reddit.com/${PUBLIC_IP}
+address=/redd.it/${PUBLIC_IP}
+address=/redditmedia.com/${PUBLIC_IP}
+address=/redditstatic.com/${PUBLIC_IP}
 address=/auth0.com/${PUBLIC_IP}
 address=/sora.com/${PUBLIC_IP}
 address=/gemini.google.com/${PUBLIC_IP}
@@ -933,6 +965,9 @@ address=/tiktokcdn.com/${PUBLIC_IP}
 address=/tiktokv.com/${PUBLIC_IP}
 address=/youtube.com/${PUBLIC_IP}
 address=/youtubei.googleapis.com/${PUBLIC_IP}
+address=/googlevideo.com/${PUBLIC_IP}
+address=/ggpht.com/${PUBLIC_IP}
+address=/ytimg.com/${PUBLIC_IP}
 EOF
 
     if [[ -f "$DNSMASQ_MAIN_CONFIG" ]]; then
@@ -971,8 +1006,15 @@ EOF
     wait_for_service_active "$DNS_GOST_SERVICE_NAME" || { echo -e "${RED}错误: GOST DNS 服务未能稳定运行。${NC}"; return 1; }
     systemctl restart dnsmasq || return 1
     wait_for_service_active dnsmasq || { echo -e "${RED}错误: Dnsmasq 未能稳定运行。${NC}"; return 1; }
+    echo -e "${BLUE}信息: 正在执行 DNS、HTTP 与 HTTPS 端到端自检...${NC}"
+    if ! validate_running_dns_unlock "$PUBLIC_IP"; then
+        journalctl -u "$DNS_GOST_SERVICE_NAME" -n 20 --no-pager 2>/dev/null || true
+        journalctl -u dnsmasq -n 20 --no-pager 2>/dev/null || true
+        return 1
+    fi
 
     echo -e "${GREEN}🎉 DNS 解锁服务安装成功；安装前快照: $transaction_backup${NC}"
+    echo -e "${YELLOW}提示: 服务端安装不会自动修改本机 DNS。若要在本机运行流媒体检测，请返回菜单选择 [设置本机为 DNS 客户端]，服务器 IPv4 填写 127.0.0.1（推荐）或 ${PUBLIC_IP}。${NC}"
 }
 
 

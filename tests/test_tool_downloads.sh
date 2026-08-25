@@ -114,6 +114,18 @@ assert_file_contains "$TEST_REMOTE_RESULT" 'argument-ok'
 executed_temp=$(<"$FAKE_CURL_OUTPUT_RECORD")
 [[ ! -e $executed_temp ]] || fail '执行完成后临时脚本未清理'
 
+# 默认仍应传播非零退出码；仅明确声明的上游已知退出码可以被接受。
+cat > "$TEST_ROOT/remote-exit-one.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+export FAKE_CURL_SOURCE="$TEST_ROOT/remote-exit-one.sh"
+if run_remote_script 'https://example.invalid/exit-one.sh' '退出码测试' >/dev/null 2>&1; then
+    fail '普通远程脚本的退出码 1 被忽略'
+fi
+RUN_REMOTE_ACCEPT_STATUS=1 run_remote_script 'https://example.invalid/ipv4-only.sh' '纯 IPv4 检测测试' >/dev/null
+export FAKE_CURL_SOURCE="$TEST_ROOT/remote-valid.sh"
+
 # 两次下载必须使用不同的随机临时路径。
 first_temp=$(download_shell_script 'https://example.invalid/one.sh' '随机路径测试一')
 first_record=$(<"$FAKE_CURL_OUTPUT_RECORD")

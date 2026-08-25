@@ -70,17 +70,21 @@ download_shell_script() {
 run_remote_script() {
     local url=$1
     local label=$2
-    local script_path status=0
+    local script_path status=0 accepted_status="${RUN_REMOTE_ACCEPT_STATUS:-0}"
     shift 2
+    [[ "$accepted_status" =~ ^[0-9]+$ ]] || accepted_status=0
 
     script_path=$(download_shell_script "$url" "$label") || return 1
     /bin/bash "$script_path" "$@" || status=$?
     rm -f -- "$script_path"
 
-    if (( status != 0 )); then
+    if (( status != 0 && status != accepted_status )); then
         echo -e "${RED}${label}执行失败（退出码：${status}）。${NC}" >&2
+        return "$status"
+    elif (( status != 0 )); then
+        echo -e "${YELLOW}${label}已完成；忽略上游脚本在纯 IPv4 环境下返回的已知退出码 ${status}。${NC}"
     fi
-    return "$status"
+    return 0
 }
 
 run_repo_script() {
@@ -451,7 +455,7 @@ install_media_check() {
     echo -e "${CYAN}脚本来源：ip.check.place${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    if ! run_remote_script "https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh" "流媒体检测脚本"; then
+    if ! RUN_REMOTE_ACCEPT_STATUS=1 run_remote_script "https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh" "流媒体检测脚本"; then
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
     fi
@@ -1154,4 +1158,3 @@ if [[ ${AI_SCRIPTS_SOURCE_ONLY:-0} != 1 ]]; then
 
     main_menu
 fi
-
