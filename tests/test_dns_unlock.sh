@@ -150,7 +150,15 @@ select_or_stage_gost() {
   selected_gost_binary="$TEST_ROOT/bin/gost-v3"
   install_new_gost=false
 }
-curl() { printf '203.0.113.20\n'; }
+curl() {
+  case "$*" in
+    *api.ipify.org*|*ifconfig.me/ip*) printf '203.0.113.20\n' ;;
+  esac
+}
+dig() {
+  printf 'dig %s\n' "$*" >> "$command_log"
+  printf '203.0.113.20\n'
+}
 dnsmasq() { printf 'dnsmasq %s\n' "$*" >> "$command_log"; return 0; }
 systemctl() {
   printf 'systemctl %s\n' "$*" >> "$command_log"
@@ -160,9 +168,45 @@ stage_dir=$(mktemp -d "$TEST_ROOT/stage.XXXXXXXX")
 perform_dns_unlock_server_install "$stage_dir" <<< 'n'
 assert_contains "$DNS_GOST_CONFIG_PATH" '# Managed by AI-Scripts dns_unlock.sh'
 assert_contains "$DNS_GOST_SERVICE_PATH" "ExecStart=$TEST_ROOT/bin/gost-v3 -C $DNS_GOST_CONFIG_PATH"
+[[ $(grep -c 'type: "sni"' "$DNS_GOST_CONFIG_PATH") == 2 ]] || fail "HTTP and HTTPS are not both using the GOST v3 SNI handler"
+[[ $(grep -c 'resolver: "dns-unlock-upstream"' "$DNS_GOST_CONFIG_PATH") == 2 ]] || fail "GOST services do not both reference the dedicated resolver"
+assert_contains "$DNS_GOST_CONFIG_PATH" 'nameservers:'
+assert_contains "$DNS_GOST_CONFIG_PATH" 'https://1.1.1.1/dns-query'
+assert_not_contains "$DNS_GOST_CONFIG_PATH" 'addr: "{host}:80"'
 assert_contains "$DNSMASQ_CONFIG_FILE" 'address=/netflix.com/203.0.113.20'
+assert_contains "$DNSMASQ_CONFIG_FILE" 'address=/reddit.com/203.0.113.20'
+assert_contains "$DNSMASQ_CONFIG_FILE" 'address=/googlevideo.com/203.0.113.20'
 assert_contains "$command_log" 'dnsmasq --test --conf-file='
 assert_contains "$command_log" 'dnsmasq --test'
+assert_contains "$command_log" 'dig +time=3 +tries=1 +short @127.0.0.1 netflix.com A'
+
+# With an official GOST binary, verify real HTTP Host and HTTPS SNI forwarding.
+if [[ -n "${DNS_UNLOCK_TEST_REAL_GOST:-}" ]]; then
+  runtime_config="$TEST_ROOT/gost-runtime.yml"
+  runtime_log="$TEST_ROOT/gost-runtime.log"
+  write_gost_dns_unlock_config "$runtime_config" ':18080' ':18443'
+  (
+    runtime_pid=""
+    cleanup_runtime_gost() {
+      [[ -z "$runtime_pid" ]] || ! kill -0 "$runtime_pid" 2>/dev/null || kill "$runtime_pid" 2>/dev/null || true
+      [[ -z "$runtime_pid" ]] || wait "$runtime_pid" 2>/dev/null || true
+    }
+    trap cleanup_runtime_gost EXIT
+    "$DNS_UNLOCK_TEST_REAL_GOST" -C "$runtime_config" > "$runtime_log" 2>&1 &
+    runtime_pid=$!
+    for _ in 1 2 3 4 5; do
+      kill -0 "$runtime_pid" 2>/dev/null || fail "real GOST exited before runtime validation"
+      grep -Fq '18443' "$runtime_log" && break
+      sleep 1
+    done
+    command curl --fail --silent --show-error --noproxy '*' --max-time 20 \
+      -H 'Host: example.com' http://127.0.0.1:18080/ -o /dev/null || fail "real GOST HTTP Host forwarding failed"
+    command curl --fail --silent --show-error --noproxy '*' --max-time 20 \
+      --resolve 'www.example.com:18443:127.0.0.1' https://www.example.com:18443/ -o /dev/null || fail "real GOST HTTPS SNI forwarding failed"
+    assert_contains "$runtime_log" 'example.com:80'
+    assert_contains "$runtime_log" 'www.example.com:443'
+  )
+fi
 
 # A failed install restores every file from the private transaction snapshot.
 package_installed() { return 1; }
