@@ -1,854 +1,1085 @@
 #!/bin/bash
 
-# ImgHub Bot 一键安装脚本
-# 支持系统: Debian/Ubuntu 及其衍生版
+# ImgHub Bot 一键安装/更新脚本（Debian/Ubuntu）
 
-# --- 配置 ---
-PYTHON_SCRIPT_PATH="/opt/imghub_bot/imghub_bot.py"
-PYTHON_SCRIPT_DIR=$(dirname "${PYTHON_SCRIPT_PATH}")
-CONFIG_FILE_PATH="/root/imghub_config.ini"
-DATA_DIR="/var/lib/imghub"
-SERVICE_NAME="imghub_bot"
+set -o pipefail
 
-# --- 颜色定义 ---
+PYTHON_SCRIPT_PATH="${PYTHON_SCRIPT_PATH:-/opt/imghub_bot/imghub_bot.py}"
+PYTHON_SCRIPT_DIR="${PYTHON_SCRIPT_DIR:-$(dirname -- "$PYTHON_SCRIPT_PATH")}"
+CONFIG_FILE_PATH="${CONFIG_FILE_PATH:-/root/imghub_config.ini}"
+DATA_DIR="${DATA_DIR:-/var/lib/imghub}"
+CACHE_DIR="${CACHE_DIR:-/var/cache/imghub}"
+SERVICE_NAME="${SERVICE_NAME:-imghub_bot}"
+SERVICE_FILE="${SERVICE_FILE:-/etc/systemd/system/${SERVICE_NAME}.service}"
+BACKUP_ROOT="${BACKUP_ROOT:-/var/backups/ai-scripts/imghub}"
+BACKUP_KEEP="${BACKUP_KEEP:-5}"
+STARTUP_ATTEMPTS="${STARTUP_ATTEMPTS:-30}"
+STARTUP_INTERVAL="${STARTUP_INTERVAL:-2}"
+HEALTH_PORT="${HEALTH_PORT:-8080}"
+
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+CYAN='\033[0;36m'
+NC='\033[0m'
 
-# --- Python 脚本内容 ---
 PYTHON_SCRIPT_CONTENT=$(cat <<'END_OF_PYTHON_SCRIPT'
 #!/usr/bin/python3
-import os
-import json
-import logging
 import asyncio
 import configparser
-from datetime import datetime
-from signal import SIGTERM # Not directly used in this version for shutdown, but good for reference
-from telegram import Update, Bot, InputFile
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
-from aiohttp import web
-from io import BytesIO
-from pathlib import Path # <--- 确保导入 pathlib
+import ipaddress
+import json
+import logging
+import os
+import re
+import secrets
+import signal
+import tempfile
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlsplit
 
-# 配置日志记录
+from aiohttp import web
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()],
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("imghub")
 
-# 全局配置
-CONFIG_PATH = '/root/imghub_config.ini' # This is read by the script
-BASE_URL_FALLBACK = "https://example.com" # Fallback, should be overridden by config
+CONFIG_PATH = os.environ.get("IMGHUB_CONFIG_PATH", "/root/imghub_config.ini")
+DATA_DIR = Path(os.environ.get("IMGHUB_DATA_DIR", "/var/lib/imghub"))
+CACHE_DIR = Path(os.environ.get("IMGHUB_CACHE_DIR", "/var/cache/imghub"))
+DB_PATH = DATA_DIR / "records.json"
+DB_BACKUP_PATH = DATA_DIR / "records.json.last-good"
+CHECK_CONFIG_ONLY = os.environ.get("IMGHUB_CHECK_CONFIG_ONLY") == "1"
+RECORD_ID_RE = re.compile(r"^[0-9a-f]{8,32}$")
+CHANNEL_USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
+BOT_TOKEN_RE = re.compile(r"^[0-9]{5,15}:[A-Za-z0-9_-]{30,}$")
+ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
-class BotConfigError(Exception):
-    """自定义配置异常"""
+
+class BotConfigError(RuntimeError):
     pass
 
+
+class RecordsCorruptionError(RuntimeError):
+    pass
+
+
+def _bounded_int(config, section, key, default, minimum, maximum):
+    try:
+        value = config.getint(section, key, fallback=default)
+    except ValueError as exc:
+        raise BotConfigError(f"{section}.{key} 必须是整数") from exc
+    if not minimum <= value <= maximum:
+        raise BotConfigError(f"{section}.{key} 必须在 {minimum}-{maximum} 之间")
+    return value
+
+
+def _validate_base_url(value):
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise BotConfigError("server.base_url 必须是完整的 http/https URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise BotConfigError("server.base_url 不允许用户名、密码、查询参数或片段")
+    if parsed.path not in {"", "/"}:
+        raise BotConfigError("server.base_url 不允许包含路径")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise BotConfigError("server.base_url 端口无效") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise BotConfigError("server.base_url 端口无效")
+    if any(char in value for char in "\r\n\t"):
+        raise BotConfigError("server.base_url 包含非法控制字符")
+    hostname = parsed.hostname
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        labels = hostname.split(".")
+        if len(labels) < 2 or any(
+            not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in labels
+        ):
+            raise BotConfigError("server.base_url 主机名格式无效")
+    return value.rstrip("/")
+
+
+def load_config():
+    config = configparser.ConfigParser(interpolation=None)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
+            config.read_file(config_file)
+    except FileNotFoundError as exc:
+        raise BotConfigError(f"配置文件不存在: {CONFIG_PATH}") from exc
+    except (OSError, configparser.Error) as exc:
+        raise BotConfigError(f"配置文件无法读取或格式错误: {exc}") from exc
+
+    try:
+        bot_token = config.get("telegram", "bot_token").strip()
+        channel_id_text = config.get("telegram", "channel_id").strip()
+        channel_username = config.get("telegram", "channel_username", fallback="").strip().lstrip("@")
+        allowed_users_text = config.get("access", "allowed_users").strip()
+        base_url = _validate_base_url(config.get("server", "base_url").strip())
+    except (configparser.NoSectionError, configparser.NoOptionError) as exc:
+        raise BotConfigError(f"缺少必要配置: {exc}") from exc
+
+    if not BOT_TOKEN_RE.fullmatch(bot_token):
+        raise BotConfigError("telegram.bot_token 格式无效")
+    if not re.fullmatch(r"-100[0-9]{6,16}", channel_id_text):
+        raise BotConfigError("telegram.channel_id 必须是以 -100 开头的频道 ID")
+    if channel_username and not CHANNEL_USERNAME_RE.fullmatch(channel_username):
+        raise BotConfigError("telegram.channel_username 格式无效")
+    if not re.fullmatch(r"[1-9][0-9]*(,[1-9][0-9]*)*", allowed_users_text):
+        raise BotConfigError("access.allowed_users 必须是逗号分隔的正整数")
+    allowed_users = [int(item) for item in allowed_users_text.split(",")]
+    if len(set(allowed_users)) != len(allowed_users):
+        raise BotConfigError("access.allowed_users 不允许重复")
+
+    listen_host = config.get("server", "listen_host", fallback="127.0.0.1").strip()
+    if listen_host not in {"127.0.0.1", "::1", "0.0.0.0", "::"}:
+        raise BotConfigError("server.listen_host 仅支持回环或明确的全局监听地址")
+    listen_port = _bounded_int(config, "server", "listen_port", 8080, 1, 65535)
+    max_file_bytes = _bounded_int(config, "limits", "max_file_bytes", 20 * 1024 * 1024, 1024, 20 * 1024 * 1024)
+    max_concurrency = _bounded_int(config, "limits", "max_concurrency", 4, 1, 32)
+    cache_max_bytes = _bounded_int(config, "cache", "max_bytes", 256 * 1024 * 1024, max_file_bytes, 2 * 1024 * 1024 * 1024)
+    cache_ttl_seconds = _bounded_int(config, "cache", "ttl_seconds", 86400, 60, 604800)
+
+    return {
+        "bot_token": bot_token,
+        "channel_id": int(channel_id_text),
+        "channel_username": channel_username,
+        "allowed_users": allowed_users,
+        "base_url": base_url,
+        "listen_host": listen_host,
+        "listen_port": listen_port,
+        "max_file_bytes": max_file_bytes,
+        "max_concurrency": max_concurrency,
+        "cache_max_bytes": cache_max_bytes,
+        "cache_ttl_seconds": cache_ttl_seconds,
+    }
+
+
+def _fsync_directory(directory):
+    if os.name != "posix":
+        return
+    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_records(data):
+    if not isinstance(data, dict):
+        raise RecordsCorruptionError("记录库根节点不是对象")
+    normalized = {}
+    for file_id, record in data.items():
+        if not isinstance(file_id, str) or not RECORD_ID_RE.fullmatch(file_id):
+            raise RecordsCorruptionError(f"记录 ID 无效: {file_id!r}")
+        if not isinstance(record, (list, tuple)) or len(record) != 4:
+            raise RecordsCorruptionError(f"记录结构无效: {file_id}")
+        channel_part, message_id, telegram_file_id, mime_type = record
+        if not isinstance(channel_part, str) or not channel_part.isdigit():
+            raise RecordsCorruptionError(f"频道记录无效: {file_id}")
+        if not isinstance(message_id, int) or message_id <= 0:
+            raise RecordsCorruptionError(f"消息 ID 无效: {file_id}")
+        if not isinstance(telegram_file_id, str) or not telegram_file_id:
+            raise RecordsCorruptionError(f"Telegram 文件 ID 无效: {file_id}")
+        if mime_type not in ALLOWED_MIME_TYPES:
+            raise RecordsCorruptionError(f"MIME 类型无效: {file_id}")
+        normalized[file_id] = (channel_part, message_id, telegram_file_id, mime_type)
+    return normalized
+
+
+def _read_records_file(path):
+    with open(path, "r", encoding="utf-8") as records_file:
+        return _validate_records(json.load(records_file))
+
+
+def _atomic_write_json(path, records):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        else:
+            os.chmod(temp_name, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as temp_file:
+            json.dump(records, temp_file, ensure_ascii=False, separators=(",", ":"))
+            temp_file.write("\n")
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_name, path)
+        os.chmod(path, 0o600)
+        _fsync_directory(path.parent)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 class ImageHostingService:
-    def __init__(self, bot):
-        """初始化图床服务
-
-        Args:
-            bot: Telegram Bot实例
-        """
+    def __init__(self, bot, runtime_config):
         self.bot = bot
-        self.file_records = {}  # 存储文件记录 {file_id: (channel_part, message_id, original_file_id, mime_type)}
-        self.db_path = "/var/lib/imghub/records.json"
-        # 加载已有记录
-        self.load_records()
-
-        # 设置Web应用
-        self.app = web.Application()
-        self.app['bot'] = bot  # 保存bot实例到应用上下文
-        self.app.add_routes([web.get('/i/{file_id}', self.handle_image_request)])
+        self.config = runtime_config
+        self.db_path = DB_PATH
+        self.db_backup_path = DB_BACKUP_PATH
+        self.file_records = {}
+        self.records_writable = True
+        self.records_dirty = False
+        self.records_lock = threading.RLock()
+        self.download_semaphore = asyncio.Semaphore(runtime_config["max_concurrency"])
+        self.app = web.Application(client_max_size=1024)
+        self.app.add_routes([
+            web.get("/healthz", self.handle_health_request),
+            web.get("/i/{file_id}", self.handle_image_request),
+        ])
         self.runner = None
         self.site = None
+        self.load_records()
+        CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def load_records(self):
-        """从文件加载记录"""
+        if not self.db_path.exists():
+            self.file_records = {}
+            return
         try:
-            if os.path.exists(self.db_path):
-                with open(self.db_path, 'r') as f:
-                    self.file_records = json.load(f)
-                logger.info(f"成功加载了 {len(self.file_records)} 条文件记录")
-        except Exception as e:
-            logger.error(f"加载记录失败: {str(e)}")
+            self.file_records = _read_records_file(self.db_path)
+            logger.info("成功加载 %d 条文件记录", len(self.file_records))
+        except Exception as exc:
+            self.records_writable = False
+            hint = (
+                f"记录库 {self.db_path} 已损坏，服务拒绝写入以防覆盖历史。"
+                f"请检查 {self.db_backup_path}，确认后手动恢复并重启服务。"
+            )
+            logger.critical("%s 原因: %s", hint, exc)
+            raise RecordsCorruptionError(hint) from exc
 
     def save_records(self):
-        """保存记录到文件"""
+        with self.records_lock:
+            if not self.records_writable:
+                raise RecordsCorruptionError("记录库处于只读保护状态")
+            if self.db_path.exists():
+                try:
+                    previous_records = _read_records_file(self.db_path)
+                except Exception as exc:
+                    self.records_writable = False
+                    raise RecordsCorruptionError("现有记录库校验失败，拒绝覆盖") from exc
+                _atomic_write_json(self.db_backup_path, previous_records)
+            _atomic_write_json(self.db_path, self.file_records)
+            self.records_dirty = False
+
+    def add_record(self, file_id, record):
+        with self.records_lock:
+            self.file_records[file_id] = record
+            self.records_dirty = True
+            try:
+                self.save_records()
+            except Exception:
+                self.file_records.pop(file_id, None)
+                self.records_dirty = False
+                raise
+
+    def get_record(self, file_id):
+        with self.records_lock:
+            return self.file_records.get(file_id)
+
+    async def handle_health_request(self, _request):
+        return web.json_response({
+            "status": "ok",
+            "records": len(self.file_records),
+            "records_writable": self.records_writable,
+        })
+
+    def _cache_path(self, file_id):
+        return CACHE_DIR / f"{file_id}.bin"
+
+    def _valid_cache_path(self, file_id):
+        cache_path = self._cache_path(file_id)
         try:
-            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-            with open(self.db_path, 'w') as f:
-                json.dump(self.file_records, f, indent=4) # Added indent for readability
-            logger.info(f"成功保存了 {len(self.file_records)} 条文件记录")
-        except Exception as e:
-            logger.error(f"保存记录失败: {str(e)}")
+            stat_result = cache_path.stat()
+        except FileNotFoundError:
+            return None
+        age = datetime.now(timezone.utc).timestamp() - stat_result.st_mtime
+        if not cache_path.is_file() or stat_result.st_size <= 0 or age > self.config["cache_ttl_seconds"]:
+            cache_path.unlink(missing_ok=True)
+            return None
+        return cache_path
+
+    def _prune_cache(self, exclude=None):
+        entries = []
+        total_size = 0
+        now = datetime.now(timezone.utc).timestamp()
+        for cache_path in CACHE_DIR.glob("*.bin"):
+            if not cache_path.is_file():
+                continue
+            try:
+                stat_result = cache_path.stat()
+            except FileNotFoundError:
+                continue
+            if now - stat_result.st_mtime > self.config["cache_ttl_seconds"]:
+                cache_path.unlink(missing_ok=True)
+                continue
+            if cache_path == exclude:
+                total_size += stat_result.st_size
+                continue
+            entries.append((stat_result.st_mtime, stat_result.st_size, cache_path))
+            total_size += stat_result.st_size
+        max_bytes = self.config["cache_max_bytes"]
+        for _mtime, size, cache_path in sorted(entries):
+            if total_size <= max_bytes:
+                break
+            cache_path.unlink(missing_ok=True)
+            total_size -= size
+
+    async def _download_to_cache(self, file_id, telegram_file_id):
+        cached = self._valid_cache_path(file_id)
+        if cached:
+            return cached
+        try:
+            await asyncio.wait_for(self.download_semaphore.acquire(), timeout=1.0)
+        except asyncio.TimeoutError as exc:
+            raise web.HTTPServiceUnavailable(text="Too many concurrent downloads") from exc
+        temp_name = None
+        try:
+            cached = self._valid_cache_path(file_id)
+            if cached:
+                return cached
+            telegram_file = await self.bot.get_file(telegram_file_id)
+            remote_size = getattr(telegram_file, "file_size", None)
+            if remote_size and remote_size > self.config["max_file_bytes"]:
+                raise web.HTTPRequestEntityTooLarge(
+                    max_size=self.config["max_file_bytes"], actual_size=remote_size
+                )
+            descriptor, temp_name = tempfile.mkstemp(prefix=".download.", dir=CACHE_DIR)
+            os.close(descriptor)
+            os.chmod(temp_name, 0o600)
+            await telegram_file.download_to_drive(custom_path=temp_name)
+            actual_size = os.path.getsize(temp_name)
+            if actual_size <= 0 or actual_size > self.config["max_file_bytes"]:
+                raise web.HTTPRequestEntityTooLarge(
+                    max_size=self.config["max_file_bytes"], actual_size=actual_size
+                )
+            cache_path = self._cache_path(file_id)
+            os.replace(temp_name, cache_path)
+            temp_name = None
+            os.chmod(cache_path, 0o600)
+            _fsync_directory(CACHE_DIR)
+            self._prune_cache(exclude=cache_path)
+            return cache_path
+        finally:
+            self.download_semaphore.release()
+            if temp_name:
+                try:
+                    os.unlink(temp_name)
+                except FileNotFoundError:
+                    pass
+
+    async def _stream_file(self, request, cache_path, file_id, mime_type):
+        etag = f'"{file_id}"'
+        if request.headers.get("If-None-Match") == etag:
+            return web.Response(status=304, headers={"ETag": etag})
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": mime_type,
+                "Content-Length": str(cache_path.stat().st_size),
+                "Cache-Control": "public, max-age=86400, immutable",
+                "ETag": etag,
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+        await response.prepare(request)
+        with open(cache_path, "rb") as cached_file:
+            while True:
+                chunk = cached_file.read(64 * 1024)
+                if not chunk:
+                    break
+                await response.write(chunk)
+        await response.write_eof()
+        return response
 
     async def handle_image_request(self, request):
-        """处理图片请求 - 直接返回图片内容"""
-        file_id = request.match_info.get('file_id')
-        if file_id not in self.file_records:
+        file_id = request.match_info.get("file_id", "")
+        if not RECORD_ID_RE.fullmatch(file_id):
             return web.Response(status=404, text="Image not found")
-
+        record = self.get_record(file_id)
+        if not record:
+            return web.Response(status=404, text="Image not found")
         try:
-            record = self.file_records[file_id]
-            # channel_part = record[0] # Not directly used for fetching file
-            # message_id = record[1] # Not directly used for fetching file
-            original_file_id = record[2]
-            mime_type = record[3]
+            cache_path = await self._download_to_cache(file_id, record[2])
+            return await self._stream_file(request, cache_path, file_id, record[3])
+        except web.HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("获取图片失败 (%s): %s", file_id, exc, exc_info=True)
+            return web.Response(status=502, text="Image temporarily unavailable")
 
-            # 通过原始文件ID获取文件
-            file = await self.bot.get_file(original_file_id)
-            file_content_bytearray = await file.download_as_bytearray()
-
-            # 返回图片内容
-            return web.Response(
-                body=bytes(file_content_bytearray),
-                content_type=mime_type,
-                headers={
-                    'Cache-Control': 'public, max-age=31536000',  # 缓存一年
-                    'ETag': file_id
-                }
-            )
-        except Exception as e:
-            logger.error(f"获取图片失败 ({file_id}): {str(e)}", exc_info=True)
-
-            # 备用方案: 返回Telegram链接重定向
-            try:
-                if file_id in self.file_records:
-                    record = self.file_records[file_id]
-                    return web.Response(
-                        status=302,
-                        headers={
-                            'Location': f'https://t.me/c/{record[0]}/{record[1]}'
-                        }
-                    )
-            except Exception as fallback_e:
-                logger.error(f"备用重定向失败 ({file_id}): {str(fallback_e)}", exc_info=True)
-
-            # 所有尝试都失败
-            return web.Response(status=500, text="无法获取图片，请稍后重试")
-
-    async def run_web_server(self):
-        """启动Web服务器（异步版本）"""
-        self.runner = web.AppRunner(self.app)
+    async def start_web_server(self):
+        self.runner = web.AppRunner(self.app, access_log=None)
         await self.runner.setup()
-        self.site = web.TCPSite(self.runner, '0.0.0.0', 8080) # Listens on port 8080
+        self.site = web.TCPSite(
+            self.runner,
+            self.config["listen_host"],
+            self.config["listen_port"],
+        )
         await self.site.start()
-        logger.info("Web服务器已启动在 0.0.0.0:8080")
-
-        # 定期保存记录
-        while True:
-            await asyncio.sleep(300)  # 每5分钟保存一次
-            self.save_records()
+        logger.info(
+            "Web 服务已启动在 %s:%s",
+            self.config["listen_host"],
+            self.config["listen_port"],
+        )
 
     async def stop_web_server(self):
-        """停止Web服务器"""
-        # 保存记录
-        self.save_records()
-
-        # 停止服务
+        if self.records_dirty and self.records_writable:
+            await asyncio.to_thread(self.save_records)
         if self.site:
             await self.site.stop()
-            logger.info("Web TCPSite 已停止.")
         if self.runner:
             await self.runner.cleanup()
-            logger.info("Web AppRunner 已清理.")
-        logger.info("Web服务器已停止.")
 
 
-def load_config() -> tuple:
-    """加载配置文件"""
-    try:
-        config = configparser.ConfigParser()
-        if not os.path.exists(CONFIG_PATH):
-             raise FileNotFoundError(f"重要: 配置文件 {CONFIG_PATH} 未找到! 请确保已正确创建并配置.")
-        if not config.read(CONFIG_PATH):
-            # This case might be less common if os.path.exists passed, but good for robustness
-            raise BotConfigError(f"配置文件 {CONFIG_PATH} 为空或无法读取.")
-
-
-        bot_token = config.get('telegram', 'bot_token').strip()
-        channel_id_str = config.get('telegram', 'channel_id').strip()
-        channel_username = config.get('telegram', 'channel_username', fallback="").strip()
-        
-        allowed_users_str = config.get('access', 'allowed_users', fallback="").strip()
-        allowed_users = [int(uid.strip()) for uid in allowed_users_str.split(',') if uid.strip()]
-        
-        base_url = config.get('server', 'base_url', fallback=BASE_URL_FALLBACK).strip()
-
-        if not bot_token:
-            raise BotConfigError("配置错误: bot_token 不能为空.")
-        if not channel_id_str:
-            raise BotConfigError("配置错误: channel_id 不能为空.")
-        # It's fine if allowed_users is empty, meaning no one is explicitly allowed initially by this check.
-        # The bot logic handles this.
-        if not base_url:
-            raise BotConfigError("配置错误: base_url 不能为空.")
-            
-        return (
-            bot_token,
-            channel_id_str, # Keep as string, convert to int later where needed
-            channel_username,  # 添加频道用户名
-            allowed_users,
-            base_url
-        )
-    except (configparser.NoSectionError, configparser.NoOptionError, ValueError) as e:
-        raise BotConfigError(f"配置文件格式错误或值无效: {str(e)}") from e
-    except FileNotFoundError as e:
-        raise BotConfigError(str(e)) from e
-
-
-async def safe_shutdown(application: Application, img_service: ImageHostingService):
-    """安全关闭流程"""
-    logger.info("正在关闭服务...")
-
-    # Stop the web server first
-    if img_service:
-        logger.info("正在停止内部Web服务器...")
-        await img_service.stop_web_server()
-
-    # Then stop the Telegram bot application
-    try:
-        if application:
-            if application.updater and application.updater.running:
-                logger.info("正在停止 Telegram Updater...")
-                await application.updater.stop()
-            if application.running: # Check if application itself is marked as running
-                logger.info("正在停止 Telegram Application...")
-                await application.stop()
-            logger.info("正在关闭 Telegram Application...")
-            await application.shutdown()
-        logger.info("----- 服务已安全关闭 -----")
-    except Exception as e:
-        logger.error(f"关闭过程中出错: {str(e)}", exc_info=True)
-
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """处理/start命令"""
-    allowed_users = context.bot_data.get('allowed_users', [])
-    if update.effective_user.id not in allowed_users:
-        logger.warning(f"未授权用户 {update.effective_user.id} 尝试 /start")
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in context.bot_data["allowed_users"]:
         await update.message.reply_text("❌ 您没有权限使用此命令。")
         return
-
-    base_url = context.bot_data.get('base_url', BASE_URL_FALLBACK)
     await update.message.reply_text(
-        f"🖼️ ImgHub 图床机器人\n\n"
-        f"发送图片即可获取直链。\n\n"
-        f"请以文件格式发送图片避免压缩。\n\n"
-        f"图片直链格式：<code>{base_url}/i/文件ID</code>\n\n",
-        parse_mode='HTML'
+        "🖼️ ImgHub 图床机器人\n\n发送图片或图片文件即可获取直链。"
     )
 
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("🔔 handle_media 被触发")
 
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    allowed_users = context.bot_data.get('allowed_users', [])
-    if user.id not in allowed_users:
-        logger.warning(f"❌ 未授权用户 {user.id} ({user.username or 'N/A'}) 试图上传")
-        await update.message.reply_text("❌ 未经授权的用户，无法上传图片。")
+    if user.id not in context.bot_data["allowed_users"]:
+        await update.message.reply_text("❌ 未经授权，无法上传图片。")
         return
-
+    downloaded_path = None
     try:
         bot: Bot = context.bot
-        img_service: ImageHostingService = context.bot_data['img_service']
-        channel_id = int(context.bot_data['channel_id']) # Convert here
-        channel_username = context.bot_data.get('channel_username', '')  # 从配置获取
-        base_url = context.bot_data.get('base_url', BASE_URL_FALLBACK)
-        
-        # 检查Bot权限
-        try:
-            bot_member = await bot.get_chat_member(channel_id, bot.id)
-            if bot_member.status not in ['administrator', 'creator']:
-                logger.warning(f"Bot 在频道 {channel_id} 中不是管理员")
-                await update.message.reply_text(
-                    "⚠️ Bot 需要在频道中拥有管理员权限才能正常工作。\n"
-                    "请将 Bot 添加为频道管理员后重试。"
-                )
-                return
-        except Exception as e:
-            logger.error(f"检查频道状态失败: {str(e)}")
-
-        file_to_process = None
-        mime_type = "image/jpeg" # Default
-        file_name_for_caption = "image"
+        service: ImageHostingService = context.bot_data["img_service"]
+        channel_id = context.bot_data["channel_id"]
+        channel_username = context.bot_data["channel_username"]
+        base_url = context.bot_data["base_url"]
+        media = None
+        mime_type = "image/jpeg"
+        filename = "image.jpg"
+        source_size = 0
 
         if update.message.photo:
-            logger.info("📷 收到照片")
-            file_to_process = await update.message.photo[-1].get_file()
-            mime_type = "image/jpeg" # Telegram converts photos to jpeg
-            file_name_for_caption = f"photo_{file_to_process.file_unique_id}.jpg"
-        elif update.message.document:
-            doc = update.message.document
-            logger.info(f"📎 收到文档: {doc.file_name}, MIME: {doc.mime_type}")
-            file_name_for_caption = doc.file_name or f"document_{doc.file_unique_id}"
-            
-            # Check for supported image MIME types for documents
-            supported_doc_mime_types = ["image/jpeg", "image/png", "image/gif", "image/webp"]
-            if doc.mime_type and any(doc.mime_type.startswith(t) for t in supported_doc_mime_types):
-                file_to_process = await doc.get_file()
-                mime_type = doc.mime_type
-            else:
-                logger.warning(f"⚠️ 不支持的文档MIME类型: {doc.mime_type}")
-                await update.message.reply_text(f"❌ 不支持的文件格式 ({doc.mime_type})。请上传 JPEG, PNG, GIF, 或 WebP 格式的图片文件。")
-                return
+            media = update.message.photo[-1]
+            source_size = media.file_size or 0
+            filename = f"photo_{media.file_unique_id}.jpg"
+        elif update.message.document and update.message.document.mime_type in ALLOWED_MIME_TYPES:
+            media = update.message.document
+            mime_type = media.mime_type
+            source_size = media.file_size or 0
+            filename = media.file_name or f"image_{media.file_unique_id}"
         else:
-            logger.warning("⚠️ 未识别的消息类型")
-            await update.message.reply_text("❌ 请发送图片或支持的图片格式文档。")
+            await update.message.reply_text("❌ 仅支持 JPEG、PNG、GIF 或 WebP 图片。")
+            return
+        if source_size > service.config["max_file_bytes"]:
+            await update.message.reply_text("❌ 文件超过允许的大小限制。")
             return
 
-        if not file_to_process:
-            logger.warning("⚠️ 文件对象为空 (可能是因为不支持的类型后没有返回)")
-            await update.message.reply_text("❌ 文件处理失败，未能获取文件对象。")
+        telegram_file = await media.get_file()
+        upload_tmp_dir = DATA_DIR / "tmp"
+        upload_tmp_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor, downloaded_path = tempfile.mkstemp(prefix="upload.", dir=upload_tmp_dir)
+        os.close(descriptor)
+        os.chmod(downloaded_path, 0o600)
+        await telegram_file.download_to_drive(custom_path=downloaded_path)
+        actual_size = os.path.getsize(downloaded_path)
+        if actual_size <= 0 or actual_size > service.config["max_file_bytes"]:
+            await update.message.reply_text("❌ 下载后的文件大小无效或超过限制。")
             return
 
-        original_file_id = file_to_process.file_id # This is the temporary file_id from TG server
-        logger.info(f"📦 获取文件成功，临时 file_id: {original_file_id}, MIME: {mime_type}")
-
-        # Download the file to a local path ONCE
-        downloaded_file_path_str = await file_to_process.download_to_drive()
-        logger.info(f"💾 文件下载到本地完成，路径：{downloaded_file_path_str}")
-
-        file_path_obj_to_send = Path(downloaded_file_path_str)
-        
-        caption_text = f"Uploaded by: {user.id} ({user.username or 'N/A'})\nOriginal Filename: {file_name_for_caption}\nMIME: {mime_type}\nTimestamp: {datetime.now().isoformat()}"
+        caption = (
+            f"Uploaded by: {user.id} ({user.username or 'N/A'})\n"
+            f"Original Filename: {filename}\nMIME: {mime_type}\n"
+            f"Timestamp: {datetime.now(timezone.utc).isoformat()}"
+        )
         if update.message.caption:
-            caption_text = f"{update.message.caption}\n-----\n{caption_text}"
-
-        sent_message = None
-        with open(file_path_obj_to_send, "rb") as file_object_to_send: 
-            if mime_type.startswith("image/gif"):
-                 logger.info(f"准备以动画形式发送 {mime_type}...")
-                 sent_message = await bot.send_animation(
-                    chat_id=channel_id,
-                    animation=file_object_to_send, 
-                    caption=caption_text
+            caption = f"{update.message.caption}\n-----\n{caption}"
+        with open(downloaded_path, "rb") as upload_file:
+            if mime_type == "image/gif":
+                sent_message = await bot.send_animation(
+                    chat_id=channel_id, animation=upload_file, caption=caption
                 )
-            elif mime_type.startswith("image/png") or \
-                 mime_type.startswith("image/jpeg") or \
-                 mime_type.startswith("image/webp"):
-                logger.info(f"准备以文档形式发送 {mime_type} 以保证质量...")
+            else:
                 sent_message = await bot.send_document(
                     chat_id=channel_id,
-                    document=file_object_to_send, 
-                    caption=caption_text,
-                    filename=file_name_for_caption 
+                    document=upload_file,
+                    caption=caption,
+                    filename=filename,
                 )
-            else: 
-                 logger.warning(f"尝试将MIME类型 {mime_type} 作为通用文档发送。")
-                 sent_message = await bot.send_document(
-                    chat_id=channel_id,
-                    document=file_object_to_send, 
-                    caption=caption_text,
-                    filename=file_name_for_caption
-                )
-        
-        try:
-            os.remove(downloaded_file_path_str)
-            logger.info(f"🗑️ 临时文件 {downloaded_file_path_str} 已删除。")
-        except OSError as e:
-            logger.error(f"删除临时文件 {downloaded_file_path_str} 失败: {e}")
-
-        if not sent_message or not (sent_message.photo or sent_message.animation or sent_message.document): 
-            logger.error("图片未能成功发送到频道或返回消息中不包含媒体信息。")
-            await update.message.reply_text("⚠️ 上传失败，无法将图片存入频道。请稍后重试。")
-            return
-            
-        persistent_file_id_for_retrieval = ""
-        if sent_message.photo: 
-            persistent_file_id_for_retrieval = sent_message.photo[-1].file_id
-        elif sent_message.animation: 
-            persistent_file_id_for_retrieval = sent_message.animation.file_id
-        elif sent_message.document: 
-            persistent_file_id_for_retrieval = sent_message.document.file_id
-
-        logger.info(f"📤 图片已发送至频道，message_id: {sent_message.message_id}, 持久化 file_id: {persistent_file_id_for_retrieval}")
-        
-        base_id_str = f"{sent_message.chat.id}_{sent_message.message_id}"
-        import hashlib
-        url_file_id = hashlib.sha1(base_id_str.encode()).hexdigest()[:8]
-
-        import random
-        import string
-        id_candidate = url_file_id
-        collision_count = 0
-        while id_candidate in img_service.file_records:
-            collision_count += 1
-            suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=2))
-            id_candidate = f"{url_file_id[:8-len(suffix)]}{suffix}" 
-            if collision_count > 10: 
-                id_candidate = hashlib.sha1(f"{base_id_str}_{random.random()}".encode()).hexdigest()[:10]
-                logger.warning(f"多次File ID碰撞后生成了更长的随机ID: {id_candidate}")
-            if collision_count > 20: 
-                 logger.error("无法生成唯一的File ID，存在严重问题。")
-                 await update.message.reply_text("⚠️ 上传失败，无法生成唯一文件标识。")
-                 return
-
-        final_url_file_id = id_candidate
-
-        # 修复：正确处理频道ID以生成有效的备用链接
-        # Telegram 私有频道ID格式通常是 -100XXXXXXXXXX
-        # 对于 t.me/c/ 链接，需要去掉前面的 -100
-        channel_id_str = str(channel_id)
-        if channel_id_str.startswith("-100"):
-            # 去掉 -100 前缀
-            channel_part_for_link = channel_id_str[4:]
-        elif channel_id_str.startswith("-"):
-            # 如果只是负数但不是 -100 开头，去掉负号
-            channel_part_for_link = channel_id_str[1:]
+        if not sent_message:
+            raise RuntimeError("Telegram 频道未返回消息")
+        if sent_message.animation:
+            persistent_file_id = sent_message.animation.file_id
+        elif sent_message.document:
+            persistent_file_id = sent_message.document.file_id
+        elif sent_message.photo:
+            persistent_file_id = sent_message.photo[-1].file_id
         else:
-            # 如果是正数，直接使用
-            channel_part_for_link = channel_id_str
+            raise RuntimeError("Telegram 频道消息不包含媒体")
 
-        img_service.file_records[final_url_file_id] = (
-            channel_part_for_link,  # 存储处理后的频道ID部分
-            sent_message.message_id,
-            persistent_file_id_for_retrieval, 
-            mime_type
-        )
+        channel_text = str(channel_id)
+        channel_part = channel_text[4:] if channel_text.startswith("-100") else channel_text.lstrip("-")
+        while True:
+            public_id = secrets.token_hex(6)
+            if not service.get_record(public_id):
+                break
+        record = (channel_part, sent_message.message_id, persistent_file_id, mime_type)
+        await asyncio.to_thread(service.add_record, public_id, record)
 
-        logger.info(f"📝 文件记录保存: url_file_id={final_url_file_id}, channel_part={channel_part_for_link}, message_id={sent_message.message_id}")
-        img_service.save_records() 
-
-        direct_link = f"{base_url}/i/{final_url_file_id}"
-        
-        # 根据配置生成备用链接
+        direct_link = f"{base_url}/i/{public_id}"
         if channel_username:
-            # 使用配置中的用户名（公开频道）
-            # 去掉可能存在的 @ 符号
-            clean_username = channel_username.lstrip('@')
-            backup_link = f"https://t.me/{clean_username}/{sent_message.message_id}"
-            link_note = "（公开频道链接，所有人可访问）"
+            backup_link = f"https://t.me/{channel_username}/{sent_message.message_id}"
         else:
-            # 私有频道，使用 c/ 格式
-            backup_link = f"https://t.me/c/{channel_part_for_link}/{sent_message.message_id}"
-            link_note = "（私有频道链接，仅频道成员可访问）"
-
-        response_text = (
-            f"✅ 图片上传成功!\n\n"
-            f"🔗 直链地址: {direct_link}\n"
-            f"📎 备用地址: {backup_link}\n"
-            f"   {link_note}\n\n"
-        )
-        
-        # 如果是私有频道，添加提示
-        if not channel_username:
-            response_text += (
-                f"💡 提示：备用链接仅对频道成员有效。\n"
-                f"   如需公开访问，请使用直链地址。\n"
-            )
-
+            backup_link = f"https://t.me/c/{channel_part}/{sent_message.message_id}"
         await update.message.reply_text(
-            response_text,
+            f"✅ 图片上传成功!\n\n🔗 直链地址: {direct_link}\n📎 备用地址: {backup_link}",
             disable_web_page_preview=True,
-            reply_to_message_id=update.message.message_id
+            reply_to_message_id=update.message.message_id,
         )
-
-    except Exception as e:
-        logger.error(f"❗媒体处理异常: {str(e)}", exc_info=True)
-        await update.message.reply_text("⚠️ 上传过程中发生内部错误，请稍后重试。")
-
-
-def setup_handlers(application: Application) -> None:
-    """注册处理器"""
-    application.add_handler(CommandHandler('start', start_command))
-    application.add_handler(
-        MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_media)
-    )
-
-async def main() -> None:
-    """主函数"""
-    application_instance = None 
-    img_service_instance = None 
-
-    try:
-        # 修复：正确接收5个返回值
-        bot_token, channel_id_str, channel_username, allowed_users, base_url = load_config()
-        try:
-            channel_id = int(channel_id_str)
-        except ValueError:
-            logger.critical(f"配置错误: channel_id '{channel_id_str}' 不是有效的整数。")
-            return
-
-        os.makedirs(os.path.dirname(ImageHostingService(None).db_path), exist_ok=True)
-
-        application_builder = Application.builder().token(bot_token)
-        application_instance = application_builder.build()
-        img_service_instance = ImageHostingService(application_instance.bot)
-
-        application_instance.bot_data['img_service'] = img_service_instance
-        application_instance.bot_data['channel_id'] = channel_id
-        application_instance.bot_data['channel_username'] = channel_username  # 添加到bot_data
-        application_instance.bot_data['allowed_users'] = allowed_users
-        application_instance.bot_data['base_url'] = base_url
-        setup_handlers(application_instance)
-
-        web_server_task = None
-        try:
-            logger.info("正在初始化 Telegram Application...")
-            await application_instance.initialize()
-            
-            # 在启动前检查Bot权限和频道信息
-            logger.info("正在检查Bot在频道中的权限...")
+    except Exception as exc:
+        logger.error("媒体处理失败: %s", exc, exc_info=True)
+        await update.message.reply_text("⚠️ 上传失败，记录库未修改，请检查服务日志。")
+    finally:
+        if downloaded_path:
             try:
-                chat = await application_instance.bot.get_chat(channel_id)
-                bot_member = await application_instance.bot.get_chat_member(channel_id, application_instance.bot.id)
-                
-                if bot_member.status in ['administrator', 'creator']:
-                    logger.info(f"✅ Bot 在频道中拥有 {bot_member.status} 权限")
-                    
-                    # 检查配置的用户名是否匹配
-                    if chat.username:
-                        logger.info(f"📢 检测到公开频道: @{chat.username}")
-                        if channel_username and channel_username.lstrip('@') != chat.username:
-                            logger.warning(f"⚠️ 配置的用户名 {channel_username} 与实际用户名 @{chat.username} 不匹配")
-                            logger.warning(f"将使用配置的用户名 {channel_username}")
-                    else:
-                        logger.info(f"🔒 检测到私有频道")
-                        if channel_username:
-                            logger.warning(f"⚠️ 配置了用户名 {channel_username}，但频道是私有的")
-                else:
-                    logger.warning(f"⚠️ Bot 在频道中的权限为: {bot_member.status}")
-                    logger.warning("请将 Bot 设置为频道管理员以确保正常工作")
-            except Exception as e:
-                logger.error(f"无法检查频道权限: {str(e)}")
-                logger.error("请确保：")
-                logger.error("1. 频道ID配置正确")
-                logger.error("2. Bot 已被添加到频道")
-                logger.error("3. Bot 在频道中拥有管理员权限")
-            
-            logger.info("正在启动 Telegram Application Polling...")
-            await application_instance.start()
-            if application_instance.updater:
-                await application_instance.updater.start_polling()
-            else:
-                logger.error("Updater 未初始化, polling 无法启动。")
-                return
+                os.unlink(downloaded_path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.error("清理上传临时文件失败 %s: %s", downloaded_path, exc)
 
-            logger.info("准备启动内部 Web 服务器...")
-            web_server_task = asyncio.create_task(img_service_instance.run_web_server())
 
-            logger.info(f"----- 图床服务已成功启动 (PID: {os.getpid()}) -----")
-            logger.info(f"监听频道ID: {channel_id}")
-            logger.info(f"频道用户名: {'@' + channel_username if channel_username else '未设置（私有频道）'}")
-            logger.info(f"授权用户列表: {allowed_users if allowed_users else '无 (请在配置文件中设置!)'}")
-            logger.info(f"图床基础URL: {base_url}")
-            logger.info(f"已加载 {len(img_service_instance.file_records)} 个文件记录 (来自 {img_service_instance.db_path})")
+def setup_handlers(application):
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_media))
 
-            if web_server_task:
-                 await web_server_task 
 
-        except asyncio.CancelledError:
-            logger.info("主任务被取消 (可能在关闭流程中).")
-        except Exception as e:
-            logger.critical(f"运行时发生严重错误: {str(e)}", exc_info=True)
-        finally:
-            logger.info("开始执行主程序退出前的清理...")
-            if web_server_task and not web_server_task.done():
-                logger.info("正在取消 Web 服务器任务...")
-                web_server_task.cancel()
-                try:
-                    await web_server_task
-                except asyncio.CancelledError:
-                    logger.info("Web 服务器任务已成功取消.")
-                except Exception as e_wst_cancel:
-                    logger.error(f"取消Web服务器任务时发生错误: {e_wst_cancel}", exc_info=True)
-            
-            if application_instance and img_service_instance: 
-                 await safe_shutdown(application_instance, img_service_instance)
-            elif img_service_instance: 
-                 await img_service_instance.stop_web_server() 
-            logger.info("主程序清理完成.")
+async def safe_shutdown(application, service):
+    if service:
+        try:
+            await service.stop_web_server()
+        except Exception as exc:
+            logger.error("停止 Web 服务失败: %s", exc, exc_info=True)
+    if application:
+        try:
+            if application.updater and application.updater.running:
+                await application.updater.stop()
+            if application.running:
+                await application.stop()
+            await application.shutdown()
+        except Exception as exc:
+            logger.error("停止 Telegram Application 失败: %s", exc, exc_info=True)
 
-    except BotConfigError as e:
-        logger.critical(f"机器人配置错误: {str(e)}")
-    except Exception as e:
-        logger.critical(f"启动过程中发生未处理的严重错误: {str(e)}", exc_info=True)
 
-if __name__ == '__main__':
+async def main():
+    runtime_config = load_config()
+    if CHECK_CONFIG_ONLY:
+        print("ImgHub configuration OK")
+        return
+    DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if runtime_config["listen_host"] in {"0.0.0.0", "::"}:
+        logger.warning("Web 服务被明确配置为全局监听，请确保外部访问受到反向代理或防火墙保护")
+
+    application = None
+    service = None
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signal_name in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(signal_name, stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            pass
+    try:
+        application = Application.builder().token(runtime_config["bot_token"]).build()
+        service = ImageHostingService(application.bot, runtime_config)
+        application.bot_data.update({
+            "img_service": service,
+            "channel_id": runtime_config["channel_id"],
+            "channel_username": runtime_config["channel_username"],
+            "allowed_users": runtime_config["allowed_users"],
+            "base_url": runtime_config["base_url"],
+        })
+        setup_handlers(application)
+        await application.initialize()
+        chat = await application.bot.get_chat(runtime_config["channel_id"])
+        member = await application.bot.get_chat_member(
+            runtime_config["channel_id"], application.bot.id
+        )
+        if member.status not in {"administrator", "creator"}:
+            raise BotConfigError("Bot 必须是目标频道的管理员")
+        configured_username = runtime_config["channel_username"]
+        if configured_username and (
+            not chat.username or configured_username.lower() != chat.username.lower()
+        ):
+            raise BotConfigError("配置的频道用户名与 Telegram 返回值不匹配")
+        await application.start()
+        if not application.updater:
+            raise RuntimeError("Telegram updater 未初始化")
+        await application.updater.start_polling()
+        await service.start_web_server()
+        logger.info(
+            "ImgHub 已启动；监听 %s:%s，已加载 %d 条记录",
+            runtime_config["listen_host"],
+            runtime_config["listen_port"],
+            len(service.file_records),
+        )
+        await stop_event.wait()
+    finally:
+        await safe_shutdown(application, service)
+
+
+if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("接收到终止信号 (KeyboardInterrupt)，正在关闭...")
-    except SystemExit as e:
-        logger.info(f"系统退出信号 ({e.code})，正在关闭...")
-    finally:
-        logger.info("程序最终退出。")
-
+        logger.info("收到键盘中断，正在退出")
+    except Exception as exc:
+        logger.critical("ImgHub 启动或运行失败: %s", exc, exc_info=True)
+        raise SystemExit(1) from exc
 END_OF_PYTHON_SCRIPT
 )
 
-# --- Systemd Service 文件内容 ---
 SYSTEMD_SERVICE_CONTENT=$(cat <<END_OF_SYSTEMD_SERVICE
 [Unit]
 Description=ImgHub Telegram Bot Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
+Type=simple
 User=root
 Group=root
 WorkingDirectory=${PYTHON_SCRIPT_DIR}
+Environment=PYTHONUNBUFFERED=1
+Environment=IMGHUB_CONFIG_PATH=${CONFIG_FILE_PATH}
+Environment=IMGHUB_DATA_DIR=${DATA_DIR}
+Environment=IMGHUB_CACHE_DIR=${CACHE_DIR}
 ExecStart=/usr/bin/python3 ${PYTHON_SCRIPT_PATH}
-Restart=always
+Restart=on-failure
 RestartSec=5
+TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
-# 考虑增加 TimeoutStopSec=30 来给与程序足够的时间来优雅关闭
-# Environment="PYTHONUNBUFFERED=1" # 可选，用于无缓冲输出
 
 [Install]
 WantedBy=multi-user.target
 END_OF_SYSTEMD_SERVICE
 )
 
-# --- 函数定义 ---
+print_info() { echo -e "${CYAN}[信息]${NC} $1"; }
+print_success() { echo -e "${GREEN}[成功]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[警告]${NC} $1"; }
+print_error() { echo -e "${RED}[错误]${NC} $1"; }
+
 check_root() {
-    if [ "$(id -u)" -ne 0 ]; then
-        echo -e "${RED}错误：此脚本需要以 root 用户权限运行。${NC}"
-        exit 1
+    if [[ $EUID -ne 0 ]]; then
+        print_error "此脚本需要 root 权限执行。"
+        return 1
     fi
+}
+
+validate_runtime_settings() {
+    [[ "$BACKUP_KEEP" =~ ^[1-9][0-9]*$ ]] || { print_error "备份数量无效。"; return 1; }
+    [[ "$STARTUP_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || { print_error "启动检查次数无效。"; return 1; }
+    [[ "$STARTUP_INTERVAL" =~ ^[0-9]+$ ]] || { print_error "启动检查间隔无效。"; return 1; }
+    if [[ ! "$HEALTH_PORT" =~ ^[1-9][0-9]*$ ]] || ((10#$HEALTH_PORT > 65535)); then
+        print_error "健康检查端口无效。"
+        return 1
+    fi
+}
+
+atomic_install_file() {
+    local source_file="$1" target_file="$2" mode="$3" target_dir temp_file
+    target_dir=$(dirname -- "$target_file")
+    install -d -m 755 "$target_dir" || return 1
+    temp_file=$(mktemp "$target_dir/.imghub-install.XXXXXXXX") || return 1
+    if ! install -m "$mode" "$source_file" "$temp_file" || ! mv -f -- "$temp_file" "$target_file"; then
+        rm -f -- "$temp_file"
+        return 1
+    fi
+}
+
+snapshot_optional_file() {
+    local source_file="$1" backup_file="$2" missing_file="$3"
+    if [[ -e "$source_file" || -L "$source_file" ]]; then
+        [[ -f "$source_file" && ! -L "$source_file" ]] || return 1
+        cp -a -- "$source_file" "$backup_file"
+    else
+        : > "$missing_file"
+    fi
+}
+
+restore_optional_file() {
+    local target_file="$1" backup_file="$2" missing_file="$3" fallback_mode="$4" mode
+    if [[ -f "$missing_file" ]]; then
+        rm -f -- "$target_file"
+    elif [[ -f "$backup_file" ]]; then
+        mode=$(stat -c '%a' "$backup_file" 2>/dev/null) || mode="$fallback_mode"
+        atomic_install_file "$backup_file" "$target_file" "$mode"
+    else
+        return 1
+    fi
+}
+
+prune_transaction_backups() {
+    local index
+    local -a backups=()
+    mapfile -t backups < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d \
+        -name 'transaction.*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
+    for ((index=BACKUP_KEEP; index<${#backups[@]}; index++)); do
+        [[ "${backups[$index]}" == "$BACKUP_ROOT/transaction."* ]] || continue
+        rm -rf -- "${backups[$index]}"
+    done
+}
+
+create_transaction_backup() {
+    local backup_dir active=false enabled=false
+    umask 077
+    install -d -m 700 "$BACKUP_ROOT" || return 1
+    backup_dir=$(mktemp -d "$BACKUP_ROOT/transaction.XXXXXXXX") || return 1
+    chmod 700 "$backup_dir" || return 1
+    snapshot_optional_file "$PYTHON_SCRIPT_PATH" "$backup_dir/imghub_bot.py" "$backup_dir/python.missing" || return 1
+    snapshot_optional_file "$CONFIG_FILE_PATH" "$backup_dir/imghub_config.ini" "$backup_dir/config.missing" || return 1
+    snapshot_optional_file "$SERVICE_FILE" "$backup_dir/imghub.service" "$backup_dir/service.missing" || return 1
+    snapshot_optional_file "$DATA_DIR/records.json" "$backup_dir/records.json" "$backup_dir/records.missing" || return 1
+    snapshot_optional_file "$DATA_DIR/records.json.last-good" "$backup_dir/records.last-good" "$backup_dir/records.last-good.missing" || return 1
+    systemctl is-active --quiet "$SERVICE_NAME.service" 2>/dev/null && active=true
+    systemctl is-enabled --quiet "$SERVICE_NAME.service" 2>/dev/null && enabled=true
+    printf '%s\n' "$active" > "$backup_dir/service.active"
+    printf '%s\n' "$enabled" > "$backup_dir/service.enabled"
+    prune_transaction_backups
+    printf '%s\n' "$backup_dir"
+}
+
+restore_service_state() {
+    local backup_dir="$1" was_active was_enabled status=0
+    was_active=$(< "$backup_dir/service.active")
+    was_enabled=$(< "$backup_dir/service.enabled")
+    systemctl daemon-reload >/dev/null 2>&1 || status=1
+    if [[ -f "$backup_dir/service.missing" ]]; then
+        systemctl disable "$SERVICE_NAME.service" >/dev/null 2>&1 || true
+        systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true
+        return "$status"
+    fi
+    if [[ "$was_enabled" == true ]]; then
+        systemctl enable "$SERVICE_NAME.service" >/dev/null 2>&1 || status=1
+    else
+        systemctl disable "$SERVICE_NAME.service" >/dev/null 2>&1 || status=1
+    fi
+    if [[ "$was_active" == true ]]; then
+        systemctl restart "$SERVICE_NAME.service" >/dev/null 2>&1 || status=1
+    else
+        systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || status=1
+    fi
+    return "$status"
+}
+
+restore_transaction_backup() {
+    local backup_dir="$1" status=0
+    restore_optional_file "$PYTHON_SCRIPT_PATH" "$backup_dir/imghub_bot.py" "$backup_dir/python.missing" 755 || status=1
+    restore_optional_file "$CONFIG_FILE_PATH" "$backup_dir/imghub_config.ini" "$backup_dir/config.missing" 600 || status=1
+    restore_optional_file "$SERVICE_FILE" "$backup_dir/imghub.service" "$backup_dir/service.missing" 644 || status=1
+    restore_optional_file "$DATA_DIR/records.json" "$backup_dir/records.json" "$backup_dir/records.missing" 600 || status=1
+    restore_optional_file "$DATA_DIR/records.json.last-good" "$backup_dir/records.last-good" "$backup_dir/records.last-good.missing" 600 || status=1
+    restore_service_state "$backup_dir" || status=1
+    return "$status"
+}
+
+INSTALL_TRANSACTION_ACTIVE=false
+INSTALL_FILES_COMMITTED=false
+INSTALL_BACKUP_DIR=''
+
+rollback_active_transaction() {
+    local exit_status="${1:-1}"
+    [[ "$INSTALL_TRANSACTION_ACTIVE" == true ]] || return "$exit_status"
+    INSTALL_TRANSACTION_ACTIVE=false
+    if [[ "$INSTALL_FILES_COMMITTED" == true ]]; then
+        print_warning "安装未完成，正在恢复旧脚本、配置、服务和记录库。"
+        restore_transaction_backup "$INSTALL_BACKUP_DIR" \
+            || print_error "自动恢复未完全成功，请使用备份: $INSTALL_BACKUP_DIR"
+    else
+        print_warning "安装在提交前停止，旧服务和文件未修改。"
+    fi
+    return "$exit_status"
+}
+
+transaction_exit_trap() {
+    local exit_status=$?
+    rollback_active_transaction "$exit_status" || true
+}
+
+transaction_signal_trap() {
+    rollback_active_transaction 130 || true
+    exit 130
 }
 
 install_dependencies() {
-    echo -e "${GREEN}正在更新软件包列表...${NC}"
-    if ! apt-get update -y; then
-        echo -e "${RED}错误：无法更新软件包列表。请检查您的网络连接和软件源配置。${NC}"
-        exit 1
-    fi
+    print_info "正在安装系统和 Python 依赖；此阶段不会停止旧服务。"
+    DEBIAN_FRONTEND=noninteractive apt-get update || return 1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pip python3-venv curl || return 1
+    pip3 install --upgrade "python-telegram-bot[job-queue]" aiohttp --break-system-packages || return 1
+}
 
-    echo -e "${GREEN}正在检查并安装系统依赖 (python3, python3-pip, python3-venv)...${NC}"
-    if ! apt-get install -y python3 python3-pip python3-venv; then
-        echo -e "${RED}错误：无法安装系统依赖。${NC}"
-        exit 1
-    fi
+is_valid_bot_token() {
+    [[ "$1" != *$'\n'* && "$1" != *$'\r'* && "$1" != *$'\t'* \
+        && "$1" =~ ^[0-9]{5,15}:[A-Za-z0-9_-]{30,}$ ]]
+}
 
-    echo -e "${GREEN}正在安装 Python 依赖 (python-telegram-bot[job-queue], aiohttp)...${NC}"
-    # 使用 --break-system-packages (用户要求)
-    if ! pip3 install "python-telegram-bot[job-queue]" aiohttp --break-system-packages; then
-        echo -e "${RED}错误：无法安装 Python 依赖。${NC}"
-        exit 1
+is_valid_channel_id() {
+    [[ "$1" != *$'\n'* && "$1" != *$'\r'* && "$1" != *$'\t'* \
+        && "$1" =~ ^-100[0-9]{6,16}$ ]]
+}
+
+is_valid_channel_username() {
+    [[ "$1" != *$'\n'* && "$1" != *$'\r'* && "$1" != *$'\t'* ]] || return 1
+    [[ -z "$1" || "$1" =~ ^[A-Za-z][A-Za-z0-9_]{4,31}$ ]]
+}
+
+is_valid_allowed_users() {
+    local user_id
+    local -A seen=()
+    local -a user_ids=()
+    [[ "$1" != *$'\n'* && "$1" != *$'\r'* && "$1" != *$'\t'* ]] || return 1
+    [[ "$1" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || return 1
+    IFS=',' read -r -a user_ids <<< "$1"
+    for user_id in "${user_ids[@]}"; do
+        [[ -z "${seen[$user_id]:-}" ]] || return 1
+        seen["$user_id"]=1
+    done
+}
+
+is_valid_base_url() {
+    local value="$1" host port label octet
+    local -a labels=() octets=()
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *$'\t'* ]] || return 1
+    [[ "$value" =~ ^https?://([^/:]+)(:([0-9]+))?/?$ ]] || return 1
+    host=${BASH_REMATCH[1]}
+    port=${BASH_REMATCH[3]:-}
+    if [[ -n "$port" ]]; then
+        [[ "$port" =~ ^[1-9][0-9]*$ ]] && ((${#port} <= 5)) && ((10#$port <= 65535)) || return 1
     fi
-    echo -e "${GREEN}Python 依赖安装完成。${NC}"
+    if [[ "$host" =~ ^[0-9]+([.][0-9]+){3}$ ]]; then
+        IFS='.' read -r -a octets <<< "$host"
+        for octet in "${octets[@]}"; do
+            [[ "$octet" == 0 || "$octet" != 0* ]] || return 1
+            ((10#$octet <= 255)) || return 1
+        done
+        return 0
+    fi
+    IFS='.' read -r -a labels <<< "$host"
+    ((${#labels[@]} >= 2)) || return 1
+    for label in "${labels[@]}"; do
+        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+        ((${#label} <= 63)) || return 1
+    done
+}
+
+write_config_candidate() {
+    local output_file="$1" bot_token="$2" channel_id="$3" channel_username="$4" allowed_users="$5" base_url="$6"
+    cat > "$output_file" <<EOF
+[telegram]
+bot_token = $bot_token
+channel_id = $channel_id
+channel_username = $channel_username
+
+[access]
+allowed_users = $allowed_users
+
+[server]
+base_url = ${base_url%/}
+listen_host = 127.0.0.1
+listen_port = $HEALTH_PORT
+
+[limits]
+max_file_bytes = 20971520
+max_concurrency = 4
+
+[cache]
+max_bytes = 268435456
+ttl_seconds = 86400
+EOF
+    chmod 600 "$output_file"
 }
 
 setup_config_interactive() {
-    echo -e "${YELLOW}--- ImgHub Bot 配置向导 ---${NC}"
-    
-    local bot_token
+    local output_file="$1" bot_token channel_id channel_username allowed_users base_url
+    print_info "--- ImgHub Bot 配置向导 ---"
     while true; do
-        read -p "请输入您的 Telegram Bot Token: " bot_token
-        if [[ -n "${bot_token}" ]]; then
-            break
-        else
-            echo -e "${RED}Bot Token 不能为空，请重新输入。${NC}"
-        fi
+        read -r -p "请输入 Telegram Bot Token: " bot_token
+        is_valid_bot_token "$bot_token" && break
+        print_error "Bot Token 格式无效。"
     done
-
-    local channel_id
     while true; do
-        read -p "请输入您的 Telegram 频道 ID (通常为负数，例如 -1001234567890): " channel_id
-        if [[ "${channel_id}" =~ ^-?[0-9]+$ ]]; then # 检查是否为有效数字 (可带负号)
-            break
-        else
-            echo -e "${RED}频道 ID 格式不正确，应为纯数字 (可带负号)，请重新输入。${NC}"
-        fi
+        read -r -p "请输入 Telegram 频道 ID（以 -100 开头）: " channel_id
+        is_valid_channel_id "$channel_id" && break
+        print_error "频道 ID 格式无效。"
     done
-
-    local channel_username
-    echo -e "${YELLOW}频道类型配置：${NC}"
-    echo "如果您的频道是公开频道（有 @username），请输入用户名"
-    echo "如果是私有频道，直接按回车跳过"
-    read -p "请输入频道用户名 (例如 @imghub7788，可留空): " channel_username
-    # 清理用户名格式（去掉可能的@符号，保持一致性）
-    if [[ -n "${channel_username}" ]]; then
-        channel_username="${channel_username#@}"  # 去掉开头的@
-        echo -e "${GREEN}已设置公开频道用户名: @${channel_username}${NC}"
-    else
-        echo -e "${YELLOW}未设置用户名，将作为私有频道处理${NC}"
-    fi
-
-    local allowed_users
     while true; do
-        read -p "请输入授权使用此 Bot 的用户 ID (多个 ID 请用英文逗号隔开, 例如 12345678,87654321): " allowed_users
-        if [[ -n "${allowed_users}" ]]; then # 允许为空，但提示一下
-             if [[ ! "${allowed_users}" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
-                echo -e "${RED}授权用户 ID 列表格式不正确。应为纯数字，多个用英文逗号隔开。请重新输入。${NC}"
-                continue
-             fi
-        else
-            echo -e "${YELLOW}警告：授权用户列表为空，这意味着在配置完成前可能无人能使用 Bot 的上传功能。${NC}"
-        fi
-        break
+        read -r -p "请输入公开频道用户名（可留空，不含 @）: " channel_username
+        channel_username=${channel_username#@}
+        is_valid_channel_username "$channel_username" && break
+        print_error "频道用户名必须为 5-32 位字母、数字或下划线，并以字母开头。"
     done
-    
-    local base_url
     while true; do
-        read -p "请输入您图床的完整基础 URL (必须以 http:// 或 https:// 开头, 例如 https://img.yourdomain.com): " base_url
-        if [[ "${base_url}" =~ ^https?:// ]]; then
-            break
-        else
-            echo -e "${RED}基础 URL 格式不正确，必须以 http:// 或 https:// 开头。请重新输入。${NC}"
-        fi
+        read -r -p "请输入授权用户 ID（多个用英文逗号分隔）: " allowed_users
+        is_valid_allowed_users "$allowed_users" && break
+        print_error "授权用户必须是逗号分隔的正整数，且不能为空。"
     done
-
-    echo -e "${GREEN}正在生成配置文件: ${CONFIG_FILE_PATH}${NC}"
-    cat > "${CONFIG_FILE_PATH}" <<EOL
-[telegram]
-bot_token = ${bot_token}
-channel_id = ${channel_id}
-channel_username = ${channel_username}
-
-[access]
-allowed_users = ${allowed_users}
-
-[server]
-base_url = ${base_url}
-EOL
-    # 设置配置文件权限，确保root可读写，其他用户无权访问
-    chmod 600 "${CONFIG_FILE_PATH}"
-    echo -e "${GREEN}配置文件已生成并设置权限。${NC}"
+    while true; do
+        read -r -p "请输入完整基础 URL（不含路径）: " base_url
+        is_valid_base_url "$base_url" && break
+        print_error "基础 URL 必须是无路径、查询参数和片段的 http/https URL。"
+    done
+    write_config_candidate "$output_file" "$bot_token" "$channel_id" "$channel_username" "$allowed_users" "$base_url"
 }
 
-# --- 主逻辑 ---
-main() {
-    check_root
+write_stage_files() {
+    local stage_dir="$1"
+    printf '%s\n' "$PYTHON_SCRIPT_CONTENT" > "$stage_dir/imghub_bot.py" || return 1
+    printf '%s\n' "$SYSTEMD_SERVICE_CONTENT" > "$stage_dir/imghub.service" || return 1
+    chmod 755 "$stage_dir/imghub_bot.py"
+    chmod 644 "$stage_dir/imghub.service"
+}
 
-    echo -e "${GREEN}开始安装 ImgHub Bot...${NC}"
+validate_stage_files() {
+    local stage_dir="$1"
+    python3 -m py_compile "$stage_dir/imghub_bot.py" || {
+        print_error "Python 主程序语法检查失败。"
+        return 1
+    }
+    IMGHUB_CONFIG_PATH="$stage_dir/imghub_config.ini" \
+        IMGHUB_DATA_DIR="$DATA_DIR" IMGHUB_CACHE_DIR="$CACHE_DIR" \
+        IMGHUB_CHECK_CONFIG_ONLY=1 python3 "$stage_dir/imghub_bot.py" >/dev/null || {
+            print_error "候选配置运行时校验失败。"
+            return 1
+        }
+    grep -Fxq "ExecStart=/usr/bin/python3 $PYTHON_SCRIPT_PATH" "$stage_dir/imghub.service" || return 1
+    grep -Fxq "Environment=IMGHUB_CONFIG_PATH=$CONFIG_FILE_PATH" "$stage_dir/imghub.service" || return 1
+    if command -v systemd-analyze >/dev/null 2>&1; then
+        systemd-analyze verify "$stage_dir/imghub.service" >/dev/null 2>&1 || {
+            print_error "候选 systemd service 校验失败。"
+            return 1
+        }
+    fi
+}
 
-    # 检查是否已有服务在运行
-    if systemctl is-active --quiet "${SERVICE_NAME}"; then
-        echo -e "${YELLOW}检测到 ${SERVICE_NAME} 服务正在运行。${NC}"
-        read -p "是否要停止现有服务并继续安装？[y/N]: " -r
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            echo -e "${YELLOW}正在停止现有服务...${NC}"
-            systemctl stop "${SERVICE_NAME}"
-            
-            # 备份现有数据
-            if [ -f "/var/lib/imghub/records.json" ]; then
-                echo -e "${YELLOW}正在备份现有记录...${NC}"
-                local records_backup
-                records_backup="/var/lib/imghub/records.json.bak.$(date +%Y%m%d_%H%M%S)"
-                cp /var/lib/imghub/records.json "$records_backup"
+wait_for_stable_service() {
+    local attempt active_restarts previous_restarts='' healthy_streak=0
+    for ((attempt=1; attempt<=STARTUP_ATTEMPTS; attempt++)); do
+        if systemctl is-active --quiet "$SERVICE_NAME.service"; then
+            active_restarts=$(systemctl show "$SERVICE_NAME.service" -p NRestarts --value 2>/dev/null || echo unknown)
+            if curl -fsS --max-time 2 "http://127.0.0.1:${HEALTH_PORT}/healthz" >/dev/null 2>&1 \
+                && [[ -n "$active_restarts" && "$active_restarts" != unknown ]] \
+                && { [[ -z "$previous_restarts" ]] || [[ "$active_restarts" == "$previous_restarts" ]]; }; then
+                healthy_streak=$((healthy_streak + 1))
+                ((healthy_streak >= 2)) && return 0
+            else
+                healthy_streak=0
             fi
+            previous_restarts="$active_restarts"
         else
-            echo -e "${RED}安装已取消。${NC}"
-            exit 0
+            healthy_streak=0
         fi
-    fi
-
-    install_dependencies
-
-    echo -e "${GREEN}正在创建数据目录: ${DATA_DIR}${NC}"
-    mkdir -p "${DATA_DIR}"
-    # 可选：设置数据目录权限，如果服务不是以root运行，需要调整
-    # chown youruser:yourgroup "${DATA_DIR}"
-
-    echo -e "${GREEN}正在创建 Python 脚本目录: ${PYTHON_SCRIPT_DIR}${NC}"
-    mkdir -p "${PYTHON_SCRIPT_DIR}"
-
-    echo -e "${GREEN}正在写入 Python 脚本到: ${PYTHON_SCRIPT_PATH}${NC}"
-    echo "${PYTHON_SCRIPT_CONTENT}" > "${PYTHON_SCRIPT_PATH}"
-    chmod +x "${PYTHON_SCRIPT_PATH}" # 使脚本可执行
-
-    setup_config_interactive # 调用交互式配置
-
-    echo -e "${GREEN}正在创建 Systemd 服务 (${SERVICE_NAME}.service)...${NC}"
-    echo "${SYSTEMD_SERVICE_CONTENT}" > "/etc/systemd/system/${SERVICE_NAME}.service"
-
-    echo -e "${GREEN}重新加载 Systemd 守护进程...${NC}"
-    systemctl daemon-reload
-
-    echo -e "${GREEN}启用 ${SERVICE_NAME} 服务 (开机自启)...${NC}"
-    systemctl enable "${SERVICE_NAME}.service"
-
-    echo -e "${GREEN}启动 ${SERVICE_NAME} 服务...${NC}"
-    if systemctl start "${SERVICE_NAME}.service"; then
-        echo -e "${GREEN}${SERVICE_NAME} 服务已成功启动！${NC}"
-    else
-        echo -e "${RED}错误：${SERVICE_NAME} 服务启动失败。请检查日志。${NC}"
-        echo -e "${YELLOW}您可以使用 'journalctl -u ${SERVICE_NAME} -n 100 --no-pager' 查看服务日志。${NC}"
-        echo -e "${YELLOW}同时检查Python脚本日志 '${LOG_FILE}'。${NC}"
-        exit 1
-    fi
-
-    echo -e "\n${GREEN}🎉 ImgHub Bot 安装和初步配置完成！ 🎉${NC}\n"
-
-    echo -e "${YELLOW}重要提示：反向代理设置${NC}"
-    echo "---------------------------------------------------------------------"
-    echo "ImgHub Bot 的内部 Web 服务现在运行在 ${GREEN}0.0.0.0:8080${NC}。"
-    echo "您需要设置一个反向代理服务器（如 Nginx, Apache, Caddy 等）将您之前配置的"
-    echo "基础 URL (${GREEN}$(grep base_url ${CONFIG_FILE_PATH} | cut -d '=' -f2 | xargs)${NC}) 指向到 ${GREEN}http://127.0.0.1:8080${NC}。"
-    echo ""
-    echo "例如，如果您使用 Nginx，并且您的基础 URL 是 ${GREEN}$(grep base_url ${CONFIG_FILE_PATH} | cut -d '=' -f2 | xargs)${NC},"
-    echo "您的 Nginx 站点配置可能需要类似如下的片段："
-    echo ""
-    echo -e "${GREEN}server {${NC}"
-    echo -e "${GREEN}    listen 80; # 如果是 HTTPS, 则为 listen 443 ssl;${NC}"
-    
-    # 尝试从 base_url 提取域名
-    raw_base_url=$(grep base_url ${CONFIG_FILE_PATH} | cut -d '=' -f2 | xargs)
-    # 移除 http:// 或 https://
-    server_name_extracted=$(echo "${raw_base_url}" | sed -e 's%^https\?://%%') 
-    # 移除路径部分 (如果存在)
-    server_name_extracted=$(echo "${server_name_extracted}" | cut -d '/' -f 1)
-
-    echo -e "${GREEN}    server_name ${server_name_extracted};${NC}"
-    echo ""
-    echo -e "${GREEN}    # 如果使用 HTTPS (推荐!), 请配置 SSL证书路径:${NC}"
-    echo -e "${GREEN}    # ssl_certificate /path/to/your/fullchain.pem;${NC}"
-    echo -e "${GREEN}    # ssl_certificate_key /path/to/your/privkey.pem;${NC}"
-    echo -e "${GREEN}    # include /etc/letsencrypt/options-ssl-nginx.conf; # Let's Encrypt 推荐配置${NC}"
-    echo -e "${GREEN}    # ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # Let's Encrypt 推荐配置${NC}"
-    echo ""
-    echo -e "${GREEN}    location / {${NC}"
-    echo -e "${GREEN}        proxy_pass http://127.0.0.1:8080;${NC}"
-    echo -e "${GREEN}        proxy_set_header Host \$host;${NC}"
-    echo -e "${GREEN}        proxy_set_header X-Real-IP \$remote_addr;${NC}"
-    echo -e "${GREEN}        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;${NC}"
-    echo -e "${GREEN}        proxy_set_header X-Forwarded-Proto \$scheme;${NC}"
-    echo -e "${GREEN}        proxy_http_version 1.1;${NC}"
-    echo -e "${GREEN}        proxy_set_header Upgrade \$http_upgrade;${NC}"
-    echo -e "${GREEN}        proxy_set_header Connection \"upgrade\";${NC}"
-    echo -e "${GREEN}    }${NC}"
-    echo -e "${GREEN}}${NC}"
-    echo ""
-    echo "请根据您的实际域名、HTTPS 设置以及所使用的反向代理软件调整配置。"
-    echo "配置完成后，请确保您的防火墙允许外部访问您设置的域名和端口 (通常是 80/443)。"
-    echo "---------------------------------------------------------------------"
-    echo ""
-    echo -e "${GREEN}其他常用命令:${NC}"
-    echo -e "查看服务状态: ${YELLOW}systemctl status ${SERVICE_NAME}.service${NC}"
-    echo -e "停止服务: ${YELLOW}systemctl stop ${SERVICE_NAME}.service${NC}"
-    echo -e "启动服务: ${YELLOW}systemctl start ${SERVICE_NAME}.service${NC}"
-    echo -e "重启服务: ${YELLOW}systemctl restart ${SERVICE_NAME}.service${NC}"
-    echo -e "查看服务日志: ${YELLOW}journalctl -u ${SERVICE_NAME} -f --no-pager${NC}"
-    echo -e "查看Python脚本日志: ${YELLOW}tail -f ${LOG_FILE}${NC}"
-    echo -e "编辑配置文件: ${YELLOW}nano ${CONFIG_FILE_PATH}${NC}"
-    echo -e "Python脚本位置: ${YELLOW}${PYTHON_SCRIPT_PATH}${NC}"
-    echo ""
-    
-    # 显示配置的频道信息
-    configured_channel_username=$(grep channel_username ${CONFIG_FILE_PATH} | cut -d '=' -f2 | xargs)
-    if [[ -n "${configured_channel_username}" ]]; then
-        echo -e "${GREEN}配置的频道类型: 公开频道 @${configured_channel_username}${NC}"
-        echo -e "${GREEN}备用链接格式: https://t.me/${configured_channel_username}/消息ID${NC}"
-    else
-        echo -e "${YELLOW}配置的频道类型: 私有频道${NC}"
-        echo -e "${YELLOW}备用链接格式: https://t.me/c/频道ID/消息ID (仅成员可访问)${NC}"
-    fi
+        sleep "$STARTUP_INTERVAL"
+    done
+    return 1
 }
 
-# 执行主函数
-main
+commit_stage_files() {
+    local stage_dir="$1"
+    install -d -m 755 "$PYTHON_SCRIPT_DIR" || return 1
+    install -d -m 700 "$DATA_DIR" "$CACHE_DIR" || return 1
+    INSTALL_FILES_COMMITTED=true
+    systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true
+    atomic_install_file "$stage_dir/imghub_bot.py" "$PYTHON_SCRIPT_PATH" 755 || return 1
+    atomic_install_file "$stage_dir/imghub_config.ini" "$CONFIG_FILE_PATH" 600 || return 1
+    atomic_install_file "$stage_dir/imghub.service" "$SERVICE_FILE" 644 || return 1
+    systemctl daemon-reload || return 1
+    systemctl enable "$SERVICE_NAME.service" || return 1
+    systemctl start "$SERVICE_NAME.service" || return 1
+    wait_for_stable_service || {
+        print_error "服务未通过稳定性和 HTTP 健康检查。"
+        journalctl -u "$SERVICE_NAME.service" -n 100 --no-pager 2>/dev/null || true
+        return 1
+    }
+}
+
+show_completion() {
+    local base_url channel_username
+    base_url=$(sed -n 's/^[[:space:]]*base_url[[:space:]]*=[[:space:]]*//p' "$CONFIG_FILE_PATH" | head -n 1)
+    channel_username=$(sed -n 's/^[[:space:]]*channel_username[[:space:]]*=[[:space:]]*//p' "$CONFIG_FILE_PATH" | head -n 1)
+    print_success "ImgHub Bot 安装/更新完成。"
+    print_info "内部 Web 服务仅监听 http://127.0.0.1:${HEALTH_PORT}"
+    print_info "请将反向代理的 $base_url 指向 http://127.0.0.1:${HEALTH_PORT}"
+    [[ -z "$channel_username" ]] || print_info "公开频道: @$channel_username"
+    echo -e "查看状态: ${YELLOW}systemctl status ${SERVICE_NAME}.service${NC}"
+    echo -e "查看日志: ${YELLOW}journalctl -u ${SERVICE_NAME}.service -f --no-pager${NC}"
+    echo -e "编辑配置: ${YELLOW}$CONFIG_FILE_PATH${NC}"
+    echo -e "Python 脚本: ${YELLOW}$PYTHON_SCRIPT_PATH${NC}"
+}
+
+main() {
+    local confirm stage_dir result=0
+    check_root || return 1
+    validate_runtime_settings || return 1
+    if systemctl is-active --quiet "$SERVICE_NAME.service" 2>/dev/null; then
+        print_warning "检测到旧服务正在运行；验证候选文件期间不会停止它。"
+        read -r -p "确认继续更新？[y/N]: " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || { print_warning "已取消。"; return 0; }
+    fi
+    stage_dir=$(mktemp -d "${TMPDIR:-/tmp}/imghub-stage.XXXXXXXX") || return 1
+    write_stage_files "$stage_dir" || { rm -rf -- "$stage_dir"; return 1; }
+    if ! setup_config_interactive "$stage_dir/imghub_config.ini"; then
+        rm -rf -- "$stage_dir"
+        return 1
+    fi
+    INSTALL_BACKUP_DIR=$(create_transaction_backup) || {
+        rm -rf -- "$stage_dir"
+        print_error "无法创建完整安装前备份。"
+        return 1
+    }
+    INSTALL_TRANSACTION_ACTIVE=true
+    INSTALL_FILES_COMMITTED=false
+    trap transaction_exit_trap EXIT
+    trap transaction_signal_trap INT TERM
+    print_info "完整安装前备份: $INSTALL_BACKUP_DIR"
+    if ! install_dependencies \
+        || ! validate_stage_files "$stage_dir" \
+        || ! commit_stage_files "$stage_dir"; then
+        result=1
+    fi
+    rm -rf -- "$stage_dir"
+    if ((result != 0)); then
+        rollback_active_transaction "$result" || true
+        trap - EXIT INT TERM
+        return "$result"
+    fi
+    INSTALL_TRANSACTION_ACTIVE=false
+    trap - EXIT INT TERM
+    show_completion
+}
+
+if [[ ${IMGHUB_INSTALLER_SOURCE_ONLY:-0} != 1 ]]; then
+    main "$@"
+fi
