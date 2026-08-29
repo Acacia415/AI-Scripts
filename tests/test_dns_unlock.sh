@@ -194,8 +194,16 @@ assert_contains "$remote_probe_log" '@203.0.113.53 ios.chat.openai.com A'
 assert_contains "$remote_probe_log" '--resolve example.com:80:203.0.113.53'
 assert_contains "$remote_probe_log" '--resolve www.example.com:443:203.0.113.53'
 remote_probe_mode=bad
-if validate_remote_dns_unlock_server 203.0.113.53; then
+if bad_probe_output=$(validate_remote_dns_unlock_server 203.0.113.53 2>&1); then
   fail "remote preflight accepted DNS without wildcard interception"
+fi
+if [[ "$bad_probe_output" != *'远端 DNS 端口可以响应，但当前未加载 DNS 解锁规则'* ]]; then
+  printf '%s\n' "$bad_probe_output" >&2
+  fail "remote preflight did not distinguish missing unlock rules from a closed DNS port"
+fi
+if [[ "$bad_probe_output" != *'DNS解锁服务（22）'* ]]; then
+  printf '%s\n' "$bad_probe_output" >&2
+  fail "remote preflight did not provide the server repair path"
 fi
 unset -f dig curl
 

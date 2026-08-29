@@ -739,6 +739,12 @@ retry_curl_probe() {
     return 1
 }
 
+format_dns_probe_answers() {
+    local answers="$1" summary
+    summary=$(sed '/^[[:space:]]*$/d' <<< "$answers" | paste -sd ',' -)
+    printf '%s\n' "${summary:-<无 A 记录>}"
+}
+
 validate_running_dns_unlock() {
     local public_ip="$1" dns_answers attempt
 
@@ -807,7 +813,14 @@ validate_remote_dns_unlock_server() {
         done
         if [[ -z "$unlock_ip" ]]; then
             echo -e "${RED}错误: 远端 ${mode^^}/53 未将 Netflix 域名及其随机子域解析到同一个解锁 IPv4。${NC}"
-            echo -e "${YELLOW}请确认服务端 dnsmasq 正常，并在系统防火墙和云安全组同时放行 TCP/UDP 53。${NC}"
+            echo -e "${YELLOW}  netflix.com => $(format_dns_probe_answers "$dns_answers")${NC}"
+            echo -e "${YELLOW}  ${probe_domain} => $(format_dns_probe_answers "$wildcard_answers")${NC}"
+            if grep -Eq '^[0-9]+([.][0-9]+){3}$' <<< "$dns_answers"; then
+                echo -e "${RED}诊断: 远端 DNS 端口可以响应，但当前未加载 DNS 解锁规则。${NC}"
+                echo -e "${YELLOW}请先在 ${server_ip} 上更新工具箱（99），再进入 DNS解锁服务（22）执行“安装/更新 DNS 解锁服务”（1）；必须看到安装成功后再设置客户端。${NC}"
+            else
+                echo -e "${YELLOW}请确认服务端 dnsmasq 正常，并在系统防火墙和云安全组同时放行 TCP/UDP 53。${NC}"
+            fi
             return 1
         fi
         if [[ "$mode" == udp ]]; then
