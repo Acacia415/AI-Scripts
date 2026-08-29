@@ -19,6 +19,10 @@ export DNS_UNLOCK_STATE_DIR="$TEST_ROOT/var/lib/dns-unlock"
 export DNS_UNLOCK_BACKUP_ROOT="$TEST_ROOT/var/backups/dns-unlock"
 export DNS_UNLOCK_SERVICE_CHECK_ATTEMPTS=1
 export DNS_UNLOCK_SERVICE_CHECK_DELAY=0
+export DNS_UNLOCK_GOST_LISTENER_CHECK_ATTEMPTS=1
+export DNS_UNLOCK_GOST_LISTENER_CHECK_DELAY=0
+export DNS_UNLOCK_END_TO_END_CHECK_ATTEMPTS=1
+export DNS_UNLOCK_END_TO_END_CHECK_DELAY=0
 export DNS_UNLOCK_PORT_RELEASE_DELAY=0
 
 # shellcheck source=../dns_unlock.sh
@@ -112,6 +116,8 @@ lsof() {
     dns-conflict:*iUDP:53*) printf '303\n' ;;
     web:*iTCP:80*) printf '101\n' ;;
     web:*iTCP:443*) printf '102\n' ;;
+    sniproxy:*iTCP:80*) printf '201\n' ;;
+    sniproxy:*iTCP:443*) printf '202\n' ;;
     *) return 1 ;;
   esac
 }
@@ -120,6 +126,7 @@ ps() {
     *303*) printf 'named\n' ;;
     *101*) printf 'nginx\n' ;;
     *102*) printf 'caddy\n' ;;
+    *201*|*202*) printf 'sniproxy\n' ;;
   esac
 }
 systemctl() {
@@ -134,10 +141,63 @@ port_mode=dns-conflict
 if check_port_53; then fail "UDP/53 conflict was ignored"; fi
 port_mode=web
 : > "$port_log"
+if check_ports_80_443; then fail "non-sniproxy TCP/80 or TCP/443 conflict was accepted"; fi
+assert_contains "$port_log" 'iTCP:80'
+port_mode=sniproxy
+: > "$port_log"
 check_ports_80_443 <<< $'y\ny'
 assert_contains "$port_log" 'iTCP:80'
 assert_contains "$port_log" 'iTCP:443'
-unset -f lsof ps
+[[ "$STOP_SNIPROXY" == true ]] || fail "sniproxy was not scheduled to stop"
+unset -f lsof ps systemctl
+
+# Service activation is not considered ready until the GOST MainPID owns both
+# TCP listeners; this prevents the immediate post-restart curl race.
+listener_mode=both
+systemctl() {
+  [[ "$1" != show ]] || printf '4242\n'
+  return 0
+}
+lsof() {
+  case "$listener_mode:$*" in
+    both:*'-p 4242'*'-iTCP:80'*|both:*'-p 4242'*'-iTCP:443'*) printf '4242\n' ;;
+    http-only:*'-p 4242'*'-iTCP:80'*) printf '4242\n' ;;
+    *) return 1 ;;
+  esac
+}
+wait_for_gost_listeners
+listener_mode=http-only
+if wait_for_gost_listeners; then fail "GOST readiness accepted a missing TCP/443 listener"; fi
+unset -f lsof systemctl
+
+# Remote client preflight verifies wildcard DNS interception over UDP/TCP and
+# both forwarding ports before any local resolver change is attempted.
+remote_probe_log="$TEST_ROOT/remote-probe.log"
+remote_probe_mode=ok
+dig() {
+  printf 'dig %s\n' "$*" >> "$remote_probe_log"
+  case "$remote_probe_mode:$*" in
+    ok:*@203.0.113.53*) printf '198.51.100.8\n' ;;
+    bad:*' netflix.com A'*) printf '198.51.100.8\n' ;;
+  esac
+}
+curl() {
+  printf 'curl %s\n' "$*" >> "$remote_probe_log"
+  [[ "$remote_probe_mode" == ok ]]
+}
+: > "$remote_probe_log"
+validate_remote_dns_unlock_server 203.0.113.53
+assert_contains "$remote_probe_log" '+short @203.0.113.53 netflix.com A'
+assert_contains "$remote_probe_log" '+tcp +time=3 +tries=1 +short @203.0.113.53'
+assert_contains "$remote_probe_log" '@203.0.113.53 disney.api.edge.bamgrid.com A'
+assert_contains "$remote_probe_log" '@203.0.113.53 ios.chat.openai.com A'
+assert_contains "$remote_probe_log" '--resolve example.com:80:203.0.113.53'
+assert_contains "$remote_probe_log" '--resolve www.example.com:443:203.0.113.53'
+remote_probe_mode=bad
+if validate_remote_dns_unlock_server 203.0.113.53; then
+  fail "remote preflight accepted DNS without wildcard interception"
+fi
+unset -f dig curl
 
 # The staged server configuration is validated before installation.
 mkdir -p "$(dirname "$DNSMASQ_MAIN_CONFIG")"
@@ -162,7 +222,15 @@ dig() {
 dnsmasq() { printf 'dnsmasq %s\n' "$*" >> "$command_log"; return 0; }
 systemctl() {
   printf 'systemctl %s\n' "$*" >> "$command_log"
+  if [[ "$1" == "show" ]]; then printf '4242\n'; fi
   return 0
+}
+lsof() {
+  case "$*" in
+    *'-p 4242'*'-iTCP:80'*) printf '4242\n' ;;
+    *'-p 4242'*'-iTCP:443'*) printf '4242\n' ;;
+    *) return 1 ;;
+  esac
 }
 stage_dir=$(mktemp -d "$TEST_ROOT/stage.XXXXXXXX")
 perform_dns_unlock_server_install "$stage_dir" <<< 'n'
@@ -172,13 +240,19 @@ assert_contains "$DNS_GOST_SERVICE_PATH" "ExecStart=$TEST_ROOT/bin/gost-v3 -C $D
 [[ $(grep -c 'resolver: "dns-unlock-upstream"' "$DNS_GOST_CONFIG_PATH") == 2 ]] || fail "GOST services do not both reference the dedicated resolver"
 assert_contains "$DNS_GOST_CONFIG_PATH" 'nameservers:'
 assert_contains "$DNS_GOST_CONFIG_PATH" 'https://1.1.1.1/dns-query'
+assert_contains "$DNS_GOST_CONFIG_PATH" 'addr: "0.0.0.0:80"'
+assert_contains "$DNS_GOST_CONFIG_PATH" 'addr: "0.0.0.0:443"'
 assert_not_contains "$DNS_GOST_CONFIG_PATH" 'addr: "{host}:80"'
 assert_contains "$DNSMASQ_CONFIG_FILE" 'address=/netflix.com/203.0.113.20'
 assert_contains "$DNSMASQ_CONFIG_FILE" 'address=/reddit.com/203.0.113.20'
 assert_contains "$DNSMASQ_CONFIG_FILE" 'address=/googlevideo.com/203.0.113.20'
+for detector_domain in tiktok.com bamgrid.com disneyplus.com youtube.com primevideo.com openai.com chatgpt.com; do
+  assert_contains "$DNSMASQ_CONFIG_FILE" "address=/${detector_domain}/203.0.113.20"
+done
 assert_contains "$command_log" 'dnsmasq --test --conf-file='
 assert_contains "$command_log" 'dnsmasq --test'
 assert_contains "$command_log" 'dig +time=3 +tries=1 +short @127.0.0.1 netflix.com A'
+unset -f lsof
 
 # With an official GOST binary, verify real HTTP Host and HTTPS SNI forwarding.
 if [[ -n "${DNS_UNLOCK_TEST_REAL_GOST:-}" ]]; then
@@ -323,6 +397,16 @@ assert_contains "$firewall_log" "ip6tables -I OUTPUT -p tcp --dport 53"
 assert_contains "$firewall_log" "iptables -A $DNS_V4_CHAIN -d 203.0.113.53"
 assert_contains "$firewall_log" "ip6tables -A $DNS_V6_CHAIN"
 revert_dns_enforcement_rules
+
+# A failed remote preflight must happen before resolv.conf or resolved is touched.
+client_mutation_log="$TEST_ROOT/client-mutation.log"
+validate_remote_dns_unlock_server() { return 1; }
+disable_systemd_resolved_if_running() { printf 'disable-resolved\n' >> "$client_mutation_log"; }
+set_resolv_conf() { printf 'write-resolv\n' >> "$client_mutation_log"; }
+if perform_setup_dns_client 203.0.113.53; then
+  fail "client setup continued after a failed remote preflight"
+fi
+[[ ! -e "$client_mutation_log" ]] || fail "client DNS was modified before remote preflight passed"
 
 assert_not_contains "$REPO_DIR/dns_unlock.sh" 'rm -f "$(command -v gost)"'
 assert_not_contains "$REPO_DIR/dns_unlock.sh" 'apt-get purge -y sniproxy'

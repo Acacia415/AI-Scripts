@@ -20,6 +20,10 @@ SERVER_SNIPROXY_MANAGED_MARKER="$STATE_DIR/server-sniproxy.managed"
 IPV6_BLOCK_MARKER="$STATE_DIR/ipv6-block.managed"
 DNS_ENFORCE_MARKER="$STATE_DIR/dns-enforce.managed"
 GOST_RELEASE_API="${DNS_UNLOCK_GOST_RELEASE_API:-https://api.github.com/repos/go-gost/gost/releases/latest}"
+GOST_LISTENER_CHECK_ATTEMPTS="${DNS_UNLOCK_GOST_LISTENER_CHECK_ATTEMPTS:-15}"
+GOST_LISTENER_CHECK_DELAY="${DNS_UNLOCK_GOST_LISTENER_CHECK_DELAY:-1}"
+END_TO_END_CHECK_ATTEMPTS="${DNS_UNLOCK_END_TO_END_CHECK_ATTEMPTS:-3}"
+END_TO_END_CHECK_DELAY="${DNS_UNLOCK_END_TO_END_CHECK_DELAY:-2}"
 FIREWALL_COMMENT="AI-Scripts:dns-unlock"
 DNS_V4_CHAIN="AI_DNS_UNLOCK_OUT"
 DNS_V6_CHAIN="AI_DNS_UNLOCK6_OUT"
@@ -386,10 +390,15 @@ check_ports_80_443() {
         [[ -n "$own_pid" && "$own_pid" != "0" ]] && pids=$(grep -vx "$own_pid" <<< "$pids" || true)
         [[ -n "$pids" ]] || continue
         process_names=$(ps -p "$(paste -sd, <<< "$pids")" -o comm= 2>/dev/null | sed '/^[[:space:]]*$/d' | sort -u)
-        echo -e "${YELLOW}警告: TCP/${port} 已被进程占用: ${process_names//$'\n'/, }${NC}"
-        read -r -p "是否仍然继续检查其余端口并尝试安装? (y/N): " choice
+        if grep -Evq '^sniproxy$' <<< "$process_names"; then
+            echo -e "${RED}错误: TCP/${port} 已被其他服务占用: ${process_names//$'\n'/, }${NC}"
+            echo -e "${YELLOW}GOST 无法与该服务共用 TCP/${port}，请先停止或调整占用端口的服务。${NC}"
+            return 1
+        fi
+        echo -e "${YELLOW}警告: TCP/${port} 当前由 sniproxy 占用。${NC}"
+        read -r -p "是否在提交新配置时停止 sniproxy? (y/N): " choice
         [[ "$choice" =~ ^[yY]$ ]] || return 1
-        grep -q '^sniproxy$' <<< "$process_names" && STOP_SNIPROXY=true
+        STOP_SNIPROXY=true
     done
     return 0
 }
@@ -662,7 +671,7 @@ install_dns_unlock_server() {
 }
 
 write_gost_dns_unlock_config() {
-    local output_path="$1" http_addr="${2:-:80}" https_addr="${3:-:443}"
+    local output_path="$1" http_addr="${2:-0.0.0.0:80}" https_addr="${3:-0.0.0.0:443}"
     cat > "$output_path" <<EOF
 # Managed by AI-Scripts dns_unlock.sh
 services:
@@ -694,28 +703,144 @@ resolvers:
 EOF
 }
 
-validate_running_dns_unlock() {
-    local public_ip="$1" dns_answers
+wait_for_gost_listeners() {
+    local attempt main_pid port ready
+    for ((attempt=1; attempt<=GOST_LISTENER_CHECK_ATTEMPTS; attempt++)); do
+        ready=true
+        main_pid=$(systemctl show -p MainPID --value "$DNS_GOST_SERVICE_NAME" 2>/dev/null || true)
+        if [[ ! "$main_pid" =~ ^[1-9][0-9]*$ ]] || ! systemctl is-active --quiet "$DNS_GOST_SERVICE_NAME"; then
+            ready=false
+        else
+            for port in 80 443; do
+                if ! lsof -nP -a -p "$main_pid" -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | grep -Fxq "$main_pid"; then
+                    ready=false
+                    break
+                fi
+            done
+        fi
+        [[ "$ready" == true ]] && return 0
+        sleep "$GOST_LISTENER_CHECK_DELAY"
+    done
 
-    dns_answers=$(dig +time=3 +tries=1 +short @127.0.0.1 netflix.com A 2>/dev/null) || {
-        echo -e "${RED}错误: 无法通过本机 dnsmasq 查询解锁域名。${NC}"
-        return 1
-    }
+    echo -e "${RED}错误: GOST 进程未同时监听 IPv4 TCP/80 和 TCP/443。${NC}"
+    echo -e "${YELLOW}当前监听情况:${NC}"
+    lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN 2>/dev/null || true
+    return 1
+}
+
+retry_curl_probe() {
+    local attempt
+    for ((attempt=1; attempt<=END_TO_END_CHECK_ATTEMPTS; attempt++)); do
+        if curl --fail --silent --show-error --noproxy '*' --connect-timeout 5 --max-time 20 "$@"; then
+            return 0
+        fi
+        ((attempt == END_TO_END_CHECK_ATTEMPTS)) || sleep "$END_TO_END_CHECK_DELAY"
+    done
+    return 1
+}
+
+validate_running_dns_unlock() {
+    local public_ip="$1" dns_answers attempt
+
+    dns_answers=""
+    for ((attempt=1; attempt<=END_TO_END_CHECK_ATTEMPTS; attempt++)); do
+        dns_answers=$(dig +time=3 +tries=1 +short @127.0.0.1 netflix.com A 2>/dev/null || true)
+        grep -Fxq "$public_ip" <<< "$dns_answers" && break
+        ((attempt == END_TO_END_CHECK_ATTEMPTS)) || sleep "$END_TO_END_CHECK_DELAY"
+    done
     if ! grep -Fxq "$public_ip" <<< "$dns_answers"; then
         echo -e "${RED}错误: dnsmasq 未将 netflix.com 解析到本机公网 IPv4 (${public_ip})。${NC}"
         return 1
     fi
 
-    if ! curl --fail --silent --show-error --noproxy '*' --connect-timeout 10 --max-time 20 \
-        -H 'Host: example.com' http://127.0.0.1/ -o /dev/null; then
+    if ! retry_curl_probe -H 'Host: example.com' http://127.0.0.1/ -o /dev/null; then
         echo -e "${RED}错误: GOST HTTP Host 转发自检失败。${NC}"
         return 1
     fi
-    if ! curl --fail --silent --show-error --noproxy '*' --connect-timeout 10 --max-time 20 \
-        --resolve 'www.example.com:443:127.0.0.1' https://www.example.com/ -o /dev/null; then
+    if ! retry_curl_probe --resolve 'www.example.com:443:127.0.0.1' https://www.example.com/ -o /dev/null; then
         echo -e "${RED}错误: GOST HTTPS SNI 转发自检失败。${NC}"
         return 1
     fi
+}
+
+validate_remote_dns_unlock_server() {
+    local server_ip="$1" dns_answers wildcard_answers attempt mode candidate unlock_ip detector_domain
+    local udp_unlock_ip="" tcp_unlock_ip="" probe_domain
+    local -a detector_domains=(
+        www.tiktok.com
+        disney.api.edge.bamgrid.com
+        disneyplus.com
+        www.netflix.com
+        www.youtube.com
+        www.primevideo.com
+        www.reddit.com
+        api.openai.com
+        ios.chat.openai.com
+        chat.openai.com
+        chatgpt.com
+    )
+
+    echo -e "${BLUE}信息: 修改本机 DNS 前，正在预检远端解锁服务器的 53/80/443 端口...${NC}"
+    probe_domain="ai-scripts-$RANDOM-$RANDOM.netflix.com"
+    for mode in udp tcp; do
+        dns_answers=""
+        wildcard_answers=""
+        unlock_ip=""
+        for ((attempt=1; attempt<=END_TO_END_CHECK_ATTEMPTS; attempt++)); do
+            if [[ "$mode" == tcp ]]; then
+                dns_answers=$(dig +tcp +time=3 +tries=1 +short @"$server_ip" netflix.com A 2>/dev/null || true)
+                wildcard_answers=$(dig +tcp +time=3 +tries=1 +short @"$server_ip" "$probe_domain" A 2>/dev/null || true)
+            else
+                dns_answers=$(dig +time=3 +tries=1 +short @"$server_ip" netflix.com A 2>/dev/null || true)
+                wildcard_answers=$(dig +time=3 +tries=1 +short @"$server_ip" "$probe_domain" A 2>/dev/null || true)
+            fi
+            unlock_ip=""
+            while IFS= read -r candidate; do
+                if is_valid_ipv4 "$candidate"; then
+                    unlock_ip="$candidate"
+                    break
+                fi
+            done <<< "$dns_answers"
+            [[ -n "$unlock_ip" ]] && grep -Fxq "$unlock_ip" <<< "$wildcard_answers" && break
+            unlock_ip=""
+            ((attempt == END_TO_END_CHECK_ATTEMPTS)) || sleep "$END_TO_END_CHECK_DELAY"
+        done
+        if [[ -z "$unlock_ip" ]]; then
+            echo -e "${RED}错误: 远端 ${mode^^}/53 未将 Netflix 域名及其随机子域解析到同一个解锁 IPv4。${NC}"
+            echo -e "${YELLOW}请确认服务端 dnsmasq 正常，并在系统防火墙和云安全组同时放行 TCP/UDP 53。${NC}"
+            return 1
+        fi
+        if [[ "$mode" == udp ]]; then
+            udp_unlock_ip="$unlock_ip"
+        else
+            tcp_unlock_ip="$unlock_ip"
+        fi
+    done
+    if [[ "$udp_unlock_ip" != "$tcp_unlock_ip" ]]; then
+        echo -e "${RED}错误: 远端 UDP/53 与 TCP/53 返回的解锁地址不一致。${NC}"
+        return 1
+    fi
+
+    # 工具箱第 11 项直接访问这些平台端点；逐项确认其 A 记录都进入同一解锁链路。
+    for detector_domain in "${detector_domains[@]}"; do
+        dns_answers=$(dig +time=3 +tries=1 +short @"$server_ip" "$detector_domain" A 2>/dev/null || true)
+        if ! grep -Fxq "$udp_unlock_ip" <<< "$dns_answers"; then
+            echo -e "${RED}错误: 远端 DNS 未将流媒体检测端点 ${detector_domain} 解析到解锁地址 ${udp_unlock_ip}。${NC}"
+            return 1
+        fi
+    done
+
+    if ! retry_curl_probe --resolve "example.com:80:${server_ip}" http://example.com/ -o /dev/null; then
+        echo -e "${RED}错误: 无法通过远端 TCP/80 完成 HTTP Host 转发。${NC}"
+        echo -e "${YELLOW}请确认 GOST 正在监听 TCP/80，并在系统防火墙和云安全组放行 TCP/80。${NC}"
+        return 1
+    fi
+    if ! retry_curl_probe --resolve "www.example.com:443:${server_ip}" https://www.example.com/ -o /dev/null; then
+        echo -e "${RED}错误: 无法通过远端 TCP/443 完成 HTTPS SNI 转发。${NC}"
+        echo -e "${YELLOW}请确认 GOST 正在监听 TCP/443，并在系统防火墙和云安全组放行 TCP/443。${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}成功: 远端 UDP/TCP DNS、HTTP 和 HTTPS 转发预检通过。${NC}"
 }
 
 perform_dns_unlock_server_install() {
@@ -724,11 +849,6 @@ perform_dns_unlock_server_install() {
     install_dependencies || { echo -e "${RED}错误: 依赖安装失败。${NC}"; return 1; }
     check_port_53 || return 1
     check_ports_80_443 || return 1
-
-    systemctl stop "$DNS_GOST_SERVICE_NAME" >/dev/null 2>&1 || true
-    if [[ "${STOP_SNIPROXY:-false}" == true ]]; then
-        systemctl stop sniproxy >/dev/null 2>&1 || return 1
-    fi
 
     select_or_stage_gost "$stage_dir" || { echo -e "${RED}错误: 没有可用的兼容 GOST v3。${NC}"; return 1; }
     if [[ "$install_new_gost" == true ]]; then
@@ -761,12 +881,17 @@ perform_dns_unlock_server_install() {
 # Managed by AI-Scripts dns_unlock.sh
 [Unit]
 Description=GOST DNS Unlock Service
-After=network.target
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
 ExecStart=${final_gost_binary} -C ${DNS_GOST_CONFIG_PATH}
-Restart=always
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
 User=root
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
@@ -988,6 +1113,18 @@ EOF
         echo -e "${RED}错误: Dnsmasq 子配置校验失败。${NC}"; return 1;
     }
 
+    # 候选程序和配置全部通过验证后才停止旧服务，尽量缩短更新中断时间。
+    if systemctl is-active --quiet "$DNS_GOST_SERVICE_NAME" 2>/dev/null; then
+        systemctl stop "$DNS_GOST_SERVICE_NAME" || {
+            echo -e "${RED}错误: 无法停止旧 GOST DNS 服务。${NC}"
+            return 1
+        }
+    fi
+    if [[ "${STOP_SNIPROXY:-false}" == true ]]; then
+        systemctl stop sniproxy || return 1
+    fi
+    sleep "${DNS_UNLOCK_PORT_RELEASE_DELAY:-1}"
+
     if [[ "$install_new_gost" == true ]]; then
         mkdir -p "$(dirname "$GOST_INSTALL_PATH")"
         install -m 755 "$selected_gost_binary" "$GOST_INSTALL_PATH" || return 1
@@ -1004,6 +1141,10 @@ EOF
     systemctl enable "$DNS_GOST_SERVICE_NAME" dnsmasq >/dev/null 2>&1 || return 1
     systemctl restart "$DNS_GOST_SERVICE_NAME" || return 1
     wait_for_service_active "$DNS_GOST_SERVICE_NAME" || { echo -e "${RED}错误: GOST DNS 服务未能稳定运行。${NC}"; return 1; }
+    if ! wait_for_gost_listeners; then
+        journalctl -u "$DNS_GOST_SERVICE_NAME" -n 80 --no-pager 2>/dev/null || true
+        return 1
+    fi
     systemctl restart dnsmasq || return 1
     wait_for_service_active dnsmasq || { echo -e "${RED}错误: Dnsmasq 未能稳定运行。${NC}"; return 1; }
     echo -e "${BLUE}信息: 正在执行 DNS、HTTP 与 HTTPS 端到端自检...${NC}"
@@ -1082,6 +1223,9 @@ setup_dns_client() {
 
 perform_setup_dns_client() {
     local server_ip="$1" ipv6_choice enforce_dns
+
+    # 在修改 resolv.conf、systemd-resolved 或防火墙前先验证服务器真的可用。
+    validate_remote_dns_unlock_server "$server_ip" || return 1
 
     # 1) （推荐）禁用 systemd-resolved，避免 stub 劫持；解除 resolv.conf 软链
     disable_systemd_resolved_if_running || return 1
