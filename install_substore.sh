@@ -8,6 +8,7 @@ DEFAULT_DATA_DIR=/var/lib/sub-store
 DEFAULT_COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
 LEGACY_COMPOSE_FILE=/root/docker-compose.yml
 BACKUP_DIR=/var/backups/ai-scripts/sub-store
+ROLLBACK_IMAGE_KEEP=3
 COMPOSE_FILE="$DEFAULT_COMPOSE_FILE"
 DATA_DIR="$DEFAULT_DATA_DIR"
 
@@ -120,6 +121,34 @@ compose_matches_runtime() {
 safe_data_dir() {
     local dir=$1
     [[ -n $dir && $dir == /* && $dir != / && $dir != /root && $dir != /var && $dir != /opt ]]
+}
+
+cleanup_old_rollback_images() {
+    local keep=${1:-$ROLLBACK_IMAGE_KEEP}
+    local -a rollback_tags=()
+    local tag i
+
+    [[ $keep =~ ^[0-9]+$ ]] || keep=3
+
+    mapfile -t rollback_tags < <(
+        docker images xream/sub-store --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
+            | grep -E '^xream/sub-store:rollback-[0-9]{8}-[0-9]{6}$' \
+            | sort -r || true
+    )
+
+    if (( ${#rollback_tags[@]} <= keep )); then
+        return 0
+    fi
+
+    echo -e "${YELLOW}清理旧的 Sub-Store 回滚镜像，仅保留最近 ${keep} 个。${NC}"
+    for ((i=keep; i<${#rollback_tags[@]}; i++)); do
+        tag=${rollback_tags[$i]}
+        if docker image rm "$tag" >/dev/null 2>&1; then
+            echo -e "已删除旧回滚镜像：${CYAN}${tag}${NC}"
+        else
+            echo -e "${YELLOW}无法删除 ${tag}，可能仍被容器引用，已跳过。${NC}"
+        fi
+    done
 }
 
 restore_previous() {
@@ -336,6 +365,8 @@ EOF
         return 1
     fi
 
+    cleanup_old_rollback_images "$ROLLBACK_IMAGE_KEEP"
+
     public_ip=$(curl -4fsS --connect-timeout 5 --max-time 10 https://api.ipify.org 2>/dev/null || echo YOUR_SERVER_IP)
     display_host=$public_ip
     [[ $bind_address == 127.0.0.1 ]] && display_host=127.0.0.1
@@ -344,9 +375,10 @@ EOF
     echo -e "面板：${CYAN}http://${display_host}:${host_port}${NC}"
     echo -e "API：${CYAN}http://${display_host}:${host_port}/${secret_key}${NC}"
     echo -e "配置：${COMPOSE_FILE}；数据：${DATA_DIR}；日志限制：10MB × 3。"
+    echo -e "自动回滚镜像：最多保留最近 ${ROLLBACK_IMAGE_KEEP} 个。"
     [[ -n $compose_backup ]] && echo -e "更新前配置备份：${compose_backup}"
     [[ -n $data_backup ]] && echo -e "更新前数据备份：${data_backup}"
-    [[ -n $rollback_tag ]] && echo -e "更新前镜像保留为：${rollback_tag}"
+    [[ -n $rollback_tag ]] && echo -e "本次更新前镜像：${rollback_tag}"
 
     return 0
 }
