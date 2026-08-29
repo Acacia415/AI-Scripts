@@ -5,14 +5,20 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="1.0.2"
-SAVEANY_DIR="/opt/telegram"
-SAVEANY_BIN="${SAVEANY_DIR}/saveany-bot"
-SAVEANY_CONFIG="${SAVEANY_DIR}/config.toml"
-SAVEANY_SERVICE="/etc/systemd/system/saveany-bot.service"
-OPENLIST_DIR="/opt/openlist"
-STATE_FILE="/etc/saveanybot-manager.conf"
-OPENLIST_PORT="5244"
+SCRIPT_VERSION="1.1.0"
+SAVEANY_DIR="${SAVEANY_DIR:-/opt/telegram}"
+SAVEANY_BIN="${SAVEANY_BIN:-${SAVEANY_DIR}/saveany-bot}"
+SAVEANY_CONFIG="${SAVEANY_CONFIG:-${SAVEANY_DIR}/config.toml}"
+SAVEANY_SERVICE="${SAVEANY_SERVICE:-/etc/systemd/system/saveany-bot.service}"
+OPENLIST_DIR="${OPENLIST_DIR:-/opt/openlist}"
+OPENLIST_COMPOSE="${OPENLIST_COMPOSE:-${OPENLIST_DIR}/docker-compose.yml}"
+STATE_FILE="${STATE_FILE:-/etc/saveanybot-manager.conf}"
+OPENLIST_PORT="${OPENLIST_PORT:-5244}"
+BACKUP_ROOT="${BACKUP_ROOT:-/var/backups/saveanybot-manager}"
+BACKUP_KEEP="${BACKUP_KEEP:-5}"
+SAVEANY_READY_TIMEOUT="${SAVEANY_READY_TIMEOUT:-45}"
+OPENLIST_READY_ATTEMPTS="${OPENLIST_READY_ATTEMPTS:-30}"
+OPENLIST_READY_INTERVAL="${OPENLIST_READY_INTERVAL:-2}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -54,12 +60,17 @@ load_state() {
 }
 
 save_state() {
-  cat > "${STATE_FILE}" <<EOF
+  local state_dir temp_file
+  state_dir="$(dirname -- "${STATE_FILE}")"
+  install -d -m 755 "${state_dir}"
+  temp_file="$(mktemp "${state_dir}/.saveanybot-state.XXXXXXXX")"
+  chmod 600 "${temp_file}"
+  cat > "${temp_file}" <<EOF
 SAVEANY_DIR='${SAVEANY_DIR}'
 OPENLIST_DIR='${OPENLIST_DIR}'
 OPENLIST_PORT='${OPENLIST_PORT}'
 EOF
-  chmod 600 "${STATE_FILE}"
+  mv -f -- "${temp_file}" "${STATE_FILE}"
 }
 
 check_supported_os() {
@@ -87,15 +98,112 @@ install_base_packages() {
 }
 
 backup_file() {
-  local file="$1"
+  local file="$1" backup
   if [[ -f "${file}" ]]; then
-    local backup="${file}.bak-$(date +%Y%m%d-%H%M%S)"
+    backup="${file}.bak-$(date +%Y%m%d-%H%M%S)"
     cp -a "${file}" "${backup}"
     info "已备份：${backup}"
   fi
 }
 
+atomic_install_file() {
+  local source_file="$1" target_file="$2" mode="$3"
+  local target_dir temp_file
+  target_dir="$(dirname -- "${target_file}")"
+  install -d -m 755 "${target_dir}" || return 1
+  temp_file="$(mktemp "${target_dir}/.saveanybot-install.XXXXXXXX")" || return 1
+  if ! install -m "${mode}" "${source_file}" "${temp_file}" \
+      || ! mv -f -- "${temp_file}" "${target_file}"; then
+    rm -f -- "${temp_file}"
+    return 1
+  fi
+}
+
+snapshot_optional_file() {
+  local source_file="$1" backup_file_path="$2" missing_marker="$3"
+  if [[ -e "${source_file}" || -L "${source_file}" ]]; then
+    [[ -f "${source_file}" && ! -L "${source_file}" ]] || return 1
+    cp -a -- "${source_file}" "${backup_file_path}"
+  else
+    : > "${missing_marker}"
+  fi
+}
+
+restore_optional_file() {
+  local target_file="$1" backup_file_path="$2" missing_marker="$3" mode="$4"
+  if [[ -f "${missing_marker}" ]]; then
+    rm -f -- "${target_file}"
+  else
+    atomic_install_file "${backup_file_path}" "${target_file}" "${mode}" || return 1
+    chmod --reference="${backup_file_path}" "${target_file}" 2>/dev/null || chmod "${mode}" "${target_file}"
+  fi
+}
+
+prune_transaction_backups() {
+  local transaction_type="$1" backup_dir
+  local -a backups=()
+  [[ "${BACKUP_KEEP}" =~ ^[1-9][0-9]*$ ]] || BACKUP_KEEP=5
+  [[ -d "${BACKUP_ROOT}" ]] || return 0
+  while IFS= read -r backup_dir; do
+    backups+=("${backup_dir}")
+  done < <(find "${BACKUP_ROOT}" -mindepth 1 -maxdepth 1 -type d \
+    -name "${transaction_type}.transaction.*" -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | cut -d' ' -f2-)
+  if ((${#backups[@]} > BACKUP_KEEP)); then
+    for backup_dir in "${backups[@]:BACKUP_KEEP}"; do
+      if [[ -s "${backup_dir}/openlist.image.backup-tag" ]] && command -v docker >/dev/null 2>&1; then
+        docker image rm "$(< "${backup_dir}/openlist.image.backup-tag")" >/dev/null 2>&1 || true
+      fi
+      rm -rf -- "${backup_dir}"
+    done
+  fi
+}
+
+create_saveany_transaction_backup() {
+  local backup_dir active=false enabled=false
+  umask 077
+  install -d -m 700 "${BACKUP_ROOT}" || return 1
+  backup_dir="$(mktemp -d "${BACKUP_ROOT}/saveany.transaction.XXXXXXXX")" || return 1
+  snapshot_optional_file "${SAVEANY_BIN}" "${backup_dir}/saveany-bot" "${backup_dir}/binary.missing" || return 1
+  snapshot_optional_file "${SAVEANY_CONFIG}" "${backup_dir}/config.toml" "${backup_dir}/config.missing" || return 1
+  snapshot_optional_file "${SAVEANY_SERVICE}" "${backup_dir}/saveany-bot.service" "${backup_dir}/service.missing" || return 1
+  snapshot_optional_file "${STATE_FILE}" "${backup_dir}/manager.conf" "${backup_dir}/state.missing" || return 1
+  systemctl is-active --quiet saveany-bot 2>/dev/null && active=true
+  systemctl is-enabled --quiet saveany-bot 2>/dev/null && enabled=true
+  printf '%s\n' "${active}" > "${backup_dir}/service.active"
+  printf '%s\n' "${enabled}" > "${backup_dir}/service.enabled"
+  prune_transaction_backups saveany
+  printf '%s\n' "${backup_dir}"
+}
+
+restore_saveany_transaction() {
+  local backup_dir="$1" was_active was_enabled status=0
+  was_active="$(< "${backup_dir}/service.active")"
+  was_enabled="$(< "${backup_dir}/service.enabled")"
+  systemctl stop saveany-bot >/dev/null 2>&1 || true
+  restore_optional_file "${SAVEANY_BIN}" "${backup_dir}/saveany-bot" "${backup_dir}/binary.missing" 755 || status=1
+  restore_optional_file "${SAVEANY_CONFIG}" "${backup_dir}/config.toml" "${backup_dir}/config.missing" 600 || status=1
+  restore_optional_file "${SAVEANY_SERVICE}" "${backup_dir}/saveany-bot.service" "${backup_dir}/service.missing" 644 || status=1
+  restore_optional_file "${STATE_FILE}" "${backup_dir}/manager.conf" "${backup_dir}/state.missing" 600 || status=1
+  systemctl daemon-reload >/dev/null 2>&1 || status=1
+  if [[ "${was_enabled}" == true ]]; then
+    systemctl enable saveany-bot >/dev/null 2>&1 || status=1
+  else
+    systemctl disable saveany-bot >/dev/null 2>&1 || true
+  fi
+  if [[ "${was_active}" == true ]]; then
+    systemctl start saveany-bot >/dev/null 2>&1 || status=1
+  else
+    systemctl stop saveany-bot >/dev/null 2>&1 || true
+  fi
+  return "${status}"
+}
+
 toml_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+curl_config_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
@@ -128,14 +236,20 @@ validate_bot_token() {
 wait_for_saveanybot_ready() {
   local since="$1"
   local timeout="${2:-45}"
-  local elapsed=0 logs=""
+  local elapsed=0 logs="" invocation_id=""
+
+  invocation_id="$(systemctl show saveany-bot -p InvocationID --value 2>/dev/null || true)"
 
   while (( elapsed < timeout )); do
     if ! systemctl is-active --quiet saveany-bot; then
       return 1
     fi
 
-    logs="$(journalctl -u saveany-bot --since "${since}" --no-pager -o cat 2>/dev/null || true)"
+    if [[ "${invocation_id}" =~ ^[0-9a-fA-F]{32}$ && "${invocation_id}" != 00000000000000000000000000000000 ]]; then
+      logs="$(journalctl "_SYSTEMD_INVOCATION_ID=${invocation_id}" --no-pager -o cat 2>/dev/null || true)"
+    else
+      logs="$(journalctl -u saveany-bot --since "${since}" --no-pager -o cat 2>/dev/null || true)"
+    fi
     if grep -Fq 'Bot initialization completed.' <<<"${logs}"; then
       return 0
     fi
@@ -167,6 +281,113 @@ compose() {
   else
     return 127
   fi
+}
+
+create_openlist_transaction_backup() {
+  local backup_dir running=false image_id image_ref backup_tag
+  umask 077
+  install -d -m 700 "${BACKUP_ROOT}" || return 1
+  backup_dir="$(mktemp -d "${BACKUP_ROOT}/openlist.transaction.XXXXXXXX")" || return 1
+  snapshot_optional_file "${OPENLIST_COMPOSE}" "${backup_dir}/docker-compose.yml" "${backup_dir}/compose.missing" || return 1
+  snapshot_optional_file "${STATE_FILE}" "${backup_dir}/manager.conf" "${backup_dir}/state.missing" || return 1
+  if docker inspect openlist >/dev/null 2>&1; then
+    : > "${backup_dir}/container.exists"
+    docker inspect -f '{{.State.Running}}' openlist > "${backup_dir}/container.running" || return 1
+    image_id="$(docker inspect -f '{{.Image}}' openlist)" || return 1
+    image_ref="$(docker inspect -f '{{.Config.Image}}' openlist)" || return 1
+    printf '%s\n' "${image_id}" > "${backup_dir}/openlist.image.id"
+    printf '%s\n' "${image_ref}" > "${backup_dir}/openlist.image.ref"
+    backup_tag="saveanybot-manager-openlist-backup:$(basename -- "${backup_dir}")"
+    docker tag "${image_id}" "${backup_tag}" || return 1
+    printf '%s\n' "${backup_tag}" > "${backup_dir}/openlist.image.backup-tag"
+    [[ "$(< "${backup_dir}/container.running")" == true ]] && running=true
+  fi
+  printf '%s\n' "${running}" > "${backup_dir}/container.was-running"
+  prune_transaction_backups openlist
+  printf '%s\n' "${backup_dir}"
+}
+
+restore_openlist_transaction() {
+  local backup_dir="$1" was_running image_ref backup_tag status=0
+  was_running="$(< "${backup_dir}/container.was-running")"
+  docker rm -f openlist >/dev/null 2>&1 || true
+  restore_optional_file "${OPENLIST_COMPOSE}" "${backup_dir}/docker-compose.yml" "${backup_dir}/compose.missing" 600 || status=1
+  restore_optional_file "${STATE_FILE}" "${backup_dir}/manager.conf" "${backup_dir}/state.missing" 600 || status=1
+
+  if [[ -f "${backup_dir}/container.exists" ]]; then
+    image_ref="$(< "${backup_dir}/openlist.image.ref")"
+    backup_tag="$(< "${backup_dir}/openlist.image.backup-tag")"
+    if [[ "${image_ref}" != *@sha256:* ]]; then
+      docker tag "${backup_tag}" "${image_ref}" >/dev/null 2>&1 || status=1
+    fi
+    if [[ -f "${OPENLIST_COMPOSE}" ]]; then
+      if [[ "${was_running}" == true ]]; then
+        (cd "${OPENLIST_DIR}" && compose up -d) >/dev/null 2>&1 || status=1
+      else
+        (cd "${OPENLIST_DIR}" && compose create) >/dev/null 2>&1 || status=1
+      fi
+    else
+      error "原 OpenList 容器没有 Compose 文件，无法自动重建。"
+      status=1
+    fi
+  fi
+  return "${status}"
+}
+
+UPDATE_TRANSACTION_ACTIVE=false
+UPDATE_TRANSACTION_COMMITTED=false
+UPDATE_TRANSACTION_KIND=''
+UPDATE_TRANSACTION_BACKUP=''
+UPDATE_TRANSACTION_STAGE=''
+
+activate_update_transaction() {
+  UPDATE_TRANSACTION_KIND="$1"
+  UPDATE_TRANSACTION_BACKUP="$2"
+  UPDATE_TRANSACTION_STAGE="$3"
+  UPDATE_TRANSACTION_ACTIVE=true
+  UPDATE_TRANSACTION_COMMITTED=false
+  trap update_transaction_exit_trap EXIT
+  trap update_transaction_signal_trap INT TERM
+}
+
+rollback_active_update_transaction() {
+  local exit_status="${1:-1}" restore_status=0
+  [[ "${UPDATE_TRANSACTION_ACTIVE}" == true ]] || return "${exit_status}"
+  UPDATE_TRANSACTION_ACTIVE=false
+  trap - EXIT INT TERM
+  if [[ "${UPDATE_TRANSACTION_COMMITTED}" == true ]]; then
+    warn "${UPDATE_TRANSACTION_KIND} 更新失败，正在恢复更新前文件和运行状态..."
+    case "${UPDATE_TRANSACTION_KIND}" in
+      SaveAnyBot) restore_saveany_transaction "${UPDATE_TRANSACTION_BACKUP}" || restore_status=1 ;;
+      OpenList) restore_openlist_transaction "${UPDATE_TRANSACTION_BACKUP}" || restore_status=1 ;;
+      *) restore_status=1 ;;
+    esac
+    if ((restore_status == 0)); then
+      warn "已恢复更新前状态，事务备份保留在：${UPDATE_TRANSACTION_BACKUP}"
+    else
+      error "自动恢复未完全成功，请使用事务备份手动恢复：${UPDATE_TRANSACTION_BACKUP}"
+    fi
+  else
+    warn "更新在提交前停止，旧文件和运行状态没有修改。"
+  fi
+  [[ -z "${UPDATE_TRANSACTION_STAGE}" ]] || rm -rf -- "${UPDATE_TRANSACTION_STAGE}"
+  return "${exit_status}"
+}
+
+complete_update_transaction() {
+  UPDATE_TRANSACTION_ACTIVE=false
+  trap - EXIT INT TERM
+  [[ -z "${UPDATE_TRANSACTION_STAGE}" ]] || rm -rf -- "${UPDATE_TRANSACTION_STAGE}"
+}
+
+update_transaction_exit_trap() {
+  local exit_status=$?
+  rollback_active_update_transaction "${exit_status}" || true
+}
+
+update_transaction_signal_trap() {
+  rollback_active_update_transaction 130 || true
+  exit 130
 }
 
 install_docker() {
@@ -207,7 +428,7 @@ map_arch() {
 }
 
 download_saveanybot() {
-  local arch="$1"
+  local arch="$1" output_file="$2"
   local tmpdir release_json asset_url binary
   tmpdir="$(mktemp -d)"
   release_json="${tmpdir}/release.json"
@@ -256,12 +477,12 @@ download_saveanybot() {
     return 1
   fi
 
-  install -m 755 "${binary}" "${SAVEANY_BIN}.new"
+  install -m 755 "${binary}" "${output_file}"
   rm -rf "${tmpdir}"
 }
 
 write_default_config() {
-  local token user_id token_esc
+  local output_file="$1" token user_id token_esc
 
   printf "\n"
   info "创建 SaveAnyBot 初始配置。"
@@ -288,7 +509,7 @@ write_default_config() {
   fi
 
   token_esc="$(toml_escape "${token}")"
-  cat > "${SAVEANY_CONFIG}" <<EOF
+  cat > "${output_file}" <<EOF
 lang = "zh-CN"
 workers = 3
 retry = 3
@@ -316,11 +537,12 @@ id = ${user_id}
 storages = []
 blacklist = true
 EOF
-  chmod 600 "${SAVEANY_CONFIG}"
+  chmod 600 "${output_file}"
 }
 
 write_systemd_service() {
-  cat > "${SAVEANY_SERVICE}" <<EOF
+  local output_file="$1"
+  cat > "${output_file}" <<EOF
 [Unit]
 Description=SaveAnyBot
 Wants=network-online.target
@@ -336,7 +558,43 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
+  chmod 644 "${output_file}"
+}
+
+validate_saveany_stage() {
+  local stage_dir="$1"
+  [[ -s "${stage_dir}/saveany-bot" && -x "${stage_dir}/saveany-bot" ]] || {
+    error "候选 SaveAnyBot 二进制无效。"
+    return 1
+  }
+  [[ -s "${stage_dir}/config.toml" ]] || {
+    error "候选 SaveAnyBot 配置为空。"
+    return 1
+  }
+  grep -Fxq "ExecStart=${SAVEANY_BIN}" "${stage_dir}/saveany-bot.service" || {
+    error "候选 systemd service 的启动路径不正确。"
+    return 1
+  }
+  if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze verify "${stage_dir}/saveany-bot.service" >/dev/null 2>&1 || {
+      error "候选 SaveAnyBot systemd service 校验失败。"
+      return 1
+    }
+  fi
+}
+
+commit_saveany_stage() {
+  local stage_dir="$1" service_start_time="$2"
+  UPDATE_TRANSACTION_COMMITTED=true
+  systemctl stop saveany-bot >/dev/null 2>&1 || true
+  atomic_install_file "${stage_dir}/saveany-bot" "${SAVEANY_BIN}" 755 || return 1
+  atomic_install_file "${stage_dir}/config.toml" "${SAVEANY_CONFIG}" 600 || return 1
+  atomic_install_file "${stage_dir}/saveany-bot.service" "${SAVEANY_SERVICE}" 644 || return 1
+  systemctl daemon-reload || return 1
+  systemctl enable saveany-bot || return 1
+  systemctl start saveany-bot || return 1
+  wait_for_saveanybot_ready "${service_start_time}" "${SAVEANY_READY_TIMEOUT}" || return 1
+  save_state || return 1
 }
 
 install_saveanybot() {
@@ -351,85 +609,57 @@ install_saveanybot() {
     confirm "继续更新吗？" || return 0
   fi
 
-  local arch
+  local arch stage_dir backup_dir service_start_time
   arch="$(map_arch)"
-  download_saveanybot "${arch}"
-
-  if systemctl is-active --quiet saveany-bot 2>/dev/null; then
-    systemctl stop saveany-bot
+  stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/saveany-stage.XXXXXXXX")"
+  if ! download_saveanybot "${arch}" "${stage_dir}/saveany-bot"; then
+    rm -rf -- "${stage_dir}"
+    return 1
   fi
-
-  if [[ -f "${SAVEANY_BIN}" ]]; then
-    cp -a "${SAVEANY_BIN}" "${SAVEANY_BIN}.bak-$(date +%Y%m%d-%H%M%S)"
-  fi
-  mv -f "${SAVEANY_BIN}.new" "${SAVEANY_BIN}"
-  chmod 755 "${SAVEANY_BIN}"
 
   if [[ ! -f "${SAVEANY_CONFIG}" ]]; then
-    write_default_config
+    if ! write_default_config "${stage_dir}/config.toml"; then
+      rm -rf -- "${stage_dir}"
+      return 1
+    fi
   else
     info "检测到现有配置，已保留：${SAVEANY_CONFIG}"
-    chmod 600 "${SAVEANY_CONFIG}"
+    cp -a -- "${SAVEANY_CONFIG}" "${stage_dir}/config.toml"
+    chmod 600 "${stage_dir}/config.toml"
   fi
 
-  write_systemd_service
-  local service_start_time
+  write_systemd_service "${stage_dir}/saveany-bot.service"
+  validate_saveany_stage "${stage_dir}" || { rm -rf -- "${stage_dir}"; return 1; }
+  backup_dir="$(create_saveany_transaction_backup)" || {
+    rm -rf -- "${stage_dir}"
+    error "无法创建 SaveAnyBot 完整事务备份。"
+    return 1
+  }
+  activate_update_transaction SaveAnyBot "${backup_dir}" "${stage_dir}"
+  info "SaveAnyBot 更新前备份：${backup_dir}"
   service_start_time="$(date '+%Y-%m-%d %H:%M:%S')"
-  systemctl enable --now saveany-bot
-
-  info "等待机器人完成初始化，最长 45 秒..."
-  if wait_for_saveanybot_ready "${service_start_time}" 45; then
-    success "SaveAnyBot 已启动并完成机器人初始化。"
-    journalctl -u saveany-bot --since "${service_start_time}" --no-pager || true
-  else
+  info "等待机器人完成初始化，最长 ${SAVEANY_READY_TIMEOUT} 秒..."
+  if ! commit_saveany_stage "${stage_dir}" "${service_start_time}"; then
     error "SaveAnyBot 未完成初始化。systemd 进程可能仍处于运行状态，但机器人尚不可用。"
     journalctl -u saveany-bot --since "${service_start_time}" -n 80 --no-pager || true
     printf "\n"
     warn "常见原因：Bot Token 错误、服务器无法访问 Telegram、DNS异常或需要代理。"
+    rollback_active_update_transaction 1 || true
     return 1
   fi
 
-  save_state
+  complete_update_transaction
+  success "SaveAnyBot 已启动并完成机器人初始化。"
+  journalctl -u saveany-bot --since "${service_start_time}" --no-pager || true
   printf "\n"
   info "配置文件：${SAVEANY_CONFIG}"
   info "实时日志：journalctl -u saveany-bot -f -o cat"
   pause
 }
 
-install_openlist() {
-  clear
-  printf "${CYAN}=== 安装或更新 OpenList ===${NC}\n\n"
-  install_base_packages
-  install_docker
-
-  local input_port
-  read -r -p "OpenList 对外端口 [${OPENLIST_PORT}]: " input_port
-  OPENLIST_PORT="${input_port:-${OPENLIST_PORT}}"
-  if [[ ! "${OPENLIST_PORT}" =~ ^[0-9]+$ ]] || (( OPENLIST_PORT < 1 || OPENLIST_PORT > 65535 )); then
-    error "端口无效。"
-    return 1
-  fi
-
-  mkdir -p "${OPENLIST_DIR}/data"
-
-  if [[ -f "${OPENLIST_DIR}/docker-compose.yml" ]]; then
-    warn "检测到现有 OpenList Compose 配置。"
-    if confirm "是否用本脚本的配置覆盖？现有 data 目录不会删除。"; then
-      backup_file "${OPENLIST_DIR}/docker-compose.yml"
-    else
-      info "保留现有 Compose 配置，仅执行拉取和启动。"
-      (
-        cd "${OPENLIST_DIR}"
-        compose pull
-        compose up -d
-      )
-      save_state
-      pause
-      return 0
-    fi
-  fi
-
-  cat > "${OPENLIST_DIR}/docker-compose.yml" <<EOF
+write_openlist_compose() {
+  local output_file="$1"
+  cat > "${output_file}" <<EOF
 services:
   openlist:
     image: openlistteam/openlist:latest
@@ -443,22 +673,106 @@ services:
       - UMASK=022
       - TZ=Asia/Shanghai
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 EOF
+  chmod 600 "${output_file}"
+}
 
+validate_openlist_compose() {
+  local compose_file="$1"
+  compose -f "${compose_file}" config -q >/dev/null || {
+    error "候选 OpenList Compose 配置校验失败。"
+    return 1
+  }
+}
+
+wait_for_openlist_ready() {
+  local attempt http_code
+  for ((attempt=1; attempt<=OPENLIST_READY_ATTEMPTS; attempt++)); do
+    if [[ "$(docker inspect -f '{{.State.Running}}' openlist 2>/dev/null || true)" == true ]]; then
+      http_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 3 \
+        "http://127.0.0.1:${OPENLIST_PORT}/" 2>/dev/null || true)"
+      if [[ "${http_code}" =~ ^[23][0-9][0-9]$ ]]; then
+        return 0
+      fi
+    fi
+    sleep "${OPENLIST_READY_INTERVAL}"
+  done
+  return 1
+}
+
+commit_openlist_update() {
+  local stage_compose="$1" replace_compose="$2"
+  UPDATE_TRANSACTION_COMMITTED=true
+  if [[ "${replace_compose}" == true ]]; then
+    atomic_install_file "${stage_compose}" "${OPENLIST_COMPOSE}" 600 || return 1
+  fi
   (
     cd "${OPENLIST_DIR}"
     compose pull
     compose up -d
-  )
+  ) || return 1
+  wait_for_openlist_ready || return 1
+  save_state || return 1
+}
 
-  sleep 4
-  if ! docker ps --format '{{.Names}}' | grep -qx 'openlist'; then
-    error "OpenList 容器没有正常运行。"
-    docker logs --tail 100 openlist 2>/dev/null || true
+install_openlist() {
+  clear
+  printf "${CYAN}=== 安装或更新 OpenList ===${NC}\n\n"
+  install_base_packages
+  install_docker
+
+  local input_port previous_port requested_port stage_dir backup_dir replace_compose=true
+  previous_port="${OPENLIST_PORT}"
+  read -r -p "OpenList 对外端口 [${OPENLIST_PORT}]: " input_port
+  requested_port="${input_port:-${OPENLIST_PORT}}"
+  if [[ ! "${requested_port}" =~ ^[0-9]+$ ]] || (( requested_port < 1 || requested_port > 65535 )); then
+    error "端口无效。"
     return 1
   fi
 
-  save_state
+  mkdir -p "${OPENLIST_DIR}/data"
+  stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/openlist-stage.XXXXXXXX")"
+
+  if [[ -f "${OPENLIST_COMPOSE}" ]]; then
+    warn "检测到现有 OpenList Compose 配置。"
+    if confirm "是否用本脚本的配置覆盖？现有 data 目录不会删除。"; then
+      OPENLIST_PORT="${requested_port}"
+      write_openlist_compose "${stage_dir}/docker-compose.yml"
+    else
+      replace_compose=false
+      OPENLIST_PORT="${previous_port}"
+      cp -a -- "${OPENLIST_COMPOSE}" "${stage_dir}/docker-compose.yml"
+      info "保留现有 Compose 配置和端口，仅更新镜像并重建容器。"
+    fi
+  else
+    OPENLIST_PORT="${requested_port}"
+    write_openlist_compose "${stage_dir}/docker-compose.yml"
+  fi
+
+  if ! validate_openlist_compose "${stage_dir}/docker-compose.yml"; then
+    rm -rf -- "${stage_dir}"
+    return 1
+  fi
+  backup_dir="$(create_openlist_transaction_backup)" || {
+    rm -rf -- "${stage_dir}"
+    error "无法创建 OpenList 完整事务备份。"
+    return 1
+  }
+  activate_update_transaction OpenList "${backup_dir}" "${stage_dir}"
+  info "OpenList 更新前备份：${backup_dir}"
+  if ! commit_openlist_update "${stage_dir}/docker-compose.yml" "${replace_compose}"; then
+    error "OpenList 容器未通过运行状态和 HTTP 健康检查。"
+    docker logs --tail 100 openlist 2>/dev/null || true
+    rollback_active_update_transaction 1 || true
+    return 1
+  fi
+
+  complete_update_transaction
   local addr
   addr="$(get_public_address)"
   success "OpenList 已启动：http://${addr}:${OPENLIST_PORT}"
@@ -499,7 +813,7 @@ ${CYAN}完成网盘挂载后，还需要在 OpenList 中进行以下操作：${N
 2. 新建文件夹：SaveAnyBot
    最终路径应为：${folder_path}
 3. 进入：后台 → 用户 → 新建用户
-4. 用户的“基本路径”填写：${folder_path}
+4. 用户的【基本路径】填写：${folder_path}
 5. 至少启用以下权限：
    - 写入/上传或创建目录
    - 重命名
@@ -730,15 +1044,33 @@ EOF
   rm -f "${block_file}" "${new_file}"
 }
 
-test_webdav() {
+test_webdav() (
   local url="$1"
   local username="$2"
   local password="$3"
-  local code test_name tmpfile
+  local code test_name temp_dir auth_file propfind_response put_response upload_file
+  local username_esc password_esc
+
+  if [[ "${username}" == *:* || "${username}" == *$'\n'* || "${username}" == *$'\r'* \
+      || "${password}" == *$'\n'* || "${password}" == *$'\r'* ]]; then
+    error "WebDAV 用户名不能包含冒号，用户名和密码不能包含换行符。"
+    return 1
+  fi
+  umask 077
+  temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/saveanybot-webdav.XXXXXXXX")" || return 1
+  chmod 700 "${temp_dir}"
+  trap 'rm -rf -- "${temp_dir}"' EXIT
+  auth_file="${temp_dir}/curl.conf"
+  propfind_response="${temp_dir}/propfind.xml"
+  put_response="${temp_dir}/put.txt"
+  upload_file="${temp_dir}/upload.txt"
+  username_esc="$(curl_config_escape "${username}")"
+  password_esc="$(curl_config_escape "${password}")"
+  printf 'user = "%s:%s"\n' "${username_esc}" "${password_esc}" > "${auth_file}"
+  chmod 600 "${auth_file}"
 
   info "测试 WebDAV 读取权限..."
-  code="$(curl -sS -o /tmp/saveanybot-propfind.xml -w '%{http_code}' \
-    --user "${username}:${password}" \
+  code="$(curl --config "${auth_file}" -sS -o "${propfind_response}" -w '%{http_code}' \
     -X PROPFIND -H 'Depth: 1' "${url}" || true)"
   if [[ "${code}" != "207" ]]; then
     error "PROPFIND 测试失败，HTTP 状态码：${code:-无响应}"
@@ -748,13 +1080,11 @@ test_webdav() {
   success "WebDAV 读取测试通过（207）。"
 
   info "测试 WebDAV 写入权限..."
-  test_name="saveanybot-manager-test-$(date +%s).txt"
-  tmpfile="$(mktemp)"
-  printf 'SaveAnyBot WebDAV test\n' > "${tmpfile}"
-  code="$(curl -sS -o /tmp/saveanybot-put.txt -w '%{http_code}' \
-    --user "${username}:${password}" \
-    -T "${tmpfile}" "${url}${test_name}" || true)"
-  rm -f "${tmpfile}"
+  test_name="saveanybot-manager-test-$(date +%s)-${RANDOM}.txt"
+  printf 'SaveAnyBot WebDAV test\n' > "${upload_file}"
+  chmod 600 "${upload_file}"
+  code="$(curl --config "${auth_file}" -sS -o "${put_response}" -w '%{http_code}' \
+    -T "${upload_file}" "${url}${test_name}" || true)"
 
   if [[ "${code}" != "201" && "${code}" != "204" ]]; then
     error "PUT 测试失败，HTTP 状态码：${code:-无响应}"
@@ -763,9 +1093,9 @@ test_webdav() {
   fi
   success "WebDAV 写入测试通过（${code}）。"
 
-  curl -sS --user "${username}:${password}" -X DELETE \
+  curl --config "${auth_file}" -sS -X DELETE \
     "${url}${test_name}" >/dev/null 2>&1 || true
-}
+)
 
 add_cloud_storage() {
   local kind="$1" default_name="$2" default_mount="$3" default_user="$4"
@@ -846,8 +1176,9 @@ add_generic_storage() {
 
 create_backup_archive() {
   local scope="${1:-all}"
-  local output="/root/saveany-openlist-backup-${scope}-$(date +%Y%m%d-%H%M%S).tar.gz"
+  local output
   local items=()
+  output="/root/saveany-openlist-backup-${scope}-$(date +%Y%m%d-%H%M%S).tar.gz"
 
   case "${scope}" in
     saveany)
@@ -1165,4 +1496,6 @@ main() {
   done
 }
 
-main "$@"
+if [[ "${SAVEANYBOT_MANAGER_SOURCE_ONLY:-0}" != 1 ]]; then
+  main "$@"
+fi
