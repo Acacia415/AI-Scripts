@@ -52,16 +52,54 @@ install_docker() {
     systemctl enable --now docker
 }
 
-compose_secret() {
+compose_config() {
     local file=$1
+    if docker compose version >/dev/null 2>&1; then
+        docker compose -p sub-store -f "$file" config
+    else
+        docker-compose -p sub-store -f "$file" config
+    fi
+}
+
+compose_environment_value() {
+    local file=$1 key=$2 config value
     [[ -f $file ]] || return 1
-    sed -n -E 's|^[[:space:]]*-[[:space:]]*SUB_STORE_FRONTEND_BACKEND_PATH[[:space:]]*=[[:space:]]*"?/([^"[:space:]]+)"?[[:space:]]*$|\1|p; s|^[[:space:]]*SUB_STORE_FRONTEND_BACKEND_PATH[[:space:]]*:[[:space:]]*"?/([^"[:space:]]+)"?[[:space:]]*$|\1|p' "$file" | head -n1
+    # 由 Compose 处理列表/映射、引号、env_file 和变量插值，再读取规范化的单个服务。
+    config=$(compose_config "$file") || return 1
+    value=$(awk -v key="$key" '
+        /^  sub-store:$/ { service=1; next }
+        /^  [^ ]/ { service=0 }
+        service && /^    environment:$/ { env=1; next }
+        /^    [^ ]/ { env=0 }
+        service && env && $1 == key ":" {
+            sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "")
+            print; found=1; exit
+        }
+        END { if (!found) exit 1 }
+    ' <<< "$config") || return 1
+    case "$value" in
+        \"*\") value=${value:1:${#value}-2} ;;
+        \'*\') value=${value:1:${#value}-2} ;;
+    esac
+    printf '%s\n' "$value"
+}
+
+compose_backend_path() {
+    compose_environment_value "$1" SUB_STORE_FRONTEND_BACKEND_PATH
 }
 
 compose_cors_origins() {
-    local file=$1
-    [[ -f $file ]] || return 1
-    sed -n -E 's|^[[:space:]]*-[[:space:]]*SUB_STORE_CORS_ALLOWED_ORIGINS[[:space:]]*=[[:space:]]*"?([^"]+)"?[[:space:]]*$|\1|p; s|^[[:space:]]*SUB_STORE_CORS_ALLOWED_ORIGINS[[:space:]]*:[[:space:]]*"?([^"]+)"?[[:space:]]*$|\1|p' "$file" | head -n1
+    compose_environment_value "$1" SUB_STORE_CORS_ALLOWED_ORIGINS
+}
+
+preferred_cors_origins() {
+    local file=$1 runtime_value=$2 configured_value
+    if [[ -n $file ]] && configured_value=$(compose_cors_origins "$file"); then
+        # Compose 中显式设置为空也应被保留，以便重新询问，而不是还原旧容器的值。
+        printf '%s\n' "$configured_value"
+    else
+        printf '%s\n' "$runtime_value"
+    fi
 }
 
 compose_data_dir() {
@@ -114,12 +152,12 @@ compose_host_port() {
 }
 
 compose_matches_runtime() {
-    local file=$1 expected_secret=$2 expected_data=$3
-    local file_secret='' file_data=''
+    local file=$1 expected_path=$2 expected_data=$3
+    local file_path='' file_data=''
     [[ -f $file ]] || return 1
-    file_secret=$(compose_secret "$file" 2>/dev/null || true)
+    file_path=$(compose_backend_path "$file" 2>/dev/null || true)
     file_data=$(compose_data_dir "$file" 2>/dev/null || true)
-    [[ -n $file_secret && -n $file_data && $file_secret == "$expected_secret" && $file_data == "$expected_data" ]]
+    [[ -n $file_path && -n $file_data && $file_path == "$expected_path" && $file_data == "$expected_data" ]]
 }
 
 safe_data_dir() {
@@ -127,9 +165,87 @@ safe_data_dir() {
     [[ -n $dir && $dir == /* && $dir != / && $dir != /root && $dir != /var && $dir != /opt ]]
 }
 
-valid_origin() {
-    local origin=$1
-    [[ $origin =~ ^https?://[^/]+$ ]]
+valid_backend_path() {
+    [[ $1 =~ ^/[A-Za-z0-9._~%/-]*$ && $1 != *'//'* ]]
+}
+
+normalize_origin() {
+    local origin=${1%/} scheme host port label address compressed=false
+    local -a labels=()
+    local pattern='^(https?)://(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?)(:([0-9]{1,5}))?$'
+    [[ $origin =~ $pattern ]] || return 1
+    scheme=${BASH_REMATCH[1]}
+    host=${BASH_REMATCH[2],,}
+    port=${BASH_REMATCH[5]}
+    if [[ $host == \[* ]]; then
+        address=${host:1:${#host}-2}
+        [[ $address == *:* && $address != *:::* ]] || return 1
+        if [[ $address == *::* ]]; then
+            compressed=true
+            [[ ${address#*::} != *::* ]] || return 1
+            address=${address/::/:}
+            address=${address#:}
+            address=${address%:}
+        else
+            [[ $address != :* && $address != *: ]] || return 1
+        fi
+        IFS=':' read -r -a labels <<< "$address"
+        if $compressed; then
+            ((${#labels[@]} < 8)) || return 1
+        else
+            ((${#labels[@]} == 8)) || return 1
+        fi
+        for label in "${labels[@]}"; do
+            [[ $label =~ ^[0-9a-f]{1,4}$ ]] || return 1
+        done
+    else
+        [[ $host != *'..'* && ${#host} -le 253 ]] || return 1
+        IFS='.' read -r -a labels <<< "$host"
+        for label in "${labels[@]}"; do
+            [[ ${#label} -le 63 && $label != -* && $label != *- ]] || return 1
+        done
+        if [[ $host =~ ^[0-9.]+$ ]]; then
+            ((${#labels[@]} == 4)) || return 1
+            for label in "${labels[@]}"; do
+                [[ $label == 0 || $label =~ ^[1-9][0-9]{0,2}$ ]] || return 1
+                ((10#$label <= 255)) || return 1
+            done
+        fi
+    fi
+    if [[ -n $port ]]; then
+        ((10#$port >= 1 && 10#$port <= 65535)) || return 1
+        port=$((10#$port))
+        if [[ $scheme == http && $port == 80 || $scheme == https && $port == 443 ]]; then
+            port=''
+        fi
+    fi
+    printf '%s://%s%s\n' "$scheme" "$host" "${port:+:$port}"
+}
+
+normalize_cors_origins() {
+    local value=$1 origin normalized result='' wildcard=false
+    local -a origins=()
+    value=${value//，/,}
+    value=${value//[[:space:]]/,}
+    IFS=',' read -r -a origins <<< "$value"
+    for origin in "${origins[@]}"; do
+        origin=${origin#"${origin%%[![:space:]]*}"}
+        origin=${origin%"${origin##*[![:space:]]}"}
+        [[ -n $origin ]] || continue
+        if [[ $origin == '*' ]]; then
+            wildcard=true
+            continue
+        fi
+        normalized=$(normalize_origin "$origin") || return 1
+        result=$(append_origin "$result" "$normalized")
+    done
+    if $wildcard; then
+        printf '*\n'
+    elif [[ -n $result ]]; then
+        printf '%s\n' "$result"
+    else
+        return 1
+    fi
 }
 
 append_origin() {
@@ -144,18 +260,25 @@ append_origin() {
 }
 
 prompt_custom_origin() {
-    local current=$1 origin=''
-    read -r -p '浏览器访问 Origin [可留空；例如 https://sub-store.example.com]: ' origin
-    origin=${origin%/}
-    if [[ -z $origin ]]; then
-        printf '%s\n' "$current"
+    local current=$1 origin='' normalized
+    echo 'CORS 填写浏览器打开前端的协议 + 域名/IP + 可选端口，不带 API 路径、查询参数。' >&2
+    echo '例如 https://sub.example.com 或 http://192.0.2.10:3001；多个来源用逗号分隔。' >&2
+    echo "当前允许来源：${current:-尚未配置}" >&2
+    echo '输入完整列表会替换当前值；已有配置可回车保留；仅使用官方前端可输入 official。' >&2
+    while true; do
+        read -r -p '允许的前端 Origin: ' origin || return 1
+        [[ $origin != official ]] || origin=$DEFAULT_CORS_ALLOWED_ORIGINS
+        origin=${origin:-$current}
+        if ! normalized=$(normalize_cors_origins "$origin"); then
+            echo -e "${RED}请填写有效的前端来源。首次配置不能留空；端口范围为 1–65535。${NC}" >&2
+            continue
+        fi
+        if [[ $normalized == '*' ]]; then
+            echo -e "${YELLOW}警告: * 会允许任意网站通过浏览器读取后端响应。${NC}" >&2
+        fi
+        printf '%s\n' "$normalized"
         return 0
-    fi
-    if ! valid_origin "$origin"; then
-        echo -e "${RED}Origin 格式无效，只填写协议 + 域名/IP + 可选端口，不要带路径。${NC}" >&2
-        return 1
-    fi
-    append_origin "$current" "$origin"
+    done
 }
 
 cleanup_old_rollback_images() {
@@ -186,28 +309,117 @@ cleanup_old_rollback_images() {
     done
 }
 
-backend_health_check() {
-    local host_port=$1 secret_key=$2 cors_origins=$3
-    local url="http://127.0.0.1:${host_port}/${secret_key}/api/utils/env"
-    local origin
+health_request() {
+    local method=$1 url=$2 headers=$3 body=$4 origin=${5:-}
+    local -a args=()
+    [[ -z $origin ]] || args+=(-H "Origin: $origin")
+    if [[ $method == OPTIONS ]]; then
+        args+=(-H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type')
+    fi
+    curl --silent --show-error --noproxy '*' --connect-timeout 2 --max-time 5 \
+        -X "$method" -D "$headers" -o "$body" -w '%{http_code}' "${args[@]}" "$url"
+}
 
-    curl -fsS --connect-timeout 3 --max-time 10 "http://127.0.0.1:${host_port}/" >/dev/null 2>&1 || return 1
-    curl -fsS --connect-timeout 3 --max-time 10 "$url" >/dev/null 2>&1 || return 1
+health_header() {
+    local file=$1 name=$2
+    awk -v name="$name" '
+        { sub(/\r$/, "") }
+        tolower($0) ~ "^" tolower(name) ":[[:space:]]*" {
+            sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]*$/, ""); print
+        }
+    ' "$file"
+}
 
-    if [[ $cors_origins == '*' ]]; then
-        curl -fsS --connect-timeout 3 --max-time 10 \
-            -H 'Origin: https://sub-store-health.invalid' "$url" >/dev/null 2>&1 || return 1
-        return 0
+health_api_json() {
+    local headers=$1 body=$2 content_type
+    content_type=$(health_header "$headers" Content-Type)
+    [[ ${content_type,,} == application/json* ]] || return 1
+    # 使用镜像内已有的 Node.js 解析 JSON，不要求宿主机另装 jq/Node.js。
+    docker exec -i sub-store node -e '
+        try {
+            const r = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            if (r.status !== "success" || r.data?.backend !== "Node" ||
+                typeof r.data?.version !== "string" || !r.data.version) process.exit(1);
+        } catch { process.exit(1); }
+    ' < "$body"
+}
+
+backend_health_check() (
+    local host_port=$1 backend_path=$2 cors_origins=$3
+    local base="http://127.0.0.1:${host_port}" url origin expected status attempt ready=false
+    local headers body health_dir methods allowed_headers blocked_origin
+    local -a origins=()
+    url="${base}${backend_path}/api/utils/env"
+    [[ $backend_path != / ]] || url="${base}/api/utils/env"
+    health_dir=$(mktemp -d /tmp/substore-health.XXXXXX) || return 1
+    trap 'rm -f -- "$health_dir/headers" "$health_dir/body"; rmdir -- "$health_dir"' EXIT
+    headers="$health_dir/headers"
+    body="$health_dir/body"
+
+    echo '正在等待 Sub-Store 前后端就绪，并验证 API/CORS...'
+    for ((attempt=1; attempt<=12; attempt++)); do
+        if [[ $(docker inspect -f '{{.State.Running}}' sub-store 2>/dev/null || true) == true ]] \
+            && status=$(health_request GET "$base/" "$headers" "$body" 2>/dev/null) && [[ $status == 200 ]] \
+            && status=$(health_request GET "$url" "$headers" "$body" 2>/dev/null) && [[ $status == 200 ]] \
+            && health_api_json "$headers" "$body"; then
+            ready=true
+            break
+        fi
+        echo "等待服务启动 (${attempt}/12)..."
+        sleep 2
+    done
+    if ! $ready; then
+        echo -e "${RED}前端或后端 API 未就绪，或 API 未返回有效的 Sub-Store JSON。${NC}" >&2
+        return 1
     fi
 
     IFS=',' read -r -a origins <<< "$cors_origins"
+    [[ $cors_origins != '*' ]] || origins=('https://sub-store-health.invalid')
     for origin in "${origins[@]}"; do
-        origin=$(printf '%s' "$origin" | xargs)
-        [[ -n $origin ]] || continue
-        curl -fsS --connect-timeout 3 --max-time 10 \
-            -H "Origin: $origin" "$url" >/dev/null 2>&1 || return 1
+        expected=$origin
+        if [[ $cors_origins == '*' ]]; then
+            expected='*'
+        else
+            # 与上游 new URL(origin).origin 的标准化一致（尤其是 IPv6 压缩）。
+            expected=$(docker exec sub-store node -p 'new URL(process.argv[1]).origin' "$origin") || return 1
+            expected=${expected%$'\r'}
+        fi
+        if ! status=$(health_request GET "$url" "$headers" "$body" "$origin") \
+            || [[ $status != 200 ]] || ! health_api_json "$headers" "$body" \
+            || [[ $(health_header "$headers" Access-Control-Allow-Origin) != "$expected" ]]; then
+            echo -e "${RED}CORS API 响应验证失败，前端来源: ${origin}${NC}" >&2
+            return 1
+        fi
+        if ! status=$(health_request OPTIONS "$url" "$headers" "$body" "$origin") \
+            || [[ ! $status =~ ^2[0-9][0-9]$ ]] \
+            || [[ $(health_header "$headers" Access-Control-Allow-Origin) != "$expected" ]]; then
+            echo -e "${RED}CORS OPTIONS 预检失败，前端来源: ${origin}${NC}" >&2
+            return 1
+        fi
+        methods=$(health_header "$headers" Access-Control-Allow-Methods)
+        allowed_headers=$(health_header "$headers" Access-Control-Allow-Headers)
+        methods=${methods//[[:space:]]/}
+        allowed_headers=${allowed_headers//[[:space:]]/}
+        if [[ ,${methods^^}, != *,POST,* || ,${allowed_headers,,}, != *,content-type,* ]]; then
+            echo -e "${RED}CORS 预检未允许 POST / Content-Type，前端来源: ${origin}${NC}" >&2
+            return 1
+        fi
     done
-}
+
+    if [[ $cors_origins != '*' ]]; then
+        # 验证白名单确实生效，防止代理/旧后端仍允许任意来源。
+        blocked_origin="https://sub-store-denied-${RANDOM}-${RANDOM}.invalid"
+        while [[ ,$cors_origins, == *,$blocked_origin,* ]]; do
+            blocked_origin="https://sub-store-denied-${RANDOM}-${RANDOM}.invalid"
+        done
+        if ! status=$(health_request OPTIONS "$url" "$headers" "$body" "$blocked_origin") \
+            || [[ $status != 403 ]] || [[ -n $(health_header "$headers" Access-Control-Allow-Origin) ]]; then
+            echo -e "${RED}CORS 白名单验证失败：未阻止名单外的来源。${NC}" >&2
+            return 1
+        fi
+    fi
+    echo -e "${GREEN}前后端及 CORS 检查通过（API JSON、来源响应头、POST 预检）。${NC}"
+)
 
 restore_previous() {
     local compose_backup=${1:-}
@@ -238,8 +450,12 @@ restore_previous() {
     fi
 }
 
-install_substore() {
+require_substore_root() {
     [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo -e "${RED}请使用 root 权限运行。${NC}"; return 1; }
+}
+
+install_substore() {
+    require_substore_root || return 1
 
     install_docker
     if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
@@ -250,7 +466,7 @@ install_substore() {
         return 1
     }
 
-    local timestamp secret_key='' cors_allowed_origins='' bind_address='' host_port='3001' public_ip display_host
+    local timestamp backend_path='' cors_allowed_origins='' bind_address='' host_port='3001' public_ip display_host
     local existing_install=false container_exists=false source_compose='' compose_label=''
     local previous_image_id='' rollback_tag='' compose_backup='' data_backup=''
 
@@ -268,8 +484,8 @@ install_substore() {
             return 1
         fi
 
-        secret_key=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' sub-store 2>/dev/null \
-            | sed -n 's|^SUB_STORE_FRONTEND_BACKEND_PATH=/\(.*\)$|\1|p' | head -n1 || true)
+        backend_path=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' sub-store 2>/dev/null \
+            | sed -n 's|^SUB_STORE_FRONTEND_BACKEND_PATH=\(.*\)$|\1|p' | head -n1 || true)
         cors_allowed_origins=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' sub-store 2>/dev/null \
             | sed -n 's|^SUB_STORE_CORS_ALLOWED_ORIGINS=\(.*\)$|\1|p' | head -n1 || true)
         DATA_DIR=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/opt/app/data"}}{{println .Source}}{{end}}{{end}}' sub-store 2>/dev/null | head -n1 || true)
@@ -281,11 +497,11 @@ install_substore() {
         bind_address=${bind_address:-0.0.0.0}
         host_port=${host_port:-3001}
 
-        if compose_matches_runtime "$DEFAULT_COMPOSE_FILE" "$secret_key" "$DATA_DIR"; then
+        if compose_matches_runtime "$DEFAULT_COMPOSE_FILE" "$backend_path" "$DATA_DIR"; then
             source_compose="$DEFAULT_COMPOSE_FILE"
-        elif compose_matches_runtime "$LEGACY_COMPOSE_FILE" "$secret_key" "$DATA_DIR"; then
+        elif compose_matches_runtime "$LEGACY_COMPOSE_FILE" "$backend_path" "$DATA_DIR"; then
             source_compose="$LEGACY_COMPOSE_FILE"
-        elif [[ -n $compose_label && -f $compose_label ]] && compose_matches_runtime "$compose_label" "$secret_key" "$DATA_DIR"; then
+        elif [[ -n $compose_label && -f $compose_label ]] && compose_matches_runtime "$compose_label" "$backend_path" "$DATA_DIR"; then
             source_compose="$compose_label"
         fi
     fi
@@ -296,12 +512,12 @@ install_substore() {
 
         if [[ -f $DEFAULT_COMPOSE_FILE ]] && grep -q 'xream/sub-store' "$DEFAULT_COMPOSE_FILE"; then
             default_exists=true
-            default_secret=$(compose_secret "$DEFAULT_COMPOSE_FILE" 2>/dev/null || true)
+            default_secret=$(compose_backend_path "$DEFAULT_COMPOSE_FILE" 2>/dev/null || true)
             default_data=$(compose_data_dir "$DEFAULT_COMPOSE_FILE" 2>/dev/null || true)
         fi
         if [[ -f $LEGACY_COMPOSE_FILE ]] && grep -q 'xream/sub-store' "$LEGACY_COMPOSE_FILE"; then
             legacy_exists=true
-            legacy_secret=$(compose_secret "$LEGACY_COMPOSE_FILE" 2>/dev/null || true)
+            legacy_secret=$(compose_backend_path "$LEGACY_COMPOSE_FILE" 2>/dev/null || true)
             legacy_data=$(compose_data_dir "$LEGACY_COMPOSE_FILE" 2>/dev/null || true)
         fi
 
@@ -318,7 +534,7 @@ install_substore() {
         fi
 
         if $existing_install; then
-            secret_key=$(compose_secret "$source_compose" 2>/dev/null || true)
+            backend_path=$(compose_backend_path "$source_compose" 2>/dev/null || true)
             cors_allowed_origins=$(compose_cors_origins "$source_compose" 2>/dev/null || true)
             DATA_DIR=$(compose_data_dir "$source_compose" 2>/dev/null || true)
             bind_address=$(compose_bind_address "$source_compose" 2>/dev/null || true)
@@ -330,7 +546,7 @@ install_substore() {
     fi
 
     if $existing_install; then
-        [[ -n $secret_key ]] || {
+        [[ -n $backend_path ]] || {
             echo -e "${RED}检测到已有 Sub-Store，但无法读取现有 API 路径。为避免修改现有 API，已停止更新。${NC}"
             return 1
         }
@@ -349,20 +565,17 @@ install_substore() {
             COMPOSE_FILE="$DEFAULT_COMPOSE_FILE"
         fi
 
-        if [[ -z $cors_allowed_origins ]]; then
-            echo -e "${YELLOW}现有安装没有 CORS allowlist。Sub-Store 2.38+ 已收紧浏览器 Origin。${NC}"
-            cors_allowed_origins=$(prompt_custom_origin "$DEFAULT_CORS_ALLOWED_ORIGINS") || return 1
-        fi
+        cors_allowed_origins=$(preferred_cors_origins "$source_compose" "$cors_allowed_origins") || return 1
 
-        echo -e "${GREEN}检测到已有 Sub-Store，将保持现有 API、数据目录、监听方式和 CORS 设置。${NC}"
-        echo -e "API 路径：${CYAN}/${secret_key}${NC}"
+        echo -e "${GREEN}检测到已有 Sub-Store，将保持现有 API、数据目录和监听方式，并确认 CORS 设置。${NC}"
+        echo -e "API 路径：${CYAN}${backend_path}${NC}"
         echo -e "数据目录：${CYAN}${DATA_DIR}${NC}"
         echo -e "CORS：${CYAN}${cors_allowed_origins}${NC}"
         echo -e "配置文件：${CYAN}${COMPOSE_FILE}${NC}"
     else
         COMPOSE_FILE="$DEFAULT_COMPOSE_FILE"
         DATA_DIR="$DEFAULT_DATA_DIR"
-        secret_key=$(openssl rand -hex 16)
+        backend_path="/$(openssl rand -hex 16)"
 
         read -r -p '监听地址 [127.0.0.1，输入 0.0.0.0 可公网访问]: ' bind_address
         bind_address=${bind_address:-127.0.0.1}
@@ -370,11 +583,15 @@ install_substore() {
             echo -e "${RED}只允许 127.0.0.1 或 0.0.0.0。${NC}"
             return 1
         }
-
-        cors_allowed_origins=$(prompt_custom_origin "$DEFAULT_CORS_ALLOWED_ORIGINS") || return 1
-        install -d -m 700 "$DATA_DIR"
     fi
 
+    if ! valid_backend_path "$backend_path"; then
+        echo -e "${RED}现有 API 路径格式不受支持，已停止更新，请检查路径配置。${NC}"
+        return 1
+    fi
+    [[ $backend_path != / ]] || echo -e "${YELLOW}保留现有根路径 /：后端没有随机路径保护。${NC}"
+    cors_allowed_origins=$(prompt_custom_origin "$cors_allowed_origins") || return 1
+    [[ $existing_install == true ]] || install -d -m 700 "$DATA_DIR"
     mkdir -p -- "$(dirname "$COMPOSE_FILE")" "$DATA_DIR"
 
     if [[ -f $COMPOSE_FILE ]]; then
@@ -399,7 +616,7 @@ services:
     container_name: sub-store
     restart: unless-stopped
     environment:
-      SUB_STORE_FRONTEND_BACKEND_PATH: /$secret_key
+      SUB_STORE_FRONTEND_BACKEND_PATH: "$backend_path"
       SUB_STORE_CORS_ALLOWED_ORIGINS: "$cors_allowed_origins"
     ports:
       - "$bind_address:$host_port:3001"
@@ -425,9 +642,7 @@ EOF
         return 1
     fi
 
-    sleep 3
-    if [[ $(docker inspect -f '{{.State.Running}}' sub-store 2>/dev/null || true) != true ]] \
-        || ! backend_health_check "$host_port" "$secret_key" "$cors_allowed_origins"; then
+    if ! backend_health_check "$host_port" "$backend_path" "$cors_allowed_origins"; then
         echo -e "${RED}容器未通过前端、后端 API 或 CORS 健康检查，正在回滚。${NC}"
         restore_previous "$compose_backup" "$data_backup" "$rollback_tag"
         return 1
@@ -441,7 +656,7 @@ EOF
 
     echo -e "${GREEN}Sub-Store 已启动。${NC}"
     echo -e "面板：${CYAN}http://${display_host}:${host_port}${NC}"
-    echo -e "API：${CYAN}http://${display_host}:${host_port}/${secret_key}${NC}"
+    echo -e "API：${CYAN}http://${display_host}:${host_port}${backend_path}${NC}"
     echo -e "配置：${COMPOSE_FILE}；数据：${DATA_DIR}；日志限制：10MB × 3。"
     echo -e "CORS：${cors_allowed_origins}"
     echo -e "自动回滚镜像：最多保留最近 ${ROLLBACK_IMAGE_KEEP} 个。"
@@ -452,4 +667,6 @@ EOF
     return 0
 }
 
-install_substore
+if [[ ${SUBSTORE_SOURCE_ONLY:-0} != 1 ]]; then
+    install_substore
+fi
