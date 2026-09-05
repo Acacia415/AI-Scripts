@@ -61,7 +61,7 @@ compose_secret() {
 compose_cors_origins() {
     local file=$1
     [[ -f $file ]] || return 1
-    sed -n -E 's|^[[:space:]]*-[[:space:]]*SUB_STORE_CORS_ALLOWED_ORIGINS[[:space:]]*=[[:space:]]*["'"']?([^"'"']+)["'"']?[[:space:]]*$|\1|p; s|^[[:space:]]*SUB_STORE_CORS_ALLOWED_ORIGINS[[:space:]]*:[[:space:]]*["'"']?([^"'"']+)["'"']?[[:space:]]*$|\1|p' "$file" | head -n1
+    sed -n -E 's|^[[:space:]]*-[[:space:]]*SUB_STORE_CORS_ALLOWED_ORIGINS[[:space:]]*=[[:space:]]*"?([^"]+)"?[[:space:]]*$|\1|p; s|^[[:space:]]*SUB_STORE_CORS_ALLOWED_ORIGINS[[:space:]]*:[[:space:]]*"?([^"]+)"?[[:space:]]*$|\1|p' "$file" | head -n1
 }
 
 compose_data_dir() {
