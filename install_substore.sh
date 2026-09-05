@@ -9,6 +9,7 @@ DEFAULT_COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
 LEGACY_COMPOSE_FILE=/root/docker-compose.yml
 BACKUP_DIR=/var/backups/ai-scripts/sub-store
 ROLLBACK_IMAGE_KEEP=3
+DEFAULT_CORS_ALLOWED_ORIGINS='https://sub-store.vercel.app,http://substore.stash,https://substore.stash'
 COMPOSE_FILE="$DEFAULT_COMPOSE_FILE"
 DATA_DIR="$DEFAULT_DATA_DIR"
 
@@ -57,6 +58,12 @@ compose_secret() {
     sed -n -E 's|^[[:space:]]*-[[:space:]]*SUB_STORE_FRONTEND_BACKEND_PATH[[:space:]]*=[[:space:]]*"?/([^"[:space:]]+)"?[[:space:]]*$|\1|p; s|^[[:space:]]*SUB_STORE_FRONTEND_BACKEND_PATH[[:space:]]*:[[:space:]]*"?/([^"[:space:]]+)"?[[:space:]]*$|\1|p' "$file" | head -n1
 }
 
+compose_cors_origins() {
+    local file=$1
+    [[ -f $file ]] || return 1
+    sed -n -E 's|^[[:space:]]*-[[:space:]]*SUB_STORE_CORS_ALLOWED_ORIGINS[[:space:]]*=[[:space:]]*["'"']?([^"'"']+)["'"']?[[:space:]]*$|\1|p; s|^[[:space:]]*SUB_STORE_CORS_ALLOWED_ORIGINS[[:space:]]*:[[:space:]]*["'"']?([^"'"']+)["'"']?[[:space:]]*$|\1|p' "$file" | head -n1
+}
+
 compose_data_dir() {
     local file=$1
     [[ -f $file ]] || return 1
@@ -68,8 +75,7 @@ compose_port_value() {
     [[ -f $file ]] || return 1
     line=$(grep -E ':[[:space:]]*3001|:3001' "$file" | head -n1 || true)
     [[ -n $line ]] || return 1
-    printf '%s\n' "$line" \
-        | sed -E 's|^[[:space:]]*-[[:space:]]*"?||; s|"?[[:space:]]*(#.*)?$||'
+    printf '%s\n' "$line" | sed -E 's|^[[:space:]]*-[[:space:]]*"?||; s|"?[[:space:]]*(#.*)?$||'
 }
 
 compose_bind_address() {
@@ -100,9 +106,7 @@ compose_host_port() {
         *:3001)
             host_port=${value%:3001}
             ;;
-        *)
-            return 1
-            ;;
+        *) return 1 ;;
     esac
 
     [[ $host_port =~ ^[0-9]{1,5}$ ]] || return 1
@@ -121,6 +125,37 @@ compose_matches_runtime() {
 safe_data_dir() {
     local dir=$1
     [[ -n $dir && $dir == /* && $dir != / && $dir != /root && $dir != /var && $dir != /opt ]]
+}
+
+valid_origin() {
+    local origin=$1
+    [[ $origin =~ ^https?://[^/]+$ ]]
+}
+
+append_origin() {
+    local list=$1 origin=$2
+    if [[ ,$list, == *,$origin,* ]]; then
+        printf '%s\n' "$list"
+    elif [[ -n $list ]]; then
+        printf '%s,%s\n' "$list" "$origin"
+    else
+        printf '%s\n' "$origin"
+    fi
+}
+
+prompt_custom_origin() {
+    local current=$1 origin=''
+    read -r -p '浏览器访问 Origin [可留空；例如 https://sub-store.example.com]: ' origin
+    origin=${origin%/}
+    if [[ -z $origin ]]; then
+        printf '%s\n' "$current"
+        return 0
+    fi
+    if ! valid_origin "$origin"; then
+        echo -e "${RED}Origin 格式无效，只填写协议 + 域名/IP + 可选端口，不要带路径。${NC}" >&2
+        return 1
+    fi
+    append_origin "$current" "$origin"
 }
 
 cleanup_old_rollback_images() {
@@ -148,6 +183,29 @@ cleanup_old_rollback_images() {
         else
             echo -e "${YELLOW}无法删除 ${tag}，可能仍被容器引用，已跳过。${NC}"
         fi
+    done
+}
+
+backend_health_check() {
+    local host_port=$1 secret_key=$2 cors_origins=$3
+    local url="http://127.0.0.1:${host_port}/${secret_key}/api/utils/env"
+    local origin
+
+    curl -fsS --connect-timeout 3 --max-time 10 "http://127.0.0.1:${host_port}/" >/dev/null 2>&1 || return 1
+    curl -fsS --connect-timeout 3 --max-time 10 "$url" >/dev/null 2>&1 || return 1
+
+    if [[ $cors_origins == '*' ]]; then
+        curl -fsS --connect-timeout 3 --max-time 10 \
+            -H 'Origin: https://sub-store-health.invalid' "$url" >/dev/null 2>&1 || return 1
+        return 0
+    fi
+
+    IFS=',' read -r -a origins <<< "$cors_origins"
+    for origin in "${origins[@]}"; do
+        origin=$(printf '%s' "$origin" | xargs)
+        [[ -n $origin ]] || continue
+        curl -fsS --connect-timeout 3 --max-time 10 \
+            -H "Origin: $origin" "$url" >/dev/null 2>&1 || return 1
     done
 }
 
@@ -192,7 +250,7 @@ install_substore() {
         return 1
     }
 
-    local timestamp secret_key='' bind_address='' host_port='3001' public_ip display_host
+    local timestamp secret_key='' cors_allowed_origins='' bind_address='' host_port='3001' public_ip display_host
     local existing_install=false container_exists=false source_compose='' compose_label=''
     local previous_image_id='' rollback_tag='' compose_backup='' data_backup=''
 
@@ -212,8 +270,9 @@ install_substore() {
 
         secret_key=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' sub-store 2>/dev/null \
             | sed -n 's|^SUB_STORE_FRONTEND_BACKEND_PATH=/\(.*\)$|\1|p' | head -n1 || true)
-        DATA_DIR=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/opt/app/data"}}{{println .Source}}{{end}}{{end}}' sub-store 2>/dev/null \
-            | head -n1 || true)
+        cors_allowed_origins=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' sub-store 2>/dev/null \
+            | sed -n 's|^SUB_STORE_CORS_ALLOWED_ORIGINS=\(.*\)$|\1|p' | head -n1 || true)
+        DATA_DIR=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/opt/app/data"}}{{println .Source}}{{end}}{{end}}' sub-store 2>/dev/null | head -n1 || true)
         bind_address=$(docker inspect -f '{{with (index .HostConfig.PortBindings "3001/tcp")}}{{(index . 0).HostIp}}{{end}}' sub-store 2>/dev/null || true)
         host_port=$(docker inspect -f '{{with (index .HostConfig.PortBindings "3001/tcp")}}{{(index . 0).HostPort}}{{end}}' sub-store 2>/dev/null || true)
         previous_image_id=$(docker inspect -f '{{.Image}}' sub-store 2>/dev/null || true)
@@ -260,6 +319,7 @@ install_substore() {
 
         if $existing_install; then
             secret_key=$(compose_secret "$source_compose" 2>/dev/null || true)
+            cors_allowed_origins=$(compose_cors_origins "$source_compose" 2>/dev/null || true)
             DATA_DIR=$(compose_data_dir "$source_compose" 2>/dev/null || true)
             bind_address=$(compose_bind_address "$source_compose" 2>/dev/null || true)
             host_port=$(compose_host_port "$source_compose" 2>/dev/null || true)
@@ -289,9 +349,15 @@ install_substore() {
             COMPOSE_FILE="$DEFAULT_COMPOSE_FILE"
         fi
 
-        echo -e "${GREEN}检测到已有 Sub-Store，将保持现有 API、数据目录和监听方式不变。${NC}"
+        if [[ -z $cors_allowed_origins ]]; then
+            echo -e "${YELLOW}现有安装没有 CORS allowlist。Sub-Store 2.38+ 已收紧浏览器 Origin。${NC}"
+            cors_allowed_origins=$(prompt_custom_origin "$DEFAULT_CORS_ALLOWED_ORIGINS") || return 1
+        fi
+
+        echo -e "${GREEN}检测到已有 Sub-Store，将保持现有 API、数据目录、监听方式和 CORS 设置。${NC}"
         echo -e "API 路径：${CYAN}/${secret_key}${NC}"
         echo -e "数据目录：${CYAN}${DATA_DIR}${NC}"
+        echo -e "CORS：${CYAN}${cors_allowed_origins}${NC}"
         echo -e "配置文件：${CYAN}${COMPOSE_FILE}${NC}"
     else
         COMPOSE_FILE="$DEFAULT_COMPOSE_FILE"
@@ -305,6 +371,7 @@ install_substore() {
             return 1
         }
 
+        cors_allowed_origins=$(prompt_custom_origin "$DEFAULT_CORS_ALLOWED_ORIGINS") || return 1
         install -d -m 700 "$DATA_DIR"
     fi
 
@@ -333,6 +400,7 @@ services:
     restart: unless-stopped
     environment:
       SUB_STORE_FRONTEND_BACKEND_PATH: /$secret_key
+      SUB_STORE_CORS_ALLOWED_ORIGINS: "$cors_allowed_origins"
     ports:
       - "$bind_address:$host_port:3001"
     volumes:
@@ -359,8 +427,8 @@ EOF
 
     sleep 3
     if [[ $(docker inspect -f '{{.State.Running}}' sub-store 2>/dev/null || true) != true ]] \
-        || ! curl -fsS --connect-timeout 3 --max-time 10 "http://127.0.0.1:${host_port}/" >/dev/null 2>&1; then
-        echo -e "${RED}容器未通过运行/HTTP 健康检查，正在回滚。${NC}"
+        || ! backend_health_check "$host_port" "$secret_key" "$cors_allowed_origins"; then
+        echo -e "${RED}容器未通过前端、后端 API 或 CORS 健康检查，正在回滚。${NC}"
         restore_previous "$compose_backup" "$data_backup" "$rollback_tag"
         return 1
     fi
@@ -375,6 +443,7 @@ EOF
     echo -e "面板：${CYAN}http://${display_host}:${host_port}${NC}"
     echo -e "API：${CYAN}http://${display_host}:${host_port}/${secret_key}${NC}"
     echo -e "配置：${COMPOSE_FILE}；数据：${DATA_DIR}；日志限制：10MB × 3。"
+    echo -e "CORS：${cors_allowed_origins}"
     echo -e "自动回滚镜像：最多保留最近 ${ROLLBACK_IMAGE_KEEP} 个。"
     [[ -n $compose_backup ]] && echo -e "更新前配置备份：${compose_backup}"
     [[ -n $data_backup ]] && echo -e "更新前数据备份：${data_backup}"
