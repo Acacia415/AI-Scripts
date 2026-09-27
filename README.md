@@ -21,6 +21,7 @@ AI-Scripts/
 ├── install_substore.sh              # 安装Sub-Store
 ├── traffic_monitor.sh               # 智能流量监控管理系统（单文件版）
 ├── iptables.sh                      # iptables转发
+├── nftables.sh                      # nftables IPv4端口转发
 ├── modify_ip_preference.sh          # IP优先级设置
 ├── nginx-manager.sh                 # Nginx反代管理
 ├── open_all_ports.sh                # 开放所有端口
@@ -90,6 +91,7 @@ sudo ./tool.sh
 
 ### 端口转发
 - **一键IPTables转发** - IPTables端口转发管理
+- **一键NFTables转发** - 使用独立规则表管理IPv4 TCP/UDP转发，支持配置备份、恢复和开机加载
 - **一键GOST转发** - GOST端口转发管理
 - **安装 Gost v3** - 安装Gost v3版本
 

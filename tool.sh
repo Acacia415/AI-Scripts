@@ -421,6 +421,20 @@ install_iptables_forward() {
     fi
 }
 
+# ======================= 一键NFTables转发 =======================
+install_nftables_forward() {
+    clear
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+    echo -e "${CYAN}一键NFTables转发管理工具${NC}"
+    echo -e "${CYAN}脚本来源：https://github.com/Acacia415/AI-Scripts${NC}"
+    echo -e "${YELLOW}════════════════════════════════════${NC}"
+
+    if ! run_repo_script "nftables.sh" "NFTables 转发脚本"; then
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        return 1
+    fi
+}
+
 # ======================= 一键GOST转发 =======================
 install_gost_forward() {
     clear
@@ -973,7 +987,7 @@ main_menu() {
     echo "15. 时间同步                           33. 安装Hexo_butterfly主题"
     echo "16. Caddy反代管理                      34. 安装 AnyTLS"
     echo "17. Nginx管理                          35. SaveAnyBot管理"
-    echo "18. BBRv3内核管理"
+    echo "18. BBRv3内核管理                      36. 一键NFTables转发"
     echo -e "${YELLOW}==========================================================================${NC}"
     echo "0. 退出脚本"
     echo -e "${YELLOW}-------------------------------------------------------------------------${NC}"
@@ -1120,6 +1134,10 @@ main_menu() {
         ;;
       35)
         saveanybot_manager
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        ;;
+      36)
+        install_nftables_forward
         read -n 1 -s -r -p "按任意键返回主菜单..."
         ;;
       99)  
