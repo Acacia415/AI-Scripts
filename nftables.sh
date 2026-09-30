@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -681,11 +681,6 @@ replace_settings_file() {
         fi
         had_old_settings=yes
     fi
-    if ! backup_configuration auto-before-mode-change; then
-        error "自动备份失败，已取消本次修改。"
-        rm -f "${old_settings}"
-        return 1
-    fi
     if ! install -m 600 "${candidate}" "${SETTINGS_FILE}"; then
         error "无法写入转发模式设置。"
         rm -f "${old_settings}"
@@ -693,7 +688,6 @@ replace_settings_file() {
     fi
     if apply_managed_rules; then
         info "${success_message}"
-        info "操作前备份：${LAST_BACKUP_DIR}"
         rm -f "${old_settings}"
         return 0
     fi
@@ -701,8 +695,7 @@ replace_settings_file() {
     error "模式修改失败，正在恢复操作前配置。"
     if [[ ${had_old_settings} == yes ]]; then
         install -m 600 "${old_settings}" "${SETTINGS_FILE}" || {
-            error "无法恢复操作前的模式设置，请从 ${LAST_BACKUP_DIR} 手动恢复。"
-            rm -f "${old_settings}"
+            error "无法恢复操作前的模式设置；原设置暂存于 ${old_settings}。"
             return 1
         }
     else
@@ -710,7 +703,7 @@ replace_settings_file() {
     fi
     load_settings || true
     if ! apply_managed_rules; then
-        error "自动回滚未能完整应用，请从 ${LAST_BACKUP_DIR} 手动恢复。"
+        error "自动回滚未能完整应用，请立即检查 nftables 状态。"
     fi
     rm -f "${old_settings}"
     return 1
@@ -789,11 +782,6 @@ replace_rules_file() {
         rm -f "${old_rules}"
         return 1
     fi
-    if ! backup_configuration auto-before-change; then
-        error "自动备份失败，已取消本次修改。"
-        rm -f "${old_rules}"
-        return 1
-    fi
     if ! install -m 600 "${candidate}" "${RULES_FILE}"; then
         error "无法写入规则文件。"
         rm -f "${old_rules}"
@@ -801,19 +789,17 @@ replace_rules_file() {
     fi
     if apply_managed_rules; then
         info "${success_message}"
-        info "操作前备份：${LAST_BACKUP_DIR}"
         rm -f "${old_rules}"
         return 0
     fi
 
     error "规则修改失败，正在恢复操作前配置。"
     if ! install -m 600 "${old_rules}" "${RULES_FILE}"; then
-        error "无法恢复操作前的规则文件，请从 ${LAST_BACKUP_DIR} 手动恢复。"
-        rm -f "${old_rules}"
+        error "无法恢复操作前的规则文件；原规则暂存于 ${old_rules}。"
         return 1
     fi
     if ! apply_managed_rules; then
-        error "自动回滚未能完整应用，请从 ${LAST_BACKUP_DIR} 手动恢复。"
+        error "自动回滚未能完整应用，请立即检查 nftables 状态。"
     fi
     rm -f "${old_rules}"
     return 1
@@ -850,11 +836,17 @@ refresh_ddns_rules() {
         rm -f "${candidate}"
         return 0
     fi
+    if ! backup_configuration ddns-before-refresh; then
+        error "DDNS 更新前备份失败，已保留现有转发规则。"
+        rm -f "${candidate}"
+        return 1
+    fi
     if ! replace_rules_file "${candidate}" "DDNS 地址已更新并重新加载转发规则。"; then
         rm -f "${candidate}"
         return 1
     fi
     rm -f "${candidate}"
+    info "DDNS 更新前备份：${LAST_BACKUP_DIR}"
     info "本次检查了 ${domain_count} 条域名规则。"
 }
 
@@ -1068,11 +1060,6 @@ restore_backup_configuration() {
         fi
         had_old_settings=yes
     fi
-    if ! backup_configuration auto-before-restore; then
-        error "自动备份失败，已取消恢复。"
-        rm -f "${old_rules}" "${old_settings}"
-        return 1
-    fi
     if ! install -m 600 "${backup_rules}" "${RULES_FILE}"; then
         error "无法恢复规则文件。"
         rm -f "${old_rules}" "${old_settings}"
@@ -1104,15 +1091,14 @@ restore_backup_configuration() {
     fi
     if apply_managed_rules; then
         info "已恢复备份：$(basename "${backup_dir}")"
-        info "恢复前备份：${LAST_BACKUP_DIR}"
         rm -f "${old_rules}" "${old_settings}"
         return 0
     fi
 
     error "恢复备份失败，正在恢复操作前配置。"
     install -m 600 "${old_rules}" "${RULES_FILE}" || {
-        error "无法恢复操作前的规则文件，请从 ${LAST_BACKUP_DIR} 手动恢复。"
-        rm -f "${old_rules}" "${old_settings}"
+        error "无法恢复操作前的规则文件；原规则暂存于 ${old_rules}。"
+        error "原模式设置暂存于 ${old_settings}。"
         return 1
     }
     if [[ ${had_old_settings} == yes ]]; then
@@ -1122,7 +1108,7 @@ restore_backup_configuration() {
     fi
     load_settings || true
     if ! apply_managed_rules; then
-        error "自动回滚未能完整应用，请从 ${LAST_BACKUP_DIR} 手动恢复。"
+        error "自动回滚未能完整应用，请立即检查 nftables 状态。"
     fi
     rm -f "${old_rules}" "${old_settings}"
     return 1
