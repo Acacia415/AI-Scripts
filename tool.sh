@@ -67,6 +67,82 @@ download_shell_script() {
     printf '%s\n' "$temp_file"
 }
 
+normalize_remote_menu_exit() {
+    local url=$1 script_path=$2 label=$3 profile candidate status=0
+    # 仅适配这些上游的已知菜单；仍每次下载最新版，不忽略真正的 exit 1。
+    case "$url" in
+        https://raw.githubusercontent.com/xOS/Snell/master/Snell.sh) profile=snell ;;
+        https://raw.githubusercontent.com/xOS/Shadowsocks-Rust/master/ss-rust.sh) profile=ss_rust ;;
+        https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/hysteria.sh) profile=hysteria2 ;;
+        *) return 0 ;;
+    esac
+
+    candidate=$(mktemp /tmp/ai-scripts-menu.XXXXXX.sh) || return 1
+    # 按函数、菜单变量及完整退出分支匹配，不做全局 exit 1 替换。
+    # 数量/结构不符时弃用整个候选文件，继续运行未改动的上游脚本。
+    awk -v profile="$profile" '
+        function compact(line) { gsub(/[ \t]/, "", line); return line }
+        {
+            key = compact($0)
+            if (profile == "snell" && key == "startMenu(){") menu = "snell"
+            if (profile == "ss_rust" && key == "start_menu(){") menu = "ss"
+            if (profile == "ss_rust" && key == "shadowtls_menu(){") menu = "stls"
+            if (profile == "hysteria2" && key == "menu(){") menu = "hy"
+
+            if ((menu == "snell" || menu == "ss") && key == "case\"$num\"in" ||
+                menu == "stls" && key == "case\"$stls_num\"in" ||
+                menu == "hy" && key == "case$menuInputin") {
+                active = 1
+                zero_seen = 0
+            }
+            if (active && menu != "hy" && key ~ /^00\)exit[01];;$/) {
+                sub(/exit[ \t]+1/, "exit 0")
+                seen[menu]++
+            } else if (active && menu != "hy" && key == "00)") {
+                print
+                if ((getline exit_line) <= 0) { invalid = 1; next }
+                if ((getline end_line) <= 0) { print exit_line; invalid = 1; next }
+                if (compact(exit_line) ~ /^exit[01]$/ && compact(end_line) == ";;") {
+                    sub(/exit[ \t]+1/, "exit 0", exit_line)
+                    seen[menu]++
+                } else invalid = 1
+                print exit_line
+                print end_line
+                next
+            } else if (active && menu == "hy") {
+                if (key ~ /^0\)/) {
+                    zero_seen = 1
+                    if (key != "0)exit0;;") invalid = 1
+                }
+                if (key == "*)exit1;;") {
+                    if (!zero_seen) print "        0 ) exit 0 ;;"
+                    seen[menu]++
+                }
+            }
+            print
+            if (key == "esac") active = 0
+            if ($0 ~ /^}[ \t]*$/) { menu = ""; active = 0 }
+        }
+        END {
+            if (invalid ||
+                profile == "snell" && seen["snell"] != 3 ||
+                profile == "ss_rust" && (seen["ss"] != 1 || seen["stls"] != 1) ||
+                profile == "hysteria2" && seen["hy"] != 1) exit 10
+        }
+    ' "$script_path" > "$candidate" || status=$?
+
+    if (( status != 0 )) || ! /bin/bash -n "$candidate"; then
+        rm -f -- "$candidate"
+        echo -e "${YELLOW}${label}：退出菜单兼容未应用，将执行原始脚本；正常退出仍可能显示非零退出码。${NC}" >&2
+        return 0
+    fi
+    if ! chmod 700 "$candidate" || ! mv -f -- "$candidate" "$script_path"; then
+        rm -f -- "$candidate"
+        echo -e "${RED}${label}：无法准备退出菜单兼容脚本，未执行。${NC}" >&2
+        return 1
+    fi
+}
+
 run_remote_script() {
     local url=$1
     local label=$2
@@ -75,6 +151,10 @@ run_remote_script() {
     [[ "$accepted_status" =~ ^[0-9]+$ ]] || accepted_status=0
 
     script_path=$(download_shell_script "$url" "$label") || return 1
+    if ! normalize_remote_menu_exit "$url" "$script_path" "$label"; then
+        rm -f -- "$script_path"
+        return 1
+    fi
     /bin/bash "$script_path" "$@" || status=$?
     rm -f -- "$script_path"
 
