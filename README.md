@@ -91,7 +91,7 @@ sudo ./tool.sh
 
 ### 端口转发
 - **一键IPTables转发** - IPTables端口转发管理
-- **一键NFTables转发** - 使用独立规则表管理IPv4 TCP/UDP转发，支持通用与Po0优化模式、DDNS目标自动刷新、配置备份、恢复和开机加载
+- **一键NFTables转发** - 使用独立规则表管理IPv4 TCP/UDP转发，支持通用与Po0优化模式、DDNS目标自动刷新、最多3份配置备份、恢复和开机加载
 - **一键GOST转发** - GOST端口转发管理
 - **安装 Gost v3** - 安装Gost v3版本
 

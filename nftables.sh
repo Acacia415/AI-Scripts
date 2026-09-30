@@ -25,6 +25,7 @@ REFRESH_TIMER_FILE="/etc/systemd/system/${REFRESH_TIMER_NAME}"
 INSTALLED_SCRIPT="/usr/local/lib/ai-scripts/nftables-forward-manager.sh"
 LOCK_FILE="/run/lock/ai-nftables-forward.lock"
 BACKUP_ROOT="/var/backups/ai-scripts/nftables-forward"
+BACKUP_KEEP=3
 TABLE_FAMILY="ip"
 TABLE_NAME="ai_port_forward"
 
@@ -596,6 +597,41 @@ initialize_manager() {
     fi
 }
 
+prune_old_backups() {
+    local resolved_root candidate resolved_candidate candidate_parent candidate_name index
+    local -a backups=()
+
+    resolved_root=$(readlink -f -- "${BACKUP_ROOT}") || return 1
+    if [[ ! -d ${resolved_root} || ${resolved_root} == / ]]; then
+        error "备份根目录无效，拒绝执行轮转：${resolved_root}"
+        return 1
+    fi
+    mapfile -t backups < <(
+        find "${resolved_root}" -mindepth 1 -maxdepth 1 -type d -name 'backup-*' \
+            -printf '%T@\t%p\n' | sort -nr | cut -f2-
+    )
+    for ((index = BACKUP_KEEP; index < ${#backups[@]}; index += 1)); do
+        candidate=${backups[${index}]}
+        if [[ -L ${candidate} ]]; then
+            warn "跳过符号链接备份项：${candidate}"
+            continue
+        fi
+        resolved_candidate=$(readlink -f -- "${candidate}") || return 1
+        candidate_parent=$(dirname -- "${resolved_candidate}")
+        candidate_name=$(basename -- "${resolved_candidate}")
+        if [[ ${candidate_parent} != "${resolved_root}" || ${candidate_name} != backup-* ||
+              ! -d ${resolved_candidate} ]]; then
+            error "备份路径校验失败，拒绝删除：${candidate}"
+            return 1
+        fi
+        if ! find "${resolved_candidate}" -xdev -depth -delete; then
+            error "无法删除过期备份：${resolved_candidate}"
+            return 1
+        fi
+        info "已轮转过期备份：${candidate_name}"
+    done
+}
+
 backup_configuration() {
     local reason=${1:-manual} timestamp
 
@@ -620,6 +656,7 @@ backup_configuration() {
         "$(date --iso-8601=seconds)" "${reason}" "${VERSION}" \
         > "${LAST_BACKUP_DIR}/metadata"
     chmod -R go-rwx "${LAST_BACKUP_DIR}" || return 1
+    prune_old_backups || return 1
 }
 
 manual_backup() {
