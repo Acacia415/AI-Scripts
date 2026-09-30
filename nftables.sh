@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -18,6 +18,12 @@ MANAGED_CONFIG="${STATE_DIR}/ai-port-forward.nft"
 SYSCTL_FILE="/etc/sysctl.d/99-ai-scripts-nft-forward.conf"
 UNIT_NAME="ai-nftables-forward.service"
 UNIT_FILE="/etc/systemd/system/${UNIT_NAME}"
+REFRESH_UNIT_NAME="ai-nftables-ddns-refresh.service"
+REFRESH_UNIT_FILE="/etc/systemd/system/${REFRESH_UNIT_NAME}"
+REFRESH_TIMER_NAME="ai-nftables-ddns-refresh.timer"
+REFRESH_TIMER_FILE="/etc/systemd/system/${REFRESH_TIMER_NAME}"
+INSTALLED_SCRIPT="/usr/local/lib/ai-scripts/nftables-forward-manager.sh"
+LOCK_FILE="/run/lock/ai-nftables-forward.lock"
 BACKUP_ROOT="/var/backups/ai-scripts/nftables-forward"
 TABLE_FAMILY="ip"
 TABLE_NAME="ai_port_forward"
@@ -29,6 +35,11 @@ FORWARD_MODE="generic"
 PO0_SNAT_IP=""
 PO0_TCP_MSS=""
 PO0_BLOCKED_PORTS=(80 443 8080 8443 8000 1080)
+RULE_PROTOCOL=""
+RULE_LOCAL_PORT=""
+RULE_TARGET=""
+RULE_REMOTE_IP=""
+RULE_REMOTE_PORT=""
 
 info() { echo -e "${GREEN}[信息]${NC} $*"; }
 warn() { echo -e "${YELLOW}[警告]${NC} $*"; }
@@ -183,37 +194,97 @@ load_settings() {
 }
 
 resolve_target() {
-    local target=$1 resolved
+    local target=$1 preferred_ip=${2:-} resolved
+    local -a resolved_ips=()
 
     if validate_target_ipv4 "${target}"; then
         printf '%s' "${target}"
         return 0
     fi
-    [[ ${target} =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || return 1
-    resolved=$(getent ahostsv4 "${target}" 2>/dev/null | awk 'NR == 1 { print $1 }')
-    validate_target_ipv4 "${resolved}" || return 1
-    printf '%s' "${resolved}"
+    validate_target_reference "${target}" || return 1
+    mapfile -t resolved_ips < <(
+        getent ahostsv4 "${target}" 2>/dev/null | awk '!seen[$1]++ { print $1 }'
+    )
+    if validate_target_ipv4 "${preferred_ip}"; then
+        for resolved in "${resolved_ips[@]}"; do
+            [[ ${resolved} == "${preferred_ip}" ]] && { printf '%s' "${preferred_ip}"; return 0; }
+        done
+    fi
+    for resolved in "${resolved_ips[@]}"; do
+        if validate_target_ipv4 "${resolved}"; then
+            printf '%s' "${resolved}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+acquire_global_lock() {
+    local mode=${1:-wait}
+
+    if ! command -v flock >/dev/null 2>&1; then
+        error "未检测到 flock，无法安全更新转发配置。"
+        return 1
+    fi
+    exec 9> "${LOCK_FILE}"
+    if [[ ${mode} == nonblocking ]]; then
+        flock -n 9
+    else
+        flock 9
+    fi
+}
+
+validate_target_reference() {
+    local value=$1 label
+    local -a labels=()
+
+    validate_target_ipv4 "${value}" && return 0
+    (( ${#value} <= 253 )) || return 1
+    [[ ${value} =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+    IFS='.' read -r -a labels <<< "${value}"
+    (( ${#labels[@]} >= 2 )) || return 1
+    for label in "${labels[@]}"; do
+        (( ${#label} >= 1 && ${#label} <= 63 )) || return 1
+        [[ ${label} =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+    done
+}
+
+set_rule_fields() {
+    local protocol=$1 local_port=$2 target_or_ip=$3 ip_or_port=$4 maybe_port=${5:-}
+
+    RULE_PROTOCOL=${protocol}
+    RULE_LOCAL_PORT=${local_port}
+    RULE_TARGET=${target_or_ip}
+    if [[ -n ${maybe_port} ]]; then
+        RULE_REMOTE_IP=${ip_or_port}
+        RULE_REMOTE_PORT=${maybe_port}
+    else
+        RULE_REMOTE_IP=${target_or_ip}
+        RULE_REMOTE_PORT=${ip_or_port}
+    fi
 }
 
 validate_rules_file() {
-    local file=$1 protocol local_port remote_ip remote_port extra key
+    local file=$1 protocol local_port target_or_ip ip_or_port maybe_port extra key
     local line_number=0
     declare -A seen=()
 
     [[ -f ${file} ]] || { error "规则文件不存在：${file}"; return 1; }
-    while IFS=$'\t' read -r protocol local_port remote_ip remote_port extra ||
-          [[ -n ${protocol:-}${local_port:-}${remote_ip:-}${remote_port:-}${extra:-} ]]; do
+    while IFS=$'\t' read -r protocol local_port target_or_ip ip_or_port maybe_port extra ||
+          [[ -n ${protocol:-}${local_port:-}${target_or_ip:-}${ip_or_port:-}${maybe_port:-}${extra:-} ]]; do
         ((line_number += 1))
-        if [[ -z ${protocol:-}${local_port:-}${remote_ip:-}${remote_port:-}${extra:-} ]]; then
+        if [[ -z ${protocol:-}${local_port:-}${target_or_ip:-}${ip_or_port:-}${maybe_port:-}${extra:-} ]]; then
             error "规则文件第 ${line_number} 行为空行。"
             return 1
         fi
+        set_rule_fields "${protocol}" "${local_port}" "${target_or_ip}" "${ip_or_port}" "${maybe_port:-}"
         if [[ ${protocol} != tcp && ${protocol} != udp ]]; then
             error "规则文件第 ${line_number} 行协议无效。"
             return 1
         fi
-        if ! validate_port "${local_port}" || ! validate_port "${remote_port}" ||
-           ! validate_target_ipv4 "${remote_ip}" || [[ -n ${extra:-} ]]; then
+        if ! validate_port "${local_port}" || ! validate_target_reference "${RULE_TARGET}" ||
+           ! validate_target_ipv4 "${RULE_REMOTE_IP}" || ! validate_port "${RULE_REMOTE_PORT}" ||
+           [[ -n ${extra:-} ]]; then
             error "规则文件第 ${line_number} 行格式无效。"
             return 1
         fi
@@ -258,7 +329,23 @@ EOF
     fi
 }
 
+install_manager_script() {
+    local source_script=${BASH_SOURCE[0]}
+
+    if [[ ! -r ${source_script} ]]; then
+        error "无法读取当前脚本，不能安装 DDNS 刷新程序。"
+        return 1
+    fi
+    install -d -m 755 "$(dirname "${INSTALLED_SCRIPT}")" || return 1
+    if [[ -f ${INSTALLED_SCRIPT} ]] && cmp -s "${source_script}" "${INSTALLED_SCRIPT}"; then
+        chmod 755 "${INSTALLED_SCRIPT}" || return 1
+    else
+        install -m 755 "${source_script}" "${INSTALLED_SCRIPT}" || return 1
+    fi
+}
+
 write_service_file() {
+    install_manager_script || return 1
     if ! cat > "${UNIT_FILE}" <<EOF
 [Unit]
 Description=AI-Scripts nftables IPv4 port forwarding
@@ -281,10 +368,46 @@ EOF
         error "无法写入 ${UNIT_FILE}。"
         return 1
     fi
+    if ! cat > "${REFRESH_UNIT_FILE}" <<EOF
+[Unit]
+Description=AI-Scripts nftables DDNS target refresh
+Wants=network-online.target
+After=network-online.target ${UNIT_NAME}
+
+[Service]
+Type=oneshot
+ExecStart=${INSTALLED_SCRIPT} --refresh-ddns
+EOF
+    then
+        error "无法写入 ${REFRESH_UNIT_FILE}。"
+        return 1
+    fi
+    if ! cat > "${REFRESH_TIMER_FILE}" <<EOF
+[Unit]
+Description=Refresh AI-Scripts nftables DDNS targets every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=${REFRESH_UNIT_NAME}
+
+[Install]
+WantedBy=timers.target
+EOF
+    then
+        error "无法写入 ${REFRESH_TIMER_FILE}。"
+        return 1
+    fi
     chmod 644 "${UNIT_FILE}" || return 1
+    chmod 644 "${REFRESH_UNIT_FILE}" "${REFRESH_TIMER_FILE}" || return 1
     systemctl daemon-reload || return 1
     if ! systemctl enable "${UNIT_NAME}" >/dev/null; then
         error "无法启用 ${UNIT_NAME}。"
+        return 1
+    fi
+    if ! systemctl enable --now "${REFRESH_TIMER_NAME}" >/dev/null; then
+        error "无法启用 ${REFRESH_TIMER_NAME}。"
         return 1
     fi
 }
@@ -308,30 +431,32 @@ prepare_runtime() {
 }
 
 generate_managed_config() {
-    local output=$1 protocol local_port remote_ip remote_port
+    local output=$1 protocol local_port target_or_ip ip_or_port maybe_port extra
 
     {
         echo '# Managed by AI-Scripts. Manual edits will be overwritten.'
         echo "table ${TABLE_FAMILY} ${TABLE_NAME} {"
         echo '    chain prerouting {'
         echo '        type nat hook prerouting priority dstnat; policy accept;'
-        while IFS=$'\t' read -r protocol local_port remote_ip remote_port; do
+        while IFS=$'\t' read -r protocol local_port target_or_ip ip_or_port maybe_port extra; do
             [[ -n ${protocol:-} ]] || continue
+            set_rule_fields "${protocol}" "${local_port}" "${target_or_ip}" "${ip_or_port}" "${maybe_port:-}"
             printf '        %s dport %s counter dnat to %s:%s\n' \
-                "${protocol}" "${local_port}" "${remote_ip}" "${remote_port}"
+                "${RULE_PROTOCOL}" "${RULE_LOCAL_PORT}" "${RULE_REMOTE_IP}" "${RULE_REMOTE_PORT}"
         done < "${RULES_FILE}"
         echo '    }'
         echo
         echo '    chain postrouting {'
         echo '        type nat hook postrouting priority srcnat; policy accept;'
-        while IFS=$'\t' read -r protocol local_port remote_ip remote_port; do
+        while IFS=$'\t' read -r protocol local_port target_or_ip ip_or_port maybe_port extra; do
             [[ -n ${protocol:-} ]] || continue
+            set_rule_fields "${protocol}" "${local_port}" "${target_or_ip}" "${ip_or_port}" "${maybe_port:-}"
             if [[ ${FORWARD_MODE} == po0 ]]; then
                 printf '        ct status dnat ip daddr %s %s dport %s counter snat to %s\n' \
-                    "${remote_ip}" "${protocol}" "${remote_port}" "${PO0_SNAT_IP}"
+                    "${RULE_REMOTE_IP}" "${RULE_PROTOCOL}" "${RULE_REMOTE_PORT}" "${PO0_SNAT_IP}"
             else
                 printf '        ct status dnat ip daddr %s %s dport %s counter masquerade\n' \
-                    "${remote_ip}" "${protocol}" "${remote_port}"
+                    "${RULE_REMOTE_IP}" "${RULE_PROTOCOL}" "${RULE_REMOTE_PORT}"
             fi
         done < "${RULES_FILE}"
         echo '    }'
@@ -343,10 +468,11 @@ generate_managed_config() {
                 "${PO0_TCP_MSS}"
         fi
         echo '        ct state established,related counter accept'
-        while IFS=$'\t' read -r protocol local_port remote_ip remote_port; do
+        while IFS=$'\t' read -r protocol local_port target_or_ip ip_or_port maybe_port extra; do
             [[ -n ${protocol:-} ]] || continue
+            set_rule_fields "${protocol}" "${local_port}" "${target_or_ip}" "${ip_or_port}" "${maybe_port:-}"
             printf '        ct status dnat ct state new ip daddr %s %s dport %s counter accept\n' \
-                "${remote_ip}" "${protocol}" "${remote_port}"
+                "${RULE_REMOTE_IP}" "${RULE_PROTOCOL}" "${RULE_REMOTE_PORT}"
         done < "${RULES_FILE}"
         echo '    }'
         echo '}'
@@ -656,6 +782,45 @@ replace_rules_file() {
     return 1
 }
 
+refresh_ddns_rules() {
+    local candidate protocol local_port target_or_ip ip_or_port maybe_port extra resolved_ip
+    local changed=0 domain_count=0
+
+    ensure_state_files || return 1
+    validate_rules_file "${RULES_FILE}" || return 1
+    candidate=$(mktemp "${STATE_DIR}/.rules-ddns.XXXXXX") || return 1
+    while IFS=$'\t' read -r protocol local_port target_or_ip ip_or_port maybe_port extra; do
+        [[ -n ${protocol:-} ]] || continue
+        set_rule_fields "${protocol}" "${local_port}" "${target_or_ip}" "${ip_or_port}" "${maybe_port:-}"
+        if ! validate_target_ipv4 "${RULE_TARGET}"; then
+            ((domain_count += 1))
+            if resolved_ip=$(resolve_target "${RULE_TARGET}" "${RULE_REMOTE_IP}"); then
+                if [[ ${resolved_ip} != "${RULE_REMOTE_IP}" ]]; then
+                    info "检测到 ${RULE_TARGET} 地址变化：${RULE_REMOTE_IP} -> ${resolved_ip}"
+                    RULE_REMOTE_IP=${resolved_ip}
+                    changed=1
+                fi
+            else
+                warn "暂时无法解析 ${RULE_TARGET}，继续保留 ${RULE_REMOTE_IP}。"
+            fi
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\n' \
+            "${RULE_PROTOCOL}" "${RULE_LOCAL_PORT}" "${RULE_TARGET}" \
+            "${RULE_REMOTE_IP}" "${RULE_REMOTE_PORT}" >> "${candidate}"
+    done < "${RULES_FILE}"
+
+    if (( changed == 0 )); then
+        rm -f "${candidate}"
+        return 0
+    fi
+    if ! replace_rules_file "${candidate}" "DDNS 地址已更新并重新加载转发规则。"; then
+        rm -f "${candidate}"
+        return 1
+    fi
+    rm -f "${candidate}"
+    info "本次检查了 ${domain_count} 条域名规则。"
+}
+
 show_all_rules() {
     echo -e "${CYAN}当前 nftables IPv4 转发规则：${NC}"
     echo "--------------------------------------------------------------------------"
@@ -663,18 +828,36 @@ show_all_rules() {
         echo "当前没有配置规则。"
     else
         printf '%-5s %-6s %-10s %s\n' "编号" "协议" "本地端口" "目标"
-        awk -F '\t' '{printf "%-5d %-6s %-10s %s:%s\n", NR, toupper($1), $2, $3, $4}' \
-            "${RULES_FILE}"
+        awk -F '\t' '
+            NF == 4 { target=$3; ip=$3; port=$4 }
+            NF == 5 { target=$3; ip=$4; port=$5 }
+            target == ip { printf "%-5d %-6s %-10s %s:%s\n", NR, toupper($1), $2, ip, port; next }
+            { printf "%-5d %-6s %-10s %s (%s):%s\n", NR, toupper($1), $2, target, ip, port }
+        ' "${RULES_FILE}"
     fi
     echo "--------------------------------------------------------------------------"
 }
 
+warn_legacy_rules() {
+    local count
+
+    count=$(awk -F '\t' 'NF == 4 { count += 1 } END { print count + 0 }' "${RULES_FILE}")
+    if (( count > 0 )); then
+        warn "检测到 ${count} 条旧格式规则；旧版未保存原始域名，因此这些规则仍按固定 IP 使用。"
+        warn "如原目标使用 DDNS，请删除对应规则并用域名重新添加一次。"
+    fi
+}
+
 source_port_conflict() {
-    local wanted_protocol=$1 wanted_port=$2 protocol local_port remote_ip remote_port
-    while IFS=$'\t' read -r protocol local_port remote_ip remote_port; do
+    local wanted_protocol=$1 wanted_port=$2
+    local protocol local_port target_or_ip ip_or_port maybe_port extra
+
+    while IFS=$'\t' read -r protocol local_port target_or_ip ip_or_port maybe_port extra; do
         [[ -n ${protocol:-} ]] || continue
+        set_rule_fields "${protocol}" "${local_port}" "${target_or_ip}" "${ip_or_port}" "${maybe_port:-}"
         if [[ ${protocol} == "${wanted_protocol}" && ${local_port} == "${wanted_port}" ]]; then
-            printf '%s %s -> %s:%s' "${protocol}" "${local_port}" "${remote_ip}" "${remote_port}"
+            printf '%s %s -> %s:%s' \
+                "${RULE_PROTOCOL}" "${RULE_LOCAL_PORT}" "${RULE_TARGET}" "${RULE_REMOTE_PORT}"
             return 0
         fi
     done < "${RULES_FILE}"
@@ -708,7 +891,7 @@ add_forward_rule() {
         return 1
     }
     if [[ ${target} != "${remote_ip}" ]]; then
-        info "域名已解析为 ${remote_ip}；规则不会自动跟随 DNS 变化。"
+        info "域名已解析为 ${remote_ip}；脚本将每分钟检测并自动跟随 DNS 变化。"
     fi
     read -r -p "请输入目标端口 (1-65535)：" remote_port
     validate_port "${remote_port}" || { error "目标端口无效。"; return 1; }
@@ -731,11 +914,11 @@ add_forward_rule() {
         return 1
     fi
     for protocol in "${protocols[@]}"; do
-        printf '%s\t%s\t%s\t%s\n' \
-            "${protocol}" "${local_port}" "${remote_ip}" "${remote_port}" >> "${candidate}"
+        printf '%s\t%s\t%s\t%s\t%s\n' \
+            "${protocol}" "${local_port}" "${target}" "${remote_ip}" "${remote_port}" >> "${candidate}"
     done
     if ! replace_rules_file "${candidate}" \
-        "已添加：${local_port} -> ${remote_ip}:${remote_port} (${mode})"; then
+        "已添加：${local_port} -> ${target} (${remote_ip}):${remote_port} (${mode})"; then
         rm -f "${candidate}"
         return 1
     fi
@@ -979,6 +1162,9 @@ show_status() {
     if [[ -f ${UNIT_FILE} ]]; then
         printf '开机加载：%s\n' "$(systemctl is-enabled "${UNIT_NAME}" 2>/dev/null || true)"
         printf '服务状态：%s\n' "$(systemctl is-active "${UNIT_NAME}" 2>/dev/null || true)"
+        printf 'DDNS 自动刷新：%s / %s\n' \
+            "$(systemctl is-enabled "${REFRESH_TIMER_NAME}" 2>/dev/null || true)" \
+            "$(systemctl is-active "${REFRESH_TIMER_NAME}" 2>/dev/null || true)"
     else
         echo "持久化服务：未初始化"
     fi
@@ -1032,9 +1218,23 @@ main_menu() {
 
 main() {
     require_supported_system
+    case ${1:-} in
+        --refresh-ddns)
+            acquire_global_lock nonblocking || return 0
+            refresh_ddns_rules
+            return
+            ;;
+        "") ;;
+        *)
+            error "不支持的参数：${1}"
+            exit 1
+            ;;
+    esac
+    acquire_global_lock wait || exit 1
     ensure_state_files
     validate_rules_file "${RULES_FILE}" || exit 1
     load_settings || exit 1
+    warn_legacy_rules
     main_menu
 }
 
