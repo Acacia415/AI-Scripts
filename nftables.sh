@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,6 +13,7 @@ NC='\033[0m'
 
 STATE_DIR="/etc/ai-scripts/nftables-forward"
 RULES_FILE="${STATE_DIR}/rules.tsv"
+SETTINGS_FILE="${STATE_DIR}/settings.conf"
 MANAGED_CONFIG="${STATE_DIR}/ai-port-forward.nft"
 SYSCTL_FILE="/etc/sysctl.d/99-ai-scripts-nft-forward.conf"
 UNIT_NAME="ai-nftables-forward.service"
@@ -24,6 +25,10 @@ TABLE_NAME="ai_port_forward"
 NFT_BIN=""
 LAST_BACKUP_DIR=""
 SELECTED_PROTOCOL=""
+FORWARD_MODE="generic"
+PO0_SNAT_IP=""
+PO0_TCP_MSS=""
+PO0_BLOCKED_PORTS=(80 443 8080 8443 8000 1080)
 
 info() { echo -e "${GREEN}[信息]${NC} $*"; }
 warn() { echo -e "${YELLOW}[警告]${NC} $*"; }
@@ -61,6 +66,10 @@ ensure_state_files() {
     else
         chmod 600 "${RULES_FILE}" || return 1
     fi
+    if [[ ! -e ${SETTINGS_FILE} ]]; then
+        write_settings_file "${SETTINGS_FILE}" generic "" "" || return 1
+    fi
+    chmod 600 "${SETTINGS_FILE}" || return 1
 }
 
 validate_port() {
@@ -86,6 +95,91 @@ validate_target_ipv4() {
     case ${value} in
         0.0.0.0|255.255.255.255|127.*) return 1 ;;
     esac
+}
+
+validate_mss() {
+    local value=${1:-}
+    [[ ${value} =~ ^[0-9]{3,5}$ ]] && (( 10#${value} >= 536 && 10#${value} <= 65535 ))
+}
+
+write_settings_file() {
+    local output=$1 mode=$2 snat_ip=$3 tcp_mss=$4
+
+    printf 'MODE=%s\nSNAT_IP=%s\nTCP_MSS=%s\n' \
+        "${mode}" "${snat_ip}" "${tcp_mss}" > "${output}"
+}
+
+validate_settings_file() {
+    local file=$1 line key value mode="" snat_ip="" tcp_mss=""
+    local have_mode=no have_snat_ip=no have_tcp_mss=no
+
+    [[ -f ${file} ]] || { error "设置文件不存在：${file}"; return 1; }
+    while IFS= read -r line || [[ -n ${line} ]]; do
+        [[ ${line} == *=* ]] || { error "设置文件包含无效行。"; return 1; }
+        key=${line%%=*}
+        value=${line#*=}
+        case ${key} in
+            MODE)
+                [[ ${have_mode} == no ]] || { error "设置文件包含重复的 MODE。"; return 1; }
+                mode=${value}
+                have_mode=yes
+                ;;
+            SNAT_IP)
+                [[ ${have_snat_ip} == no ]] || { error "设置文件包含重复的 SNAT_IP。"; return 1; }
+                snat_ip=${value}
+                have_snat_ip=yes
+                ;;
+            TCP_MSS)
+                [[ ${have_tcp_mss} == no ]] || { error "设置文件包含重复的 TCP_MSS。"; return 1; }
+                tcp_mss=${value}
+                have_tcp_mss=yes
+                ;;
+            *)
+                error "设置文件包含未知字段：${key}"
+                return 1
+                ;;
+        esac
+    done < "${file}"
+
+    if [[ ${have_mode} != yes || ${have_snat_ip} != yes || ${have_tcp_mss} != yes ]]; then
+        error "设置文件缺少必要字段。"
+        return 1
+    fi
+    case ${mode} in
+        generic)
+            if [[ -n ${snat_ip}${tcp_mss} ]]; then
+                error "通用模式不应设置 SNAT_IP 或 TCP_MSS。"
+                return 1
+            fi
+            ;;
+        po0)
+            validate_target_ipv4 "${snat_ip}" || { error "Po0 SNAT 内网 IPv4 无效。"; return 1; }
+            validate_mss "${tcp_mss}" || { error "Po0 TCP MSS 无效。"; return 1; }
+            ;;
+        *)
+            error "不支持的转发模式：${mode}"
+            return 1
+            ;;
+    esac
+}
+
+load_settings() {
+    local line key value
+
+    FORWARD_MODE="generic"
+    PO0_SNAT_IP=""
+    PO0_TCP_MSS=""
+    [[ -e ${SETTINGS_FILE} ]] || return 0
+    validate_settings_file "${SETTINGS_FILE}" || return 1
+    while IFS= read -r line || [[ -n ${line} ]]; do
+        key=${line%%=*}
+        value=${line#*=}
+        case ${key} in
+            MODE) FORWARD_MODE=${value} ;;
+            SNAT_IP) PO0_SNAT_IP=${value} ;;
+            TCP_MSS) PO0_TCP_MSS=${value} ;;
+        esac
+    done < "${SETTINGS_FILE}"
 }
 
 resolve_target() {
@@ -207,6 +301,7 @@ warn_firewall_interactions() {
 prepare_runtime() {
     ensure_state_files || return 1
     validate_rules_file "${RULES_FILE}" || return 1
+    load_settings || return 1
     install_dependency || return 1
     write_sysctl_config || return 1
     write_service_file || return 1
@@ -231,13 +326,22 @@ generate_managed_config() {
         echo '        type nat hook postrouting priority srcnat; policy accept;'
         while IFS=$'\t' read -r protocol local_port remote_ip remote_port; do
             [[ -n ${protocol:-} ]] || continue
-            printf '        ct status dnat ip daddr %s %s dport %s counter masquerade\n' \
-                "${remote_ip}" "${protocol}" "${remote_port}"
+            if [[ ${FORWARD_MODE} == po0 ]]; then
+                printf '        ct status dnat ip daddr %s %s dport %s counter snat to %s\n' \
+                    "${remote_ip}" "${protocol}" "${remote_port}" "${PO0_SNAT_IP}"
+            else
+                printf '        ct status dnat ip daddr %s %s dport %s counter masquerade\n' \
+                    "${remote_ip}" "${protocol}" "${remote_port}"
+            fi
         done < "${RULES_FILE}"
         echo '    }'
         echo
         echo '    chain forward {'
         echo '        type filter hook forward priority filter; policy accept;'
+        if [[ ${FORWARD_MODE} == po0 ]]; then
+            printf '        ct status dnat tcp flags & (syn | rst) == syn tcp option maxseg size set %s\n' \
+                "${PO0_TCP_MSS}"
+        fi
         echo '        ct state established,related counter accept'
         while IFS=$'\t' read -r protocol local_port remote_ip remote_port; do
             [[ -n ${protocol:-} ]] || continue
@@ -376,6 +480,9 @@ backup_configuration() {
         error "无法复制规则文件到备份目录。"
         return 1
     fi
+    if [[ -f ${SETTINGS_FILE} ]]; then
+        cp -a "${SETTINGS_FILE}" "${LAST_BACKUP_DIR}/settings.conf" || return 1
+    fi
     if [[ -f ${MANAGED_CONFIG} ]]; then
         cp -a "${MANAGED_CONFIG}" "${LAST_BACKUP_DIR}/ai-port-forward.nft" || return 1
     fi
@@ -395,6 +502,119 @@ manual_backup() {
     else
         error "配置备份失败。"
     fi
+}
+
+replace_settings_file() {
+    local candidate=$1 success_message=$2 old_settings
+    local had_old_settings=no
+
+    ensure_state_files || return 1
+    validate_settings_file "${candidate}" || return 1
+    old_settings=$(mktemp "${STATE_DIR}/.old-settings.XXXXXX") || return 1
+    if [[ -f ${SETTINGS_FILE} ]]; then
+        if ! cp -a "${SETTINGS_FILE}" "${old_settings}"; then
+            rm -f "${old_settings}"
+            return 1
+        fi
+        had_old_settings=yes
+    fi
+    if ! backup_configuration auto-before-mode-change; then
+        error "自动备份失败，已取消本次修改。"
+        rm -f "${old_settings}"
+        return 1
+    fi
+    if ! install -m 600 "${candidate}" "${SETTINGS_FILE}"; then
+        error "无法写入转发模式设置。"
+        rm -f "${old_settings}"
+        return 1
+    fi
+    if apply_managed_rules; then
+        info "${success_message}"
+        info "操作前备份：${LAST_BACKUP_DIR}"
+        rm -f "${old_settings}"
+        return 0
+    fi
+
+    error "模式修改失败，正在恢复操作前配置。"
+    if [[ ${had_old_settings} == yes ]]; then
+        install -m 600 "${old_settings}" "${SETTINGS_FILE}" || {
+            error "无法恢复操作前的模式设置，请从 ${LAST_BACKUP_DIR} 手动恢复。"
+            rm -f "${old_settings}"
+            return 1
+        }
+    else
+        rm -f "${SETTINGS_FILE}"
+    fi
+    load_settings || true
+    if ! apply_managed_rules; then
+        error "自动回滚未能完整应用，请从 ${LAST_BACKUP_DIR} 手动恢复。"
+    fi
+    rm -f "${old_settings}"
+    return 1
+}
+
+show_forward_mode() {
+    load_settings || return 1
+    if [[ ${FORWARD_MODE} == po0 ]]; then
+        echo "转发模式：Po0 优化"
+        echo "SNAT 内网地址：${PO0_SNAT_IP}"
+        echo "TCP MSS：${PO0_TCP_MSS}"
+    else
+        echo "转发模式：通用（MASQUERADE）"
+    fi
+}
+
+show_local_ipv4_candidates() {
+    local addresses
+
+    command -v ip >/dev/null 2>&1 || return 0
+    addresses=$(ip -o -4 addr show scope global 2>/dev/null |
+        awk '{sub(/\/.*/, "", $4); printf "%s%s", separator, $4; separator=", "}')
+    [[ -n ${addresses} ]] && echo "检测到的本机 IPv4：${addresses}"
+}
+
+configure_forwarding_mode() {
+    local choice snat_ip tcp_mss candidate
+
+    ensure_state_files || return 1
+    load_settings || return 1
+    echo "当前配置："
+    show_forward_mode || return 1
+    echo "-----------------------------------"
+    echo "[1] 通用模式（动态 MASQUERADE）"
+    echo "[2] Po0 优化模式（固定内网 IP SNAT + TCP MSS）"
+    echo "[00] 返回主菜单"
+    echo "-----------------------------------"
+    read -r -p "请选择：" choice
+    case ${choice} in
+        1)
+            candidate=$(mktemp "${STATE_DIR}/.settings-candidate.XXXXXX") || return 1
+            write_settings_file "${candidate}" generic "" "" || {
+                rm -f "${candidate}"
+                return 1
+            }
+            replace_settings_file "${candidate}" "已切换到通用转发模式。" || true
+            rm -f "${candidate}"
+            ;;
+        2)
+            warn "Po0 模式必须填写本机的内网 IPv4，不是公网 IPv4，也不是落地机地址。"
+            show_local_ipv4_candidates
+            read -r -p "请输入本机 Po0 内网 IPv4：" snat_ip
+            validate_target_ipv4 "${snat_ip}" || { error "内网 IPv4 无效。"; return 1; }
+            read -r -p "请输入 TCP MSS（直接回车使用 1452）：" tcp_mss
+            tcp_mss=${tcp_mss:-1452}
+            validate_mss "${tcp_mss}" || { error "TCP MSS 必须为 536-65535 的整数。"; return 1; }
+            candidate=$(mktemp "${STATE_DIR}/.settings-candidate.XXXXXX") || return 1
+            write_settings_file "${candidate}" po0 "${snat_ip}" "${tcp_mss}" || {
+                rm -f "${candidate}"
+                return 1
+            }
+            replace_settings_file "${candidate}" "已启用 Po0 优化模式。" || true
+            rm -f "${candidate}"
+            ;;
+        00) return 0 ;;
+        *) warn "输入错误。"; return 1 ;;
+    esac
 }
 
 replace_rules_file() {
@@ -461,12 +681,27 @@ source_port_conflict() {
     return 1
 }
 
+is_po0_blocked_port() {
+    local wanted_port=$1 blocked_port
+
+    for blocked_port in "${PO0_BLOCKED_PORTS[@]}"; do
+        [[ ${wanted_port} == "${blocked_port}" ]] && return 0
+    done
+    return 1
+}
+
 add_forward_rule() {
-    local mode=$1 local_port target remote_ip remote_port protocol conflict candidate
+    local mode=$1 local_port target remote_ip remote_port protocol conflict candidate confirm
     local -a protocols=()
 
+    load_settings || return 1
     read -r -p "请输入本机监听端口 (1-65535)：" local_port
     validate_port "${local_port}" || { error "本机监听端口无效。"; return 1; }
+    if [[ ${FORWARD_MODE} == po0 ]] && is_po0_blocked_port "${local_port}"; then
+        warn "Po0 默认可能限制端口 ${local_port}；请先确认该端口在服务侧可用。"
+        read -r -p "仍要继续添加吗？(y/N)：" confirm
+        [[ ${confirm} =~ ^[Yy]$ ]] || { info "已取消。"; return 0; }
+    fi
     read -r -p "请输入目标 IPv4 或域名：" target
     remote_ip=$(resolve_target "${target}") || {
         error "目标无效、无法解析，或属于不支持的本机/保留地址。"
@@ -587,8 +822,94 @@ delete_rule_menu() {
     done
 }
 
+restore_backup_configuration() {
+    local backup_dir=$1 old_rules old_settings
+    local backup_rules="${backup_dir}/rules.tsv"
+    local backup_settings="${backup_dir}/settings.conf"
+    local had_old_settings=no
+
+    validate_rules_file "${backup_rules}" || return 1
+    if [[ -f ${backup_settings} ]]; then
+        validate_settings_file "${backup_settings}" || return 1
+    fi
+    old_rules=$(mktemp "${STATE_DIR}/.old-rules.XXXXXX") || return 1
+    old_settings=$(mktemp "${STATE_DIR}/.old-settings.XXXXXX") || {
+        rm -f "${old_rules}"
+        return 1
+    }
+    if ! cp -a "${RULES_FILE}" "${old_rules}"; then
+        rm -f "${old_rules}" "${old_settings}"
+        return 1
+    fi
+    if [[ -f ${SETTINGS_FILE} ]]; then
+        if ! cp -a "${SETTINGS_FILE}" "${old_settings}"; then
+            rm -f "${old_rules}" "${old_settings}"
+            return 1
+        fi
+        had_old_settings=yes
+    fi
+    if ! backup_configuration auto-before-restore; then
+        error "自动备份失败，已取消恢复。"
+        rm -f "${old_rules}" "${old_settings}"
+        return 1
+    fi
+    if ! install -m 600 "${backup_rules}" "${RULES_FILE}"; then
+        error "无法恢复规则文件。"
+        rm -f "${old_rules}" "${old_settings}"
+        return 1
+    fi
+    if [[ -f ${backup_settings} ]]; then
+        install -m 600 "${backup_settings}" "${SETTINGS_FILE}" || {
+            error "无法恢复模式设置，正在回滚。"
+            install -m 600 "${old_rules}" "${RULES_FILE}" || true
+            if [[ ${had_old_settings} == yes ]]; then
+                install -m 600 "${old_settings}" "${SETTINGS_FILE}" || true
+            else
+                rm -f "${SETTINGS_FILE}"
+            fi
+            rm -f "${old_rules}" "${old_settings}"
+            return 1
+        }
+    elif ! write_settings_file "${SETTINGS_FILE}" generic "" "" ||
+        ! chmod 600 "${SETTINGS_FILE}"; then
+        error "无法恢复模式设置，正在回滚。"
+        install -m 600 "${old_rules}" "${RULES_FILE}" || true
+        if [[ ${had_old_settings} == yes ]]; then
+            install -m 600 "${old_settings}" "${SETTINGS_FILE}" || true
+        else
+            rm -f "${SETTINGS_FILE}"
+        fi
+        rm -f "${old_rules}" "${old_settings}"
+        return 1
+    fi
+    if apply_managed_rules; then
+        info "已恢复备份：$(basename "${backup_dir}")"
+        info "恢复前备份：${LAST_BACKUP_DIR}"
+        rm -f "${old_rules}" "${old_settings}"
+        return 0
+    fi
+
+    error "恢复备份失败，正在恢复操作前配置。"
+    install -m 600 "${old_rules}" "${RULES_FILE}" || {
+        error "无法恢复操作前的规则文件，请从 ${LAST_BACKUP_DIR} 手动恢复。"
+        rm -f "${old_rules}" "${old_settings}"
+        return 1
+    }
+    if [[ ${had_old_settings} == yes ]]; then
+        install -m 600 "${old_settings}" "${SETTINGS_FILE}" || true
+    else
+        rm -f "${SETTINGS_FILE}"
+    fi
+    load_settings || true
+    if ! apply_managed_rules; then
+        error "自动回滚未能完整应用，请从 ${LAST_BACKUP_DIR} 手动恢复。"
+    fi
+    rm -f "${old_rules}" "${old_settings}"
+    return 1
+}
+
 restore_backup_menu() {
-    local choice choice_value candidate
+    local choice choice_value selected_backup
     local -a backups=()
     local index
 
@@ -617,10 +938,8 @@ restore_backup_menu() {
         error "备份编号无效。"
         return 1
     fi
-    candidate="${backups[$((choice_value - 1))]}/rules.tsv"
-    validate_rules_file "${candidate}" || return 1
-    replace_rules_file "${candidate}" \
-        "已恢复备份：$(basename "${backups[$((choice_value - 1))]}")"
+    selected_backup=${backups[$((choice_value - 1))]}
+    restore_backup_configuration "${selected_backup}"
 }
 
 clear_all_rules() {
@@ -648,6 +967,9 @@ reload_rules() {
 
 show_status() {
     echo -e "${CYAN}nftables 转发状态：${NC}"
+    if ! show_forward_mode; then
+        error "无法读取转发模式设置。"
+    fi
     if command -v nft >/dev/null 2>&1; then
         nft --version
     else
@@ -687,6 +1009,7 @@ main_menu() {
         echo "7. 备份转发配置"
         echo "8. 恢复转发配置"
         echo "9. 清空全部转发规则"
+        echo "10. 转发模式设置（通用/Po0）"
         echo "00. 退出脚本"
         echo -e "${BLUE}====================================================${NC}"
         read -r -p "请输入选项：" choice
@@ -700,6 +1023,7 @@ main_menu() {
             7) manual_backup; pause_menu ;;
             8) restore_backup_menu || true; pause_menu ;;
             9) clear_all_rules; pause_menu ;;
+            10) clear_screen; configure_forwarding_mode || true; pause_menu ;;
             00) return 0 ;;
             *) warn "请输入正确的选项。"; pause_menu ;;
         esac
@@ -710,6 +1034,7 @@ main() {
     require_supported_system
     ensure_state_files
     validate_rules_file "${RULES_FILE}" || exit 1
+    load_settings || exit 1
     main_menu
 }
 
