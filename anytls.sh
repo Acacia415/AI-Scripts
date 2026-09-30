@@ -663,7 +663,10 @@ set_config(){
 ========================================
  ${Green_font_prefix}5.${Font_color_suffix}  修改 全部配置" && echo
 	read -e -p "(默认：取消)：" modify
-	[[ -z "${modify}" ]] && echo "已取消..." && exit 1
+	if [[ -z "${modify}" ]]; then
+		echo "已取消..."
+		return 0
+	fi
 	if [[ "${modify}" == "1" ]]; then
 		read_config || return 1
 		set_port

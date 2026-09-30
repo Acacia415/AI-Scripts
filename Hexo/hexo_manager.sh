@@ -2534,7 +2534,8 @@ configure_caddy() {
         if [[ ! "$gen_static" =~ ^[Nn]$ ]]; then
             generate_static
         else
-            return 1
+            print_info "已取消 Caddy 配置，未生成静态文件"
+            return 0
         fi
     fi
 
@@ -2808,7 +2809,8 @@ configure_nginx() {
         if [[ ! "$gen_static" =~ ^[Nn]$ ]]; then
             generate_static
         else
-            return 1
+            print_info "已取消 Nginx 配置，未生成静态文件"
+            return 0
         fi
     fi
     
