@@ -11,6 +11,7 @@ source "$REPO_ROOT/tool.sh"
 SNELL_URL='https://raw.githubusercontent.com/xOS/Snell/master/Snell.sh'
 SS_URL='https://raw.githubusercontent.com/xOS/Shadowsocks-Rust/master/ss-rust.sh'
 HY_URL='https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/hysteria.sh'
+ACME_URL='https://raw.githubusercontent.com/Acacia415/acme-script/refs/heads/main/acme.sh'
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
@@ -43,6 +44,11 @@ cat > "$TEST_ROOT/snell.sh" <<'EOF'
 #!/bin/bash
 checkRoot() { [[ ${TEST_ROOT_FAILURE:-0} != 1 ]] || exit 1; }
 installSnell() { exit 1; }
+setConfig(){
+    modify=${1:-}
+    [[ -z "${modify}" ]] && echo "已取消..." && exit 1
+    installSnell
+}
 startMenu(){
     checkRoot
     num=$2
@@ -50,6 +56,7 @@ startMenu(){
         case "$num" in
             0) printf 'update-script\n' ;;
             1) installSnell ;;
+            config) setConfig "${3:-}" ;;
             42) exit 42 ;;
             130) exit 130 ;;
             00) exit 1 ;;
@@ -88,6 +95,8 @@ check_run 42 "$SNELL_URL" update 42
 check_run 130 "$SNELL_URL" update 130
 TEST_ROOT_FAILURE=1 check_run 1 "$SNELL_URL" update 00
 check_run 1 "$SNELL_URL" other 00
+check_run 0 "$SNELL_URL" update config
+check_run 1 "$SNELL_URL" update config 1
 # 同名菜单在其他下载地址中不适配。
 check_run 1 'https://example.invalid/Snell.sh' new 00
 
@@ -95,6 +104,11 @@ cat > "$TEST_ROOT/ss.sh" <<'EOF'
 #!/bin/bash
 check_root() { [[ ${TEST_ROOT_FAILURE:-0} != 1 ]] || exit 1; }
 install() { exit 1; }
+set_config(){
+    modify=${1:-}
+    [[ -z "${modify}" ]] && echo "已取消..." && exit 1
+    install
+}
 shadowtls_menu(){
     check_root
     stls_num=$1
@@ -111,6 +125,7 @@ start_menu(){
     check_root
     num=$1
     case "$num" in
+        config) set_config "${2:-}" ;;
         1)
             install
             ;;
@@ -119,7 +134,7 @@ start_menu(){
             ;;
     esac
 }
-if [[ $1 == shadowtls ]]; then shadowtls_menu "$2"; else start_menu "$2"; fi
+if [[ $1 == shadowtls ]]; then shadowtls_menu "$2"; else start_menu "$2" "${3:-}"; fi
 EOF
 
 FIXTURE="$TEST_ROOT/ss.sh"
@@ -128,10 +143,17 @@ for mode in main shadowtls; do
     check_run 1 "$SS_URL" "$mode" 1
     TEST_ROOT_FAILURE=1 check_run 1 "$SS_URL" "$mode" 00
 done
+check_run 0 "$SS_URL" main config
+check_run 1 "$SS_URL" main config 1
 
 cat > "$TEST_ROOT/hy.sh" <<'EOF'
 #!/bin/bash
 insthysteria() { exit 1; }
+cancel_domain() {
+    red "将退出脚本"
+    exit 1
+}
+red() { :; }
 hysteriaswitch(){
     case $menuInput in
         * ) exit 1 ;;
@@ -141,6 +163,7 @@ menu() {
     menuInput=$1
     case $menuInput in
         1 ) insthysteria ;;
+        2 ) cancel_domain ;;
         3 ) hysteriaswitch ;;
         * ) exit 1 ;;
     esac
@@ -151,13 +174,51 @@ EOF
 FIXTURE="$TEST_ROOT/hy.sh"
 check_run 0 "$HY_URL" 0
 for choice in 1 3 bad; do check_run 1 "$HY_URL" "$choice"; done
+check_run 0 "$HY_URL" 2
+
+cat > "$TEST_ROOT/acme.sh" <<'EOF'
+#!/bin/bash
+check_80(){
+    yn=$1
+    if [[ $yn =~ "Y"|"y" ]]; then
+        echo terminate-process
+    else
+        exit 1
+    fi
+}
+inst_acme() { exit 1; }
+cancel_domain() {
+    red "将退出脚本"
+    exit 1
+}
+red() { :; }
+menu() {
+    menuInput=$1
+    case "$menuInput" in
+        1 ) inst_acme ;;
+        3 ) check_80 "${2:-n}"; inst_acme ;;
+        4 ) cancel_domain ;;
+        * ) exit 1 ;;
+    esac
+}
+menu "$@"
+EOF
+FIXTURE="$TEST_ROOT/acme.sh"
+check_run 0 "$ACME_URL" 0
+check_run 0 "$ACME_URL" 3 n
+if grep -q terminate-process "$TEST_ROOT/output"; then fail '取消后仍然结束占用端口的进程'; fi
+check_run 1 "$ACME_URL" 3 y
+check_run 1 "$ACME_URL" 1
+check_run 0 "$ACME_URL" 4
+check_run 1 "$ACME_URL" bad
 
 # 兼容处理可重复应用；上游已修复的 exit 0 不产生重复分支。
-for profile in snell ss hy; do
+for profile in snell ss hy acme; do
     case "$profile" in
         snell) url=$SNELL_URL ;;
         ss) url=$SS_URL ;;
         hy) url=$HY_URL ;;
+        acme) url=$ACME_URL ;;
     esac
     cp "$TEST_ROOT/$profile.sh" "$TEST_ROOT/once.sh"
     normalize_remote_menu_exit "$url" "$TEST_ROOT/once.sh" '幂等测试'
@@ -200,11 +261,12 @@ printf 'PASS: remote menu exit compatibility tests\n'
 # 可选联网检查：只运行从上游提取的 case 语句，并固定选择退出项。
 # 不 source/执行完整上游脚本，也不调用其安装、系统检测或网络操作。
 if [[ ${1:-} == --upstream ]]; then
-    for profile in snell ss hy; do
+    for profile in snell ss hy acme; do
         case "$profile" in
             snell) url=$SNELL_URL; expected_cases=3 ;;
             ss) url=$SS_URL; expected_cases=2 ;;
             hy) url=$HY_URL; expected_cases=1 ;;
+            acme) url=$ACME_URL; expected_cases=1 ;;
         esac
         original="$TEST_ROOT/live-$profile-original.sh"
         normalized="$TEST_ROOT/live-$profile-normalized.sh"
@@ -224,8 +286,8 @@ if [[ ${1:-} == --upstream ]]; then
                     key = compact($0)
                     if (profile == "snell" && key == "startMenu(){") menu = 1
                     if (profile == "ss" && (key == "start_menu(){" || key == "shadowtls_menu(){")) menu = 1
-                    if (profile == "hy" && key == "menu(){") menu = 1
-                    if (menu && (key == "case\"$num\"in" || key == "case\"$stls_num\"in" || key == "case$menuInputin")) {
+                    if ((profile == "hy" || profile == "acme") && key == "menu(){") menu = 1
+                    if (menu && (key == "case\"$num\"in" || key == "case\"$stls_num\"in" || key == "case$menuInputin" || key == "case\"$menuInput\"in")) {
                         active = 1
                         count++
                         file = base count ".sh"

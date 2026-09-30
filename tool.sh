@@ -74,6 +74,7 @@ normalize_remote_menu_exit() {
         https://raw.githubusercontent.com/xOS/Snell/master/Snell.sh) profile=snell ;;
         https://raw.githubusercontent.com/xOS/Shadowsocks-Rust/master/ss-rust.sh) profile=ss_rust ;;
         https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/hysteria.sh) profile=hysteria2 ;;
+        https://raw.githubusercontent.com/Acacia415/acme-script/refs/heads/main/acme.sh) profile=acme ;;
         *) return 0 ;;
     esac
 
@@ -87,11 +88,33 @@ normalize_remote_menu_exit() {
             if (profile == "snell" && key == "startMenu(){") menu = "snell"
             if (profile == "ss_rust" && key == "start_menu(){") menu = "ss"
             if (profile == "ss_rust" && key == "shadowtls_menu(){") menu = "stls"
-            if (profile == "hysteria2" && key == "menu(){") menu = "hy"
+            if ((profile == "hysteria2" || profile == "acme") && key == "menu(){") menu = "hy"
+            if (profile == "snell" && key == "setConfig(){" ||
+                profile == "ss_rust" && key == "set_config(){") config = 1
+            if (profile == "acme" && key == "check_80(){") port_check = 1
+
+            # 默认回车取消配置仍终止上游脚本，但不报告安装失败。
+            if (config && (key == "[[-z\"${modify}\"]]&&echo\"已取消...\"&&exit1" ||
+                           key == "[[-z\"${modify}\"]]&&echo\"已取消...\"&&exit0")) {
+                sub(/exit[ \t]+1[ \t]*$/, "exit 0")
+                cancel_seen++
+            }
+            # acme 明确拒绝结束占用 80 端口的进程：退出整份脚本，不能继续申请。
+            if (port_check && key == "if[[$yn=~\"Y\"|\"y\"]];then") port_decision = 1
+            if (port_check && port_decision && previous == "else" && key ~ /^exit[01]$/) {
+                sub(/exit[ \t]+1/, "exit 0")
+                port_cancel_seen++
+            }
+            # 用户在域名未解析时明确选择“不强制继续，退出脚本”。
+            if ((profile == "hysteria2" || profile == "acme") &&
+                previous == "red\"将退出脚本\"" && key ~ /^exit[01]$/) {
+                sub(/exit[ \t]+1/, "exit 0")
+                domain_cancel_seen++
+            }
 
             if ((menu == "snell" || menu == "ss") && key == "case\"$num\"in" ||
                 menu == "stls" && key == "case\"$stls_num\"in" ||
-                menu == "hy" && key == "case$menuInputin") {
+                menu == "hy" && (key == "case$menuInputin" || key == "case\"$menuInput\"in")) {
                 active = 1
                 zero_seen = 0
             }
@@ -121,13 +144,17 @@ normalize_remote_menu_exit() {
             }
             print
             if (key == "esac") active = 0
-            if ($0 ~ /^}[ \t]*$/) { menu = ""; active = 0 }
+            if ($0 ~ /^}[ \t]*$/) { menu = ""; active = 0; config = 0; port_check = 0; port_decision = 0 }
+            previous = key
         }
         END {
             if (invalid ||
                 profile == "snell" && seen["snell"] != 3 ||
                 profile == "ss_rust" && (seen["ss"] != 1 || seen["stls"] != 1) ||
-                profile == "hysteria2" && seen["hy"] != 1) exit 10
+                (profile == "snell" || profile == "ss_rust") && cancel_seen > 1 ||
+                (profile == "hysteria2" || profile == "acme") && seen["hy"] != 1 ||
+                (profile == "hysteria2" || profile == "acme") && domain_cancel_seen > 1 ||
+                profile == "acme" && port_cancel_seen > 1) exit 10
         }
     ' "$script_path" > "$candidate" || status=$?
 
