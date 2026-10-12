@@ -226,9 +226,8 @@ installation_dependency(){
 		apt-get update || return 1
 		apt-get install jq gzip wget curl unzip -y || return 1
 	fi
-	if [[ -e /usr/share/zoneinfo/Asia/Shanghai ]]; then
-		\cp -f /usr/share/zoneinfo/Asia/Shanghai /etc/localtime || return 1
-	fi
+	# AnyTLS 不依赖特定系统时区，安装依赖时保留用户现有时区。
+	return 0
 }
 
 # ================ 配置相关函数 ================
