@@ -69,12 +69,13 @@ download_shell_script() {
 
 normalize_remote_menu_exit() {
     local url=$1 script_path=$2 label=$3 profile candidate status=0
-    # 仅适配这些上游的已知菜单；仍每次下载最新版，不忽略真正的 exit 1。
+    # 仅适配这些上游的已知退出分支；仍每次下载最新版，不忽略真正的 exit 1。
     case "$url" in
         https://raw.githubusercontent.com/xOS/Snell/master/Snell.sh) profile=snell ;;
         https://raw.githubusercontent.com/xOS/Shadowsocks-Rust/master/ss-rust.sh) profile=ss_rust ;;
         https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/hysteria.sh) profile=hysteria2 ;;
         https://raw.githubusercontent.com/Acacia415/acme-script/refs/heads/main/acme.sh) profile=acme ;;
+        https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh) profile=ipquality ;;
         *) return 0 ;;
     esac
 
@@ -83,8 +84,44 @@ normalize_remote_menu_exit() {
     # 数量/结构不符时弃用整个候选文件，继续运行未改动的上游脚本。
     awk -v profile="$profile" '
         function compact(line) { gsub(/[ \t]/, "", line); return line }
+        BEGIN {
+            ipv4_tail = "[[$IPV4work-ne0&&$IPV4check-ne0]]&&check_IP\"$IPV4\"4"
+            ipv6_tail = "[[$IPV6work-ne0&&$IPV6check-ne0]]&&check_IP\"$IPV6\"6"
+        }
         {
             key = compact($0)
+            if (profile == "ipquality") {
+                if (key != "") { penultimate = last; last = key }
+                if (key == "install_packages(){") packages = 1
+                if (packages && key == "read-p\"$prompt\"choice") {
+                    print "read -r -p \"${prompt}(Enter = yes) \" choice || exit 1"
+                    print "[[ -n \"$choice\" ]] || choice=y"
+                    package_prompt_seen++
+                    next
+                }
+                # 仅改写已知的脚本末尾；未检测 IPv6 不应成为检测结果。
+                # check_IP 的真正失败仍立即退出，无可用地址也仍返回失败。
+                if (key == ipv4_tail || key == ipv6_tail) {
+                    if (key == ipv4_tail) {
+                        print "_ai_scripts_ipquality_checked=0"
+                        print "if [[ $IPV4work -ne 0 && $IPV4check -ne 0 ]]; then"
+                        ipv4_seen++
+                    } else {
+                        print "if [[ $IPV6work -ne 0 && $IPV6check -ne 0 ]]; then"
+                        ipv6_seen++
+                    }
+                    family = (key == ipv4_tail ? "4" : "6")
+                    print "    check_IP \"$IPV" family "\" " family " || exit \"$?\""
+                    print "    _ai_scripts_ipquality_checked=1"
+                    print "fi"
+                    if (key == ipv6_tail) {
+                        print "if (( _ai_scripts_ipquality_checked == 0 )); then exit 1; fi"
+                        print "exit 0"
+                    }
+                    next
+                }
+                if ($0 ~ /^}[ \t]*$/) packages = 0
+            }
             if (profile == "snell" && key == "startMenu(){") menu = "snell"
             if (profile == "ss_rust" && key == "start_menu(){") menu = "ss"
             if (profile == "ss_rust" && key == "shadowtls_menu(){") menu = "stls"
@@ -149,6 +186,8 @@ normalize_remote_menu_exit() {
         }
         END {
             if (invalid ||
+                profile == "ipquality" && (package_prompt_seen != 1 || ipv4_seen != 1 || ipv6_seen != 1 ||
+                                          penultimate != ipv4_tail || last != ipv6_tail) ||
                 profile == "snell" && seen["snell"] != 3 ||
                 profile == "ss_rust" && (seen["ss"] != 1 || seen["stls"] != 1) ||
                 (profile == "snell" || profile == "ss_rust") && cancel_seen > 1 ||
@@ -173,9 +212,8 @@ normalize_remote_menu_exit() {
 run_remote_script() {
     local url=$1
     local label=$2
-    local script_path status=0 accepted_status="${RUN_REMOTE_ACCEPT_STATUS:-0}"
+    local script_path status=0
     shift 2
-    [[ "$accepted_status" =~ ^[0-9]+$ ]] || accepted_status=0
 
     script_path=$(download_shell_script "$url" "$label") || return 1
     if ! normalize_remote_menu_exit "$url" "$script_path" "$label"; then
@@ -185,11 +223,9 @@ run_remote_script() {
     /bin/bash "$script_path" "$@" || status=$?
     rm -f -- "$script_path"
 
-    if (( status != 0 && status != accepted_status )); then
+    if (( status != 0 )); then
         echo -e "${RED}${label}执行失败（退出码：${status}）。${NC}" >&2
         return "$status"
-    elif (( status != 0 )); then
-        echo -e "${YELLOW}${label}已完成；忽略上游脚本在纯 IPv4 环境下返回的已知退出码 ${status}。${NC}"
     fi
     return 0
 }
@@ -576,7 +612,7 @@ install_media_check() {
     echo -e "${CYAN}脚本来源：ip.check.place${NC}"
     echo -e "${YELLOW}════════════════════════════════════${NC}"
     
-    if ! RUN_REMOTE_ACCEPT_STATUS=1 run_remote_script "https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh" "流媒体检测脚本"; then
+    if ! run_remote_script "https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh" "流媒体检测脚本"; then
         read -n 1 -s -r -p "按任意键返回主菜单..."
         return 1
     fi

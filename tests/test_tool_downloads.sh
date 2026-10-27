@@ -114,7 +114,7 @@ assert_file_contains "$TEST_REMOTE_RESULT" 'argument-ok'
 executed_temp=$(<"$FAKE_CURL_OUTPUT_RECORD")
 [[ ! -e $executed_temp ]] || fail '执行完成后临时脚本未清理'
 
-# 默认仍应传播非零退出码；仅明确声明的上游已知退出码可以被接受。
+# 真正的非零退出码必须传播，旧的宽泛忽略开关也不能吞掉失败。
 cat > "$TEST_ROOT/remote-exit-one.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 1
@@ -123,7 +123,9 @@ export FAKE_CURL_SOURCE="$TEST_ROOT/remote-exit-one.sh"
 if run_remote_script 'https://example.invalid/exit-one.sh' '退出码测试' >/dev/null 2>&1; then
     fail '普通远程脚本的退出码 1 被忽略'
 fi
-RUN_REMOTE_ACCEPT_STATUS=1 run_remote_script 'https://example.invalid/ipv4-only.sh' '纯 IPv4 检测测试' >/dev/null
+if RUN_REMOTE_ACCEPT_STATUS=1 run_remote_script 'https://example.invalid/ipv4-only.sh' '退出码保护测试' >/dev/null 2>&1; then
+    fail '旧的退出码忽略开关吞掉了真正的失败'
+fi
 export FAKE_CURL_SOURCE="$TEST_ROOT/remote-valid.sh"
 
 # 两次下载必须使用不同的随机临时路径。
